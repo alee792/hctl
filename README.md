@@ -40,7 +40,7 @@ Native harness capabilities remain available and unmanaged. Instructions and
 skills influence model behavior; they do not provide enforcement.
 
 See [the vision](docs/vision.md), [product specification](docs/product-spec.md),
-and [architecture decisions](docs/adr/).
+[glossary](docs/glossary.md), and [architecture decisions](docs/adr/).
 
 ## Development
 

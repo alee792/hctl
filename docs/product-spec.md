@@ -25,6 +25,17 @@ headlessly without maintaining another model loop.
 
 ## Authored project
 
+Authoring is filesystem-forward. Where the concepts match, hctl uses Eve's
+conventional vocabulary: instructions, tools, skills, channels, connections,
+sandbox, subagents, and schedules. Only the subset named below is implemented
+in the MVP.
+
+The intended authoring API is convention-driven: adding an artifact to its
+conventional directory should register it without duplicating that inventory
+in configuration. Configuration should hold only settings that the filesystem
+layout cannot express. The MVP's explicit `agent.json` source paths are a
+bootstrap format, not a commitment to a registry-first product.
+
 The MVP project contains:
 
 - a bounded `agent.json` configuration;
@@ -105,6 +116,26 @@ The managed boundary is additive. It does not disable, authorize, observe, or
 retry harness-native tools. Secret-bearing capabilities require a credential
 broker before they ship; no unused broker backend is scaffolded in the MVP.
 
+## Deferred direction: authored tools and proposals
+
+Managed tool implementations may be authored as part of the agent project and
+included in its validated source fingerprint. Scripts created ad hoc by the
+agent remain ordinary harness-native workspace activity unless they cross a
+managed boundary.
+
+Generated project instructions may encourage the harness to submit reusable
+discoveries through a future managed proposal tool. Instructions can influence
+this behavior but cannot enforce it or observe native filesystem writes.
+
+A proposal records a candidate improvement to instructions, a skill, a tool,
+or other agent feedback. It does not modify active authored source or a running
+projection. Human review and explicit acceptance are required before the
+change joins the agent project and is reapplied.
+
+Proposal schema, storage, review UX, conflict handling, sensitive-content
+policy, acceptance workflow, and tool-execution isolation require a dedicated
+product and security spike. They are outside the MVP and are not scaffolded.
+
 ## Failure and safety behavior
 
 - Missing, stale, ambiguous, or edited projections fail closed.
@@ -139,3 +170,4 @@ The MVP is complete when credential-free tests prove:
 - Scheduling, workflows, subagents, or deployment orchestration
 - Governance claims over native harness tools
 - Credential storage before a secret-bearing capability exists
+- Automatic or unreviewed promotion of agent-authored improvements

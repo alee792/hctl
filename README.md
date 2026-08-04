@@ -45,9 +45,14 @@ and [architecture decisions](docs/adr/).
 ## Development
 
 ```sh
-go test ./...
-go vet ./...
+./scripts/bootstrap-tools.sh
+export PATH="$PWD/.tools/go/bin:$PWD/.tools/bin:$PATH"
+./scripts/check.sh
 ```
 
-The implementation uses the Go standard library. Tests use credential-free
-fake harness processes; live model calls are not part of the default suite.
+The bootstrap installs a pinned Go toolchain, `gopls`, `golangci-lint`,
+`goimports`, and `govulncheck` under the ignored `.tools/` directory. Launch
+your editor from the configured shell to make the repository-local `gopls`
+available. The implementation uses the Go standard library. Tests use
+credential-free fake harness processes; live model calls are not part of the
+default suite.

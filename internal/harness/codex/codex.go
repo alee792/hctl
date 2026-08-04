@@ -43,7 +43,7 @@ func (d *Driver) Open(ctx context.Context, root, resumeID string) (harness.Sessi
 	result, _, err := client.request(1, "initialize", map[string]any{"clientInfo": map[string]any{"name": "hctl", "title": "hctl gateway", "version": "0.1.0-dev"}})
 	if err != nil || len(result) == 0 {
 		process.Abort()
-		return nil, errors.New("Codex initialize handshake failed")
+		return nil, errors.New("codex initialize handshake failed")
 	}
 	if err := client.notify("initialized"); err != nil {
 		process.Abort()
@@ -58,7 +58,7 @@ func (d *Driver) Open(ctx context.Context, root, resumeID string) (harness.Sessi
 	threadResult, _, err := client.request(2, method, params)
 	if err != nil {
 		process.Abort()
-		return nil, errors.New("Codex thread start or resume failed")
+		return nil, errors.New("codex thread start or resume failed")
 	}
 	var response struct {
 		Thread struct {
@@ -67,11 +67,11 @@ func (d *Driver) Open(ctx context.Context, root, resumeID string) (harness.Sessi
 	}
 	if err := json.Unmarshal(threadResult, &response); err != nil || response.Thread.ID == "" {
 		process.Abort()
-		return nil, errors.New("Codex returned an invalid thread response")
+		return nil, errors.New("codex returned an invalid thread response")
 	}
 	if resumeID != "" && response.Thread.ID != resumeID {
 		process.Abort()
-		return nil, errors.New("Codex resumed an unexpected thread")
+		return nil, errors.New("codex resumed an unexpected thread")
 	}
 	return &session{process: process, client: client, sessionID: response.Thread.ID, resumed: resumeID != "", requestID: 3}, nil
 }
@@ -104,7 +104,7 @@ func (s *session) RunTurn(ctx context.Context, input harness.Input, emit func(ha
 	result, buffered, err := s.client.request(s.requestID, "turn/start", map[string]any{"threadId": s.sessionID, "input": []any{map[string]any{"type": "text", "text": input.Text}}})
 	s.requestID++
 	if err != nil {
-		return harness.TurnResult{}, errors.New("Codex turn/start failed")
+		return harness.TurnResult{}, errors.New("codex turn/start failed")
 	}
 	var response struct {
 		Turn struct {
@@ -112,7 +112,7 @@ func (s *session) RunTurn(ctx context.Context, input harness.Input, emit func(ha
 		} `json:"turn"`
 	}
 	if err := json.Unmarshal(result, &response); err != nil || response.Turn.ID == "" {
-		return harness.TurnResult{}, errors.New("Codex returned an invalid turn response")
+		return harness.TurnResult{}, errors.New("codex returned an invalid turn response")
 	}
 	turnID := response.Turn.ID
 	emit(harness.Event{Type: "turn.started", SessionID: s.sessionID, TurnID: turnID})
@@ -173,14 +173,14 @@ func (c *client) request(id int, method string, params any) (json.RawMessage, []
 			continue
 		}
 		if message.Error != nil {
-			return nil, pending, errors.New("Codex rejected a protocol request")
+			return nil, pending, errors.New("codex rejected a protocol request")
 		}
 		return message.Result, pending, nil
 	}
 	if err := c.process.ScanError(); err != nil {
 		return nil, nil, err
 	}
-	return nil, nil, errors.New("Codex process ended before a protocol response")
+	return nil, nil, errors.New("codex process ended before a protocol response")
 }
 
 func (c *client) notify(method string) error {
@@ -204,7 +204,7 @@ func (c *client) next() (rpcEnvelope, error) {
 	if err := c.process.ScanError(); err != nil {
 		return rpcEnvelope{}, err
 	}
-	return rpcEnvelope{}, errors.New("Codex process ended before a terminal event")
+	return rpcEnvelope{}, errors.New("codex process ended before a terminal event")
 }
 
 func (c *client) decline(message rpcEnvelope) {
@@ -220,7 +220,7 @@ func (c *client) decline(message rpcEnvelope) {
 func decodeRPC(line []byte) (rpcEnvelope, error) {
 	var message rpcEnvelope
 	if err := json.Unmarshal(line, &message); err != nil {
-		return message, errors.New("Codex emitted invalid app-server JSONL")
+		return message, errors.New("codex emitted invalid app-server JSONL")
 	}
 	return message, nil
 }

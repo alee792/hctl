@@ -57,18 +57,22 @@ func Serve(root string, input io.Reader, output, audit io.Writer) error {
 		case "tools/call":
 			result, requestID, err := callEcho(p, request.ID, request.Params, audit)
 			if err != nil {
-				fmt.Fprintf(audit, "managed agent=%s capability=echo request=%s outcome=failed\n", p.Config.Name, requestID)
+				if auditErr := writeAudit(audit, p.Config.Name, requestID, "failed"); auditErr != nil {
+					return auditErr
+				}
 				writeResult(encoder, request.ID, map[string]any{"content": []any{map[string]any{"type": "text", "text": err.Error()}}, "isError": true})
 				continue
 			}
-			fmt.Fprintf(audit, "managed agent=%s capability=echo request=%s outcome=completed\n", p.Config.Name, requestID)
+			if err := writeAudit(audit, p.Config.Name, requestID, "completed"); err != nil {
+				return err
+			}
 			writeResult(encoder, request.ID, result)
 		default:
 			writeError(encoder, request.ID, -32601, "method not found")
 		}
 	}
 	if scanner.Err() != nil {
-		return errors.New("MCP input exceeded the bounded line size")
+		return errors.New("input from MCP exceeded the bounded line size")
 	}
 	return nil
 }
@@ -76,7 +80,9 @@ func Serve(root string, input io.Reader, output, audit io.Writer) error {
 func callEcho(p *project.Project, id, params json.RawMessage, audit io.Writer) (map[string]any, string, error) {
 	requestHash := sha256.Sum256(append(append([]byte{}, id...), params...))
 	requestID := hex.EncodeToString(requestHash[:8])
-	fmt.Fprintf(audit, "managed agent=%s capability=echo request=%s outcome=requested\n", p.Config.Name, requestID)
+	if err := writeAudit(audit, p.Config.Name, requestID, "requested"); err != nil {
+		return nil, requestID, err
+	}
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -93,12 +99,21 @@ func callEcho(p *project.Project, id, params json.RawMessage, audit io.Writer) (
 	if p.Config.ManagedCapability.Name != "echo" {
 		return nil, requestID, errors.New("echo capability is not authorized")
 	}
-	fmt.Fprintf(audit, "managed agent=%s capability=echo request=%s outcome=authorized\n", p.Config.Name, requestID)
+	if err := writeAudit(audit, p.Config.Name, requestID, "authorized"); err != nil {
+		return nil, requestID, err
+	}
 	return map[string]any{
 		"content":           []any{map[string]any{"type": "text", "text": arguments.Text}},
 		"structuredContent": map[string]any{"text": arguments.Text},
 		"isError":           false,
 	}, requestID, nil
+}
+
+func writeAudit(audit io.Writer, agent, requestID, outcome string) error {
+	if _, err := fmt.Fprintf(audit, "managed agent=%s capability=echo request=%s outcome=%s\n", agent, requestID, outcome); err != nil {
+		return errors.New("cannot write managed capability audit")
+	}
+	return nil
 }
 
 func writeResult(encoder *json.Encoder, id json.RawMessage, result any) {

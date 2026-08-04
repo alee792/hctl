@@ -104,17 +104,17 @@ func WriteAtomic(root, relative string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("cannot stage file %s", relative)
 	}
 	tempName := temp.Name()
-	defer os.Remove(tempName)
+	defer func() { _ = os.Remove(tempName) }()
 	if err := temp.Chmod(mode); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return fmt.Errorf("cannot set file mode for %s", relative)
 	}
 	if _, err := temp.Write(data); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return fmt.Errorf("cannot write file %s", relative)
 	}
 	if err := temp.Sync(); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return fmt.Errorf("cannot sync file %s", relative)
 	}
 	if err := temp.Close(); err != nil {

@@ -85,14 +85,24 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(output, "applied agent=%s harness=%s fingerprint=%s\n", p.Config.Name, driver.Name(), p.Manifest.SourceFingerprint)
-	for _, path := range files {
-		fmt.Fprintln(output, "generated", path)
+	if _, err := fmt.Fprintf(output, "applied agent=%s harness=%s fingerprint=%s\n", p.Config.Name, driver.Name(), p.Manifest.SourceFingerprint); err != nil {
+		return err
 	}
-	fmt.Fprintln(output, "managed echo via MCP; native harness capabilities allowed and unmanaged")
-	fmt.Fprintf(output, "next: cd %s && %s\n", p.Root, driver.Name())
+	for _, path := range files {
+		if _, err := fmt.Fprintln(output, "generated", path); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintln(output, "managed echo via MCP; native harness capabilities allowed and unmanaged"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(output, "next: cd %s && %s\n", p.Root, driver.Name()); err != nil {
+		return err
+	}
 	if driver.Name() == "codex" {
-		fmt.Fprintln(output, "note: Codex loads project .codex configuration after you trust the project")
+		if _, err := fmt.Fprintln(output, "note: Codex loads project .codex configuration after you trust the project"); err != nil {
+			return err
+		}
 	}
 	return nil
 }

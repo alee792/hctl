@@ -28,7 +28,7 @@ behavior.
 
 ## Quality gates
 
-Run `go test ./...` and `go vet ./...` for affected work. Keep credentialed
-model calls, package publication, deployment, and external integrations
-explicitly authorized.
-
+Run `./scripts/check.sh` for affected work. It covers formatting, imports,
+tests, vet, lint, and vulnerability analysis with the pinned repository-local
+tools. Keep credentialed model calls, package publication, deployment, and
+external integrations explicitly authorized.

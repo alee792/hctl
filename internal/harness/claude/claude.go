@@ -73,12 +73,12 @@ func (s *session) RunTurn(ctx context.Context, input harness.Input, emit func(ha
 	for terminal == "" && s.process.Scan() {
 		var event map[string]any
 		if err := json.Unmarshal(s.process.Bytes(), &event); err != nil {
-			return harness.TurnResult{}, errors.New("Claude emitted invalid stream JSON")
+			return harness.TurnResult{}, errors.New("claude emitted invalid stream JSON")
 		}
 		sessionID, _ := event["session_id"].(string)
 		if sessionID != "" && !s.ready {
 			if s.sessionID != "" && s.sessionID != sessionID {
-				return harness.TurnResult{}, errors.New("Claude resumed an unexpected session")
+				return harness.TurnResult{}, errors.New("claude resumed an unexpected session")
 			}
 			s.sessionID = sessionID
 			typeName := "session.started"
@@ -116,10 +116,10 @@ func (s *session) RunTurn(ctx context.Context, input harness.Input, emit func(ha
 		if err := s.process.ScanError(); err != nil {
 			return harness.TurnResult{}, err
 		}
-		return harness.TurnResult{}, errors.New("Claude process ended before a terminal result")
+		return harness.TurnResult{}, errors.New("claude process ended before a terminal result")
 	}
 	if !s.ready || s.sessionID == "" {
-		return harness.TurnResult{}, errors.New("Claude did not provide a resumable session id")
+		return harness.TurnResult{}, errors.New("claude did not provide a resumable session id")
 	}
 	if !started {
 		emit(harness.Event{Type: "turn.started", SessionID: s.sessionID, TurnID: input.ID})

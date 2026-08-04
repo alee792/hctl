@@ -122,7 +122,7 @@ func Load(root, harness string) (*Project, error) {
 		return nil, errors.New("agent name must match [a-z][a-z0-9-]{0,62}")
 	}
 	if cfg.ManagedCapability.Name != "echo" {
-		return nil, errors.New("MVP managed_capability.name must be echo")
+		return nil, errors.New("managed_capability.name must be echo in the MVP")
 	}
 	if cfg.ManagedCapability.MaxInputBytes < 1 || cfg.ManagedCapability.MaxInputBytes > 4096 {
 		return nil, errors.New("managed_capability.max_input_bytes must be between 1 and 4096")
@@ -224,7 +224,7 @@ func Load(root, harness string) (*Project, error) {
 func parseSkill(content []byte) (string, string, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	if !scanner.Scan() || scanner.Text() != "---" {
-		return "", "", errors.New("SKILL.md must start with YAML frontmatter")
+		return "", "", errors.New("skill file must start with YAML frontmatter")
 	}
 	fields := map[string]string{}
 	closed := false

@@ -1,14 +1,15 @@
 package project
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestLoadIsDeterministicAndRejectsUnsafeSource(t *testing.T) {
-	root := agent(t)
+func TestLoadDiscoversConventionalProjectDeterministically(t *testing.T) {
+	root := agent(t, "My Agent")
 	first, err := Load(root, "claude")
 	if err != nil {
 		t.Fatal(err)
@@ -17,64 +18,106 @@ func TestLoadIsDeterministicAndRejectsUnsafeSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if first.Name != "my-agent" || first.Manifest.Agent != "my-agent" {
+		t.Fatalf("derived name = %q", first.Name)
+	}
 	if first.Manifest.SourceFingerprint != second.Manifest.SourceFingerprint {
 		t.Fatal("same source produced different fingerprints")
 	}
+	if len(first.Skills) != 1 || first.Skills[0].Path != "skills/echo.md" {
+		t.Fatalf("discovered skills = %#v", first.Skills)
+	}
 
-	outside := filepath.Join(t.TempDir(), "outside.md")
-	if err := os.WriteFile(outside, []byte("outside\n"), 0o644); err != nil {
+	write(t, filepath.Join(root, "skills", "research.md"), "---\nname: research\ndescription: Research carefully.\n---\n\nFind evidence.\n")
+	changed, err := Load(root, "claude")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(root, "instructions.md")); err != nil {
-		t.Fatal(err)
+	if changed.Manifest.SourceFingerprint == first.Manifest.SourceFingerprint {
+		t.Fatal("adding a conventional skill did not change the fingerprint")
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "instructions.md")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "symlinks") {
-		t.Fatalf("source symlink was not rejected: %v", err)
+	if len(changed.Skills) != 2 || changed.Skills[1].Name != "research" {
+		t.Fatalf("discovered skills = %#v", changed.Skills)
 	}
 }
 
-func TestLoadRejectsTraversalUnknownFieldsAndUnboundedCapability(t *testing.T) {
-	cases := []struct {
-		name   string
-		config string
-		want   string
-	}{
-		{"traversal", `{"schema_version":1,"name":"portable","instructions":"../outside.md","skills":["skills/echo/SKILL.md"],"managed_capability":{"name":"echo","max_input_bytes":10}}`, "remain inside"},
-		{"unknown", `{"schema_version":1,"name":"portable","instructions":"instructions.md","skills":["skills/echo/SKILL.md"],"managed_capability":{"name":"echo","max_input_bytes":10},"surprise":true}`, "unknown field"},
-		{"capability", `{"schema_version":1,"name":"portable","instructions":"instructions.md","skills":["skills/echo/SKILL.md"],"managed_capability":{"name":"anything","max_input_bytes":10}}`, "must be echo"},
-		{"limit", `{"schema_version":1,"name":"portable","instructions":"instructions.md","skills":["skills/echo/SKILL.md"],"managed_capability":{"name":"echo","max_input_bytes":99999}}`, "between 1 and 4096"},
+func TestLoadAllowsInstructionsWithoutSkills(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Simple Helper")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			root := agent(t)
-			if err := os.WriteFile(filepath.Join(root, "agent.json"), []byte(tc.config), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := Load(root, "codex"); err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error = %v, want %q", err, tc.want)
-			}
-		})
+	write(t, filepath.Join(root, "instructions.md"), "Help the user.\n")
+	p, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "simple-helper" || len(p.Skills) != 0 {
+		t.Fatalf("project = name %q, skills %#v", p.Name, p.Skills)
 	}
 }
 
-func agent(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "skills", "echo"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	files := map[string]string{
-		"agent.json":           `{"schema_version":1,"name":"portable","instructions":"instructions.md","skills":["skills/echo/SKILL.md"],"managed_capability":{"name":"echo","max_input_bytes":128}}`,
-		"instructions.md":      "Be concise.\n",
-		"skills/echo/SKILL.md": "---\nname: echo\ndescription: Repeat safely.\n---\n\nUse echo.\n",
-	}
-	for path, content := range files {
-		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(content), 0o644); err != nil {
+func TestLoadRejectsUnsafeOrAmbiguousSources(t *testing.T) {
+	t.Run("instruction symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		outside := filepath.Join(t.TempDir(), "outside.md")
+		write(t, outside, "outside\n")
+		if err := os.Remove(filepath.Join(root, "instructions.md")); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Symlink(outside, filepath.Join(root, "instructions.md")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "symlinks") {
+			t.Fatalf("source symlink was not rejected: %v", err)
+		}
+	})
+
+	t.Run("skill name mismatch", func(t *testing.T) {
+		root := agent(t, "portable")
+		write(t, filepath.Join(root, "skills", "echo.md"), "---\nname: other\ndescription: Wrong name.\n---\n")
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "match its filename") {
+			t.Fatalf("ambiguous skill was not rejected: %v", err)
+		}
+	})
+
+	t.Run("skill symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		outside := filepath.Join(t.TempDir(), "outside.md")
+		write(t, outside, "---\nname: linked\ndescription: Outside.\n---\n")
+		if err := os.Symlink(outside, filepath.Join(root, "skills", "linked.md")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "symlinks") {
+			t.Fatalf("skill symlink was not rejected: %v", err)
+		}
+	})
+
+	t.Run("skill limit", func(t *testing.T) {
+		root := agent(t, "portable")
+		for index := 0; index < maxSkills; index++ {
+			name := fmt.Sprintf("extra-%d", index)
+			write(t, filepath.Join(root, "skills", name+".md"), fmt.Sprintf("---\nname: %s\ndescription: Extra.\n---\n", name))
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "at most") {
+			t.Fatalf("skill limit was not enforced: %v", err)
+		}
+	})
+}
+
+func agent(t *testing.T, directory string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), directory)
+	if err := os.MkdirAll(filepath.Join(root, "skills"), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	write(t, filepath.Join(root, "instructions.md"), "Be concise.\n")
+	write(t, filepath.Join(root, "skills", "echo.md"), "---\nname: echo\ndescription: Repeat safely.\n---\n\nUse echo.\n")
 	return root
+}
+
+func write(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

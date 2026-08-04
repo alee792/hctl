@@ -85,7 +85,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(output, "applied agent=%s harness=%s fingerprint=%s\n", p.Config.Name, driver.Name(), p.Manifest.SourceFingerprint); err != nil {
+	if _, err := fmt.Fprintf(output, "applied agent=%s harness=%s fingerprint=%s\n", p.Name, driver.Name(), p.Manifest.SourceFingerprint); err != nil {
 		return err
 	}
 	for _, path := range files {

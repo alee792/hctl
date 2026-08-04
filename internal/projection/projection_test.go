@@ -75,12 +75,11 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 func testAgent(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "skills", "echo"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "skills"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	write(t, filepath.Join(root, "agent.json"), `{"schema_version":1,"name":"portable","instructions":"instructions.md","skills":["skills/echo/SKILL.md"],"managed_capability":{"name":"echo","max_input_bytes":128}}`)
 	write(t, filepath.Join(root, "instructions.md"), "Be concise.\n")
-	write(t, filepath.Join(root, "skills", "echo", "SKILL.md"), "---\nname: echo\ndescription: Repeat text safely.\n---\n\nUse echo.\n")
+	write(t, filepath.Join(root, "skills", "echo.md"), "---\nname: echo\ndescription: Repeat text safely.\n---\n\nUse echo.\n")
 	return root
 }
 

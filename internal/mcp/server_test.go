@@ -46,13 +46,12 @@ func TestManagedContract(t *testing.T) {
 func testAgent(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "skills", "echo"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "skills"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		"agent.json":           `{"schema_version":1,"name":"portable","instructions":"instructions.md","skills":["skills/echo/SKILL.md"],"managed_capability":{"name":"echo","max_input_bytes":128}}`,
-		"instructions.md":      "Be concise.\n",
-		"skills/echo/SKILL.md": "---\nname: echo\ndescription: Repeat safely.\n---\n\nUse echo.\n",
+		"instructions.md": "Be concise.\n",
+		"skills/echo.md":  "---\nname: echo\ndescription: Repeat safely.\n---\n\nUse echo.\n",
 	}
 	for path, content := range files {
 		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(content), 0o644); err != nil {

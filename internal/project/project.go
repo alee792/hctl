@@ -6,7 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -16,26 +17,14 @@ import (
 )
 
 const (
-	GeneratorVersion = "hctl/0.1.0-dev"
-	ManifestVersion  = 1
-	maxConfigBytes   = 64 << 10
-	maxSourceBytes   = 128 << 10
+	GeneratorVersion  = "hctl/0.1.0-dev"
+	ManifestVersion   = 1
+	maxSourceBytes    = 128 << 10
+	maxSkills         = 8
+	echoMaxInputBytes = 1024
 )
 
 var portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-
-type Config struct {
-	SchemaVersion     int               `json:"schema_version"`
-	Name              string            `json:"name"`
-	Instructions      string            `json:"instructions"`
-	Skills            []string          `json:"skills"`
-	ManagedCapability ManagedCapability `json:"managed_capability"`
-}
-
-type ManagedCapability struct {
-	Name          string `json:"name"`
-	MaxInputBytes int    `json:"max_input_bytes"`
-}
 
 type Skill struct {
 	Name        string
@@ -89,11 +78,12 @@ type Manifest struct {
 }
 
 type Project struct {
-	Root         string
-	Config       Config
-	Instructions []byte
-	Skills       []Skill
-	Manifest     Manifest
+	Root            string
+	Name            string
+	Instructions    []byte
+	Skills          []Skill
+	MaxManagedInput int
+	Manifest        Manifest
 }
 
 func Load(root, harness string) (*Project, error) {
@@ -104,37 +94,8 @@ func Load(root, harness string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	configBytes, err := rootfs.ReadSource(root, "agent.json", maxConfigBytes)
-	if err != nil {
-		return nil, err
-	}
-	if !utf8.Valid(configBytes) {
-		return nil, errors.New("agent.json must be valid UTF-8")
-	}
-	var cfg Config
-	if err := decodeStrict(configBytes, &cfg); err != nil {
-		return nil, fmt.Errorf("agent.json is invalid: %w", err)
-	}
-	if cfg.SchemaVersion != 1 {
-		return nil, errors.New("agent.json schema_version must be 1")
-	}
-	if !portableName.MatchString(cfg.Name) {
-		return nil, errors.New("agent name must match [a-z][a-z0-9-]{0,62}")
-	}
-	if cfg.ManagedCapability.Name != "echo" {
-		return nil, errors.New("managed_capability.name must be echo in the MVP")
-	}
-	if cfg.ManagedCapability.MaxInputBytes < 1 || cfg.ManagedCapability.MaxInputBytes > 4096 {
-		return nil, errors.New("managed_capability.max_input_bytes must be between 1 and 4096")
-	}
-	if len(cfg.Skills) == 0 || len(cfg.Skills) > 8 {
-		return nil, errors.New("agent must declare between 1 and 8 portable skills")
-	}
-
-	instructionPath, err := rootfs.CleanRelative(cfg.Instructions)
-	if err != nil {
-		return nil, fmt.Errorf("instructions: %w", err)
-	}
+	name := nameFromRoot(root)
+	instructionPath := "instructions.md"
 	instructions, err := rootfs.ReadSource(root, instructionPath, maxSourceBytes)
 	if err != nil {
 		return nil, fmt.Errorf("instructions: %w", err)
@@ -146,43 +107,20 @@ func Load(root, harness string) (*Project, error) {
 		return nil, errors.New("instructions file must be valid UTF-8")
 	}
 
-	skills := make([]Skill, 0, len(cfg.Skills))
-	seenNames := map[string]bool{}
-	seenPaths := map[string]bool{}
-	for _, path := range cfg.Skills {
-		path, err = rootfs.CleanRelative(path)
-		if err != nil {
-			return nil, fmt.Errorf("skill path: %w", err)
-		}
-		if seenPaths[path] {
-			return nil, fmt.Errorf("duplicate skill path %q", path)
-		}
-		seenPaths[path] = true
-		content, err := rootfs.ReadSource(root, path, maxSourceBytes)
-		if err != nil {
-			return nil, fmt.Errorf("skill %q: %w", path, err)
-		}
-		if !utf8.Valid(content) {
-			return nil, fmt.Errorf("skill %q must be valid UTF-8", path)
-		}
-		name, description, err := parseSkill(content)
-		if err != nil {
-			return nil, fmt.Errorf("skill %q: %w", path, err)
-		}
-		if seenNames[name] {
-			return nil, fmt.Errorf("duplicate skill name %q", name)
-		}
-		seenNames[name] = true
-		skills = append(skills, Skill{Name: name, Description: description, Path: path, Content: content})
+	skills, err := loadSkills(root)
+	if err != nil {
+		return nil, err
 	}
-	sort.Slice(skills, func(i, j int) bool { return skills[i].Name < skills[j].Name })
 
-	sources := []SourceRecord{{Path: "agent.json", SHA256: rootfs.SHA256(configBytes)}, {Path: instructionPath, SHA256: rootfs.SHA256(instructions)}}
+	sources := []SourceRecord{{Path: instructionPath, SHA256: rootfs.SHA256(instructions)}}
 	for _, skill := range skills {
 		sources = append(sources, SourceRecord{Path: skill.Path, SHA256: rootfs.SHA256(skill.Content)})
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].Path < sources[j].Path })
-	canonicalSources, _ := json.Marshal(sources)
+	canonicalSources, _ := json.Marshal(struct {
+		Agent   string         `json:"agent"`
+		Sources []SourceRecord `json:"sources"`
+	}{Agent: name, Sources: sources})
 	fingerprint := rootfs.SHA256(canonicalSources)
 
 	driver := ManifestDriver{Executable: harness}
@@ -201,24 +139,100 @@ func Load(root, harness string) (*Project, error) {
 	}
 
 	return &Project{
-		Root:         root,
-		Config:       cfg,
-		Instructions: instructions,
-		Skills:       skills,
+		Root:            root,
+		Name:            name,
+		Instructions:    instructions,
+		Skills:          skills,
+		MaxManagedInput: echoMaxInputBytes,
 		Manifest: Manifest{
 			SchemaVersion:     ManifestVersion,
 			Generator:         GeneratorVersion,
-			Agent:             cfg.Name,
+			Agent:             name,
 			Harness:           harness,
 			SourceFingerprint: fingerprint,
 			Sources:           sources,
 			Instructions:      SourceRecord{Path: instructionPath, SHA256: rootfs.SHA256(instructions)},
 			Skills:            manifestSkills,
-			Managed:           []ManifestManaged{{Name: "echo", Transport: "stdio-mcp", Enforcement: "managed", MaxInput: cfg.ManagedCapability.MaxInputBytes}},
+			Managed:           []ManifestManaged{{Name: "echo", Transport: "stdio-mcp", Enforcement: "managed", MaxInput: echoMaxInputBytes}},
 			Native:            ManifestNative{Posture: "allowed", Governance: "unmanaged"},
 			Driver:            driver,
 		},
 	}, nil
+}
+
+func loadSkills(root string) ([]Skill, error) {
+	directory := filepath.Join(root, "skills")
+	info, err := os.Lstat(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return []Skill{}, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("skills must be a real directory")
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, errors.New("cannot read skills directory")
+	}
+	skills := make([]Skill, 0, len(entries))
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if !strings.HasSuffix(entry.Name(), ".md") {
+			return nil, fmt.Errorf("skills may contain Markdown files only; found %q", entry.Name())
+		}
+		if len(skills) == maxSkills {
+			return nil, fmt.Errorf("agent may contain at most %d skills", maxSkills)
+		}
+		name := strings.TrimSuffix(entry.Name(), ".md")
+		if !portableName.MatchString(name) {
+			return nil, fmt.Errorf("skill filename %q must use lowercase letters, numbers, and hyphens", entry.Name())
+		}
+		path := "skills/" + entry.Name()
+		content, err := rootfs.ReadSource(root, path, maxSourceBytes)
+		if err != nil {
+			return nil, fmt.Errorf("skill %q: %w", path, err)
+		}
+		if !utf8.Valid(content) {
+			return nil, fmt.Errorf("skill %q must be valid UTF-8", path)
+		}
+		declaredName, description, err := parseSkill(content)
+		if err != nil {
+			return nil, fmt.Errorf("skill %q: %w", path, err)
+		}
+		if declaredName != name {
+			return nil, fmt.Errorf("skill %q name must match its filename", path)
+		}
+		skills = append(skills, Skill{Name: name, Description: description, Path: path, Content: content})
+	}
+	return skills, nil
+}
+
+func nameFromRoot(root string) string {
+	var name strings.Builder
+	separator := false
+	for _, character := range strings.ToLower(filepath.Base(root)) {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			if separator && name.Len() > 0 {
+				name.WriteByte('-')
+			}
+			name.WriteRune(character)
+			separator = false
+		} else {
+			separator = true
+		}
+	}
+	result := strings.Trim(name.String(), "-")
+	if result == "" {
+		return "agent"
+	}
+	if result[0] >= '0' && result[0] <= '9' {
+		result = "agent-" + result
+	}
+	if len(result) > 63 {
+		result = strings.TrimRight(result[:63], "-")
+	}
+	return result
 }
 
 func parseSkill(content []byte) (string, string, error) {
@@ -245,17 +259,4 @@ func parseSkill(content []byte) (string, string, error) {
 		return "", "", errors.New("frontmatter requires a portable name and non-empty description")
 	}
 	return fields["name"], fields["description"], nil
-}
-
-func decodeStrict(data []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return errors.New("multiple JSON values are not allowed")
-	}
-	return nil
 }

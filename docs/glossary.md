@@ -7,7 +7,7 @@ bootstrap and managed boundary.
 | Term | Meaning |
 | --- | --- |
 | Agent project | The authored filesystem source of truth for one agent. |
-| Project configuration | Bounded settings that the conventional filesystem layout cannot express. The MVP temporarily uses it to select source files; it is not the runtime manifest. |
+| Project configuration | Optional settings that the conventional filesystem layout cannot express. The MVP does not require a configuration file. |
 | Instructions | Always-on authored guidance projected into the native harness. |
 | Skill | Reusable instructions and supporting files loaded when relevant. A skill is not itself a callable tool. |
 | Tool | A model-callable capability with a declared input and output contract. |

@@ -7,10 +7,11 @@
 
 ## User and job
 
-The primary user is a product engineer building an agent that may eventually
-serve end users through channels. They define one filesystem-authored project,
-prove it interactively in Claude Code or Codex, and operate the same setup
-headlessly without maintaining another model loop.
+The primary user is an agent author who understands basic files and directories
+and common AI concepts such as instructions, skills, and tools. They should not
+need to understand registration, manifests, or harness configuration. They
+define one filesystem-authored project, prove it interactively in Claude Code
+or Codex, and may operate the same setup headlessly through channels.
 
 ## Product principles
 
@@ -22,6 +23,8 @@ headlessly without maintaining another model loop.
 6. Policy applies only at managed capability and durable-state boundaries.
 7. Interactive users remain in the native harness interface.
 8. Unsupported behavior fails honestly instead of being silently emulated.
+9. Conventional files register behavior without a second inventory.
+10. Author-facing language stays concrete; runtime terminology remains internal.
 
 ## Authored project
 
@@ -30,22 +33,25 @@ conventional vocabulary: instructions, tools, skills, channels, connections,
 sandbox, subagents, and schedules. Only the subset named below is implemented
 in the MVP.
 
-The intended authoring API is convention-driven: adding an artifact to its
-conventional directory should register it without duplicating that inventory
-in configuration. Configuration should hold only settings that the filesystem
-layout cannot express. The MVP's explicit `agent.json` source paths are a
-bootstrap format, not a commitment to a registry-first product.
+The authoring API is convention-driven. An MVP project is:
 
-The MVP project contains:
+```text
+my-agent/
+  instructions.md
+  skills/
+    research.md
+```
 
-- a bounded `agent.json` configuration;
-- one instruction document;
-- one or more portable `SKILL.md` files; and
-- the bounded `echo` managed capability used to prove the shared boundary.
+The directory name supplies the agent name, normalized to lowercase words with
+hyphens. `instructions.md` is required. The `skills/` directory is optional;
+each visible Markdown file in it is one skill and its frontmatter name must
+match its filename. Adding or removing a skill file updates the compiled
+project without separate registration.
 
-Source paths must be normalized relative paths inside the project. Source
-files must be regular UTF-8 files without symlink traversal. Compilation
-produces a deterministic manifest and source fingerprint.
+Authored source files must be regular, bounded UTF-8 files without symlink
+traversal. Compilation produces a deterministic runtime manifest and source
+fingerprint. The bounded `echo` managed tool remains an hctl-provided MVP
+default used to prove the shared boundary; it is not author configuration.
 
 ## Apply and handoff
 

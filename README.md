@@ -9,6 +9,22 @@ into native Claude Code and Codex setups without replacing their model loops or
 interfaces. For headless use, add a session-aware gateway that connects
 external input and governs only what crosses its managed boundary.
 
+## Agent project
+
+An agent is an ordinary directory. It needs only an `instructions.md` file;
+optional skills are Markdown files discovered from `skills/`:
+
+```text
+my-agent/
+  instructions.md
+  skills/
+    research.md
+```
+
+The directory name becomes the agent name, normalized to lowercase words with
+hyphens. Adding a skill file makes it available on the next `hctl apply`; there
+is no registration file to update. See the [minimal example](examples/minimal).
+
 ## Current journey
 
 ```sh

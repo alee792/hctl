@@ -49,7 +49,7 @@ func Serve(root string, input io.Reader, output, audit io.Writer) error {
 			tool := map[string]any{
 				"name":         "echo",
 				"description":  "Return bounded text through the managed boundary.",
-				"inputSchema":  map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"text": map[string]any{"type": "string", "maxLength": p.Config.ManagedCapability.MaxInputBytes}}, "required": []string{"text"}},
+				"inputSchema":  map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"text": map[string]any{"type": "string", "maxLength": p.MaxManagedInput}}, "required": []string{"text"}},
 				"outputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"text": map[string]any{"type": "string"}}, "required": []string{"text"}},
 				"annotations":  map[string]any{"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
 			}
@@ -57,13 +57,13 @@ func Serve(root string, input io.Reader, output, audit io.Writer) error {
 		case "tools/call":
 			result, requestID, err := callEcho(p, request.ID, request.Params, audit)
 			if err != nil {
-				if auditErr := writeAudit(audit, p.Config.Name, requestID, "failed"); auditErr != nil {
+				if auditErr := writeAudit(audit, p.Name, requestID, "failed"); auditErr != nil {
 					return auditErr
 				}
 				writeResult(encoder, request.ID, map[string]any{"content": []any{map[string]any{"type": "text", "text": err.Error()}}, "isError": true})
 				continue
 			}
-			if err := writeAudit(audit, p.Config.Name, requestID, "completed"); err != nil {
+			if err := writeAudit(audit, p.Name, requestID, "completed"); err != nil {
 				return err
 			}
 			writeResult(encoder, request.ID, result)
@@ -80,7 +80,7 @@ func Serve(root string, input io.Reader, output, audit io.Writer) error {
 func callEcho(p *project.Project, id, params json.RawMessage, audit io.Writer) (map[string]any, string, error) {
 	requestHash := sha256.Sum256(append(append([]byte{}, id...), params...))
 	requestID := hex.EncodeToString(requestHash[:8])
-	if err := writeAudit(audit, p.Config.Name, requestID, "requested"); err != nil {
+	if err := writeAudit(audit, p.Name, requestID, "requested"); err != nil {
 		return nil, requestID, err
 	}
 	var call struct {
@@ -93,13 +93,10 @@ func callEcho(p *project.Project, id, params json.RawMessage, audit io.Writer) (
 	var arguments struct {
 		Text string `json:"text"`
 	}
-	if err := decodeStrict(call.Arguments, &arguments); err != nil || arguments.Text == "" || !utf8.ValidString(arguments.Text) || len([]byte(arguments.Text)) > p.Config.ManagedCapability.MaxInputBytes {
+	if err := decodeStrict(call.Arguments, &arguments); err != nil || arguments.Text == "" || !utf8.ValidString(arguments.Text) || len([]byte(arguments.Text)) > p.MaxManagedInput {
 		return nil, requestID, errors.New("echo text must be non-empty and within the configured byte limit")
 	}
-	if p.Config.ManagedCapability.Name != "echo" {
-		return nil, requestID, errors.New("echo capability is not authorized")
-	}
-	if err := writeAudit(audit, p.Config.Name, requestID, "authorized"); err != nil {
+	if err := writeAudit(audit, p.Name, requestID, "authorized"); err != nil {
 		return nil, requestID, err
 	}
 	return map[string]any{

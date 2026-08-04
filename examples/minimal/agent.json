@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "portable-echo",
+  "instructions": "instructions.md",
+  "skills": [
+    "skills/echo/SKILL.md"
+  ],
+  "managed_capability": {
+    "name": "echo",
+    "max_input_bytes": 1024
+  }
+}
+

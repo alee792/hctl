@@ -1,0 +1,226 @@
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"hctl/internal/harness"
+	"hctl/internal/project"
+	"hctl/internal/session"
+)
+
+func TestAcceptsAndDeduplicatesInputDuringActiveTurn(t *testing.T) {
+	p := testProject(t)
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	driver := &fakeDriver{started: started, release: release}
+	reader, writer := io.Pipe()
+	lines := newLineOutput()
+	done := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { done <- Run(ctx, p, driver, "thread-a", reader, lines) }()
+
+	writeJSON(t, writer, map[string]string{"input_id": "message-1", "text": "first"})
+	if got := <-started; got != "message-1" {
+		t.Fatalf("first active input = %s", got)
+	}
+	writeJSON(t, writer, map[string]string{"input_id": "message-2", "text": "second"})
+	writeJSON(t, writer, map[string]string{"input_id": "message-1", "text": "first"})
+
+	waitForType(t, lines.events, "input.accepted", "message-2")
+	waitForType(t, lines.events, "input.duplicate", "message-1")
+	close(release)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(driver.inputs, []string{"message-1", "message-2"}) {
+		t.Fatalf("turn order = %v", driver.inputs)
+	}
+	events := lines.all()
+	acceptedSecond := eventIndex(events, "input.accepted", "message-2")
+	completedFirst := eventIndex(events, "turn.completed", "message-1")
+	if acceptedSecond < 0 || completedFirst < 0 || acceptedSecond > completedFirst {
+		t.Fatalf("second input was not accepted during the active first turn: %#v", events)
+	}
+	state, err := session.Load(p.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := state.Conversations["claude:thread-a"]
+	if conversation == nil || len(conversation.Queue) != 0 || conversation.Outcomes["message-1"] != "completed" || conversation.Outcomes["message-2"] != "completed" {
+		t.Fatalf("durable state = %#v", conversation)
+	}
+}
+
+func TestRecoversActiveInputAsUncertain(t *testing.T) {
+	p := testProject(t)
+	state, err := session.Load(p.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := state.GetOrCreate("claude", "thread-a", p.Manifest.SourceFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := conversation.Accept("message-1", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conversation.StartNext(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Save(p.Root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := newLineOutput()
+	if err := Run(context.Background(), p, &fakeDriver{}, "thread-a", strings.NewReader(""), lines); err != nil {
+		t.Fatal(err)
+	}
+	events := lines.all()
+	if eventIndex(events, "turn.uncertain", "message-1") < 0 {
+		t.Fatalf("missing uncertain recovery event: %#v", events)
+	}
+}
+
+type fakeDriver struct {
+	started chan string
+	release chan struct{}
+	inputs  []string
+	mu      sync.Mutex
+}
+
+func (d *fakeDriver) Name() string                 { return "claude" }
+func (d *fakeDriver) Executable() string           { return "/fake/claude" }
+func (d *fakeDriver) Verify(context.Context) error { return nil }
+func (d *fakeDriver) Open(context.Context, string, string) (harness.Session, error) {
+	return &fakeSession{driver: d}, nil
+}
+
+type fakeSession struct{ driver *fakeDriver }
+
+func (s *fakeSession) InitialEvents() []harness.Event {
+	return []harness.Event{{Type: "driver.ready", SessionID: "session-1"}, {Type: "session.started", SessionID: "session-1"}}
+}
+func (s *fakeSession) RunTurn(_ context.Context, input harness.Input, emit func(harness.Event)) (harness.TurnResult, error) {
+	s.driver.mu.Lock()
+	s.driver.inputs = append(s.driver.inputs, input.ID)
+	index := len(s.driver.inputs)
+	s.driver.mu.Unlock()
+	emit(harness.Event{Type: "turn.started", SessionID: "session-1", TurnID: input.ID})
+	if s.driver.started != nil {
+		s.driver.started <- input.ID
+	}
+	if index == 1 && s.driver.release != nil {
+		<-s.driver.release
+	}
+	emit(harness.Event{Type: "agent.output.delta", SessionID: "session-1", TurnID: input.ID, Delta: "ok"})
+	return harness.TurnResult{SessionID: "session-1", TurnID: input.ID, Status: "completed"}, nil
+}
+func (s *fakeSession) Close() error { return nil }
+func (s *fakeSession) Abort()       {}
+
+type lineOutput struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+	events chan Event
+	allEv  []Event
+}
+
+func newLineOutput() *lineOutput { return &lineOutput{events: make(chan Event, 64)} }
+
+func (w *lineOutput) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	original := len(data)
+	_, _ = w.buffer.Write(data)
+	for {
+		line, err := w.buffer.ReadString('\n')
+		if err != nil {
+			if len(line) > 0 {
+				_, _ = w.buffer.WriteString(line)
+			}
+			break
+		}
+		var event Event
+		if json.Unmarshal([]byte(line), &event) == nil {
+			w.allEv = append(w.allEv, event)
+			w.events <- event
+		}
+	}
+	return original, nil
+}
+
+func (w *lineOutput) all() []Event {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]Event{}, w.allEv...)
+}
+
+func writeJSON(t *testing.T, writer io.Writer, value any) {
+	t.Helper()
+	if err := json.NewEncoder(writer).Encode(value); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForType(t *testing.T, events <-chan Event, typeName, inputID string) {
+	t.Helper()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case event := <-events:
+			if event.Type == typeName && event.InputID == inputID {
+				return
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s %s", typeName, inputID)
+		}
+	}
+}
+
+func eventIndex(events []Event, typeName, inputID string) int {
+	for index, event := range events {
+		if event.Type == typeName && event.InputID == inputID {
+			return index
+		}
+	}
+	return -1
+}
+
+func testProject(t *testing.T) *project.Project {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "skills", "echo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"agent.json":           `{"schema_version":1,"name":"portable","instructions":"instructions.md","skills":["skills/echo/SKILL.md"],"managed_capability":{"name":"echo","max_input_bytes":128}}`,
+		"instructions.md":      "Be concise.\n",
+		"skills/echo/SKILL.md": "---\nname: echo\ndescription: Repeat safely.\n---\n\nUse echo.\n",
+	}
+	for path, content := range files {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, err := project.Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}

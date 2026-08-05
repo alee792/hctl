@@ -42,6 +42,18 @@ The credential-free polyglot proof now clears `PATH` before starting each
 generated MCP command, preserving an automated regression check for the first
 defect. Unit and setup tests cover the other generated contracts.
 
+## Setup skill forward test
+
+A fresh Codex session discovered and followed the portable `setup-agent`
+skill, resolved an external agent source and workspace, and produced the exact
+`hctl apply` command. Codex's ordinary workspace sandbox denied writes to the
+generated `.agents` and `.codex` paths and hctl left no partial setup. Running
+the same command directly then generated a valid Codex workspace.
+
+The skill therefore requests native one-command permission when the harness
+offers it and otherwise hands the exact command to the user's terminal. It
+does not weaken sandbox settings or work around protected harness files.
+
 ## Unrelated host noise
 
 The installed Codex version reported an available 0.146.1 update, stale model
@@ -52,3 +64,53 @@ managed boundary.
 
 This is intentionally a manual live check because it consumes model usage and
 depends on user authentication. The default suite remains credential-free.
+
+## Rerun procedure
+
+Use this opt-in smoke test when Codex changes or hctl's Codex integration
+changes materially. It deliberately leaves authentication and first-use
+workspace trust to the user; neither belongs in hctl or the default test suite.
+
+From the hctl repository:
+
+```sh
+./scripts/bootstrap-tools.sh
+export PATH="$PWD/.tools/go/bin:$PWD/.tools/bin:$PATH"
+
+hctl_repo="$PWD"
+accept_workspace="$(mktemp -d /tmp/hctl-codex-live.XXXXXX)"
+git -C "$accept_workspace" init
+
+go build -o "$accept_workspace/hctl" ./cmd/hctl
+"$accept_workspace/hctl" apply "$hctl_repo/agents/maintainer" \
+  --workspace "$accept_workspace" \
+  --harness codex \
+  --command "$(command -v codex)"
+```
+
+Open Codex in `accept_workspace` once and accept its native repository trust
+prompt. Exit without doing the test in that interactive session. Then run:
+
+```sh
+cd "$accept_workspace"
+
+codex exec --json --sandbox read-only \
+  --output-last-message codex-acceptance.md \
+  'Perform the hctl live acceptance without editing the workspace. Report the first heading from the project instructions. List the hctl-provided skills and load product-review. Confirm whether the managed MCP server is enabled and required. Call echo with exactly codex-live-acceptance. Call decision-index, docs-check, and quality-check once each. Spawn docs_reviewer and ask it to state its role. Return a concise checklist including every error.' \
+  | tee codex-acceptance.jsonl
+
+codex exec resume --last --json \
+  'Without calling a tool, repeat the exact value previously sent to echo.' \
+  | tee codex-resume.jsonl
+```
+
+The first run passes when it produces the evidence in the table above. The
+second passes when it returns `codex-live-acceptance` without another tool
+call. Keep the JSONL files when diagnosing a harness change; otherwise discard
+the disposable workspace and remove its Codex trust entry if Codex retains
+one.
+
+This procedure is reproducible but intentionally not a stable CI assertion:
+model choice, event wording, authentication, trust, and model usage remain
+Codex-owned. Every deterministic contract and every defect previously found by
+this smoke test must also have a credential-free regression test in hctl.

@@ -1,11 +1,10 @@
 # Tool authoring workbench
 
-- Status: working design notes; not an accepted ADR
+- Status: implemented MVP plus open follow-up questions; see ADR 0004
 - Scope: convention-based TypeScript, Python, and Go tools exposed through MCP
 
-This document preserves current intent and the questions that still require a
-prototype. It should be updated as the design is tested so chat history is not
-the source of truth.
+This document preserves current intent, implementation evidence, and open
+questions so chat history is not the source of truth.
 
 ## Settled requirements
 
@@ -54,10 +53,10 @@ my-agent/
       tool.go
 ```
 
-Language-native dependency files and lockfiles may also be present. Their exact
-placement and the Go package layout remain spike questions; the nested Go
-example is only one candidate. The stable part is that file discovery replaces
-hctl registration. Removing a tool file removes the tool on the next apply.
+Language-native dependency files and lockfiles sit at the project root. The Go
+directory shown is the current convention: one package directory per tool with
+a required `tool.go`. File discovery replaces hctl registration. Removing a
+tool file removes the tool on the next apply.
 
 Each language contract must yield the same runtime facts:
 
@@ -67,7 +66,9 @@ Each language contract must yield the same runtime facts:
 - bounded input schema;
 - bounded output schema;
 - callable implementation; and
-- execution context carrying cancellation, deadline, and safe request identity.
+- execution context carrying a safe request identity. The current deadline
+  boundary terminates the language host rather than cancelling one call
+  gracefully.
 
 Language-specific metadata should live beside the function in code, not in a
 separate project manifest.
@@ -87,7 +88,7 @@ validates, and registers the definition without invoking the handler.
 These precedents support one product model with language-specific adapters;
 they do not require the three source APIs to have identical syntax.
 
-## Proposed runtime shape
+## Runtime shape
 
 ```text
 TypeScript tool functions --\
@@ -105,50 +106,60 @@ MCP is therefore the interoperability boundary, not the authoring API. An
 author may still provide a complete external MCP server as a connection, but
 that is a different path from writing a local tool function.
 
-## Candidate language shapes
+## Current language shapes
 
-These examples are design probes, not committed APIs.
+These structural contracts are implemented for the experimental MVP. A future
+helper package may reduce repetition without changing filesystem discovery.
 
-TypeScript can follow Eve closely with `defineTool`, Zod or another Standard
-Schema implementation, and an async `execute` function:
+TypeScript default-exports an object using Zod schemas:
 
 ```ts
-export default defineTool({
+export default {
   description: "Return weather for a city.",
-  input: z.object({ city: z.string().min(1) }),
-  output: z.object({ condition: z.string() }),
-  async execute({ city }, context) {
-    return { condition: await lookup(city, context.signal) };
+  inputSchema: z.object({ city: z.string().min(1) }).strict(),
+  outputSchema: z.object({ condition: z.string() }).strict(),
+  async execute({ city }) {
+    return { condition: await lookup(city) };
   },
-});
+};
 ```
 
-Python can reuse Roster's proven Pydantic contract, potentially with a smaller
-decorator surface:
+Python exports a description, Pydantic models, and a sync or async function:
 
 ```py
-@tool
-async def lookup_weather(
-    args: WeatherInput,
-    context: ToolContext,
-) -> WeatherOutput:
+description = "Return weather for a city."
+
+class Input(BaseModel):
+    city: str
+
+class Output(BaseModel):
+    condition: str
+
+async def execute(args: Input, context: dict[str, object]) -> Output:
     ...
 ```
 
-Go cannot import source dynamically. The likely shape is a typed exported
-value or function that hctl discovers at build time, then links into a
-generated project-local host:
+Go exports ordinary types and a function that generated registration glue
+links into the cached host:
 
 ```go
-var Tool = hctl.Tool[WeatherInput, WeatherOutput]{
-    Description: "Return weather for a city.",
-    Run: lookupWeather,
+const Description = "Return weather for a city."
+
+type Input struct {
+    City string `json:"city" jsonschema:"minLength=1"`
+}
+
+type Output struct {
+    Condition string `json:"condition"`
+}
+
+func Execute(ctx context.Context, input Input) (Output, error) {
+    ...
 }
 ```
 
-Go is the part that most needs a spike. The design should prefer ordinary Go
-packages and generated build glue over runtime plugins, which are
-platform-constrained and difficult to distribute safely.
+Go host-only dependencies generate and validate JSON Schema; authored Go
+packages do not import hctl.
 
 ## Apply and package behavior
 
@@ -184,14 +195,16 @@ The intended lifecycle is:
 
 1. Discover visible source files under `tools/` by convention.
 2. Select the language adapter from the file extension.
-3. Start each required adapter in inspection mode. It loads module definitions
+3. Prepare locked dependencies with native tooling and compile a cached Go host
+   only when Go tools are present.
+4. Start each required adapter in inspection mode. It loads module definitions
    and reports schemas without invoking a tool function.
-4. Prepare locked dependencies with native tooling, then validate schemas,
-   duplicate names, and the source fingerprint across all languages.
-5. Compile and cache a Go host only when Go tools are present.
+5. Validate schemas, duplicate names, and the source fingerprint across all
+   languages.
 6. Generate the native harness files and their apply record.
-7. Configure the harness to start `hctl mcp serve AGENT` when the session needs
-   its tool catalog.
+7. Configure the harness to start
+   `hctl mcp serve AGENT --harness TARGET` when the session needs its tool
+   catalog.
 8. Verify the source fingerprint, start the required long-lived language hosts,
    combine their catalogs in memory, and dispatch calls until the session ends.
 
@@ -205,54 +218,45 @@ sandbox or malicious-code-containment claim.
 harness setup must be immediately usable. A future `package` command may
 produce a relocatable artifact from the same conventions and adapters.
 
-hctl keeps only generated ownership and fingerprint state under `.hctl/` so it
-can detect a stale or hand-edited harness setup. That state is implementation
-output, never an authored tool inventory.
+hctl keeps generated ownership, fingerprint state, and disposable tool-host
+cache output under `.hctl/`. That state is implementation output, never an
+authored tool inventory.
 
-## Spike questions
+## Remaining questions
 
-1. What is the smallest exact source contract for each language while keeping
-   input and output validation equally strong?
-2. Can TypeScript use Eve-compatible `defineTool` and Standard Schema directly,
-   or should hctl own a narrower package?
-3. Should Python require Pydantic models, infer from annotated parameters, or
-   support both while compiling to one strict schema?
-4. What Go directory/package convention lets multiple tools and local imports
-   compile without an hctl registry file?
-5. Which native dependency files and commands are used for each language, and
-   how are locked/offline failures reported?
-6. Does one host per language provide sufficient crash isolation, or is an
+1. Should a helper package wrap the structural TypeScript, Python, or Go
+   contracts after real author feedback?
+2. How should richer local imports and nested supporting files affect the
+   source fingerprint without capturing an unrelated application tree?
+3. Does one host per language provide sufficient crash isolation, or is an
    optional stronger isolation mode needed later?
-7. How are logs, stdout, cancellation, timeouts, and oversized results kept
-   from corrupting the MCP stream?
-8. Which artifacts should `apply` cache, and which must `package` rebuild for
+4. What graceful cancellation, restart, concurrency, and log-routing behavior
+   is worth adding beyond the current bounded serial process contract?
+5. Which artifacts must a future `package` command rebuild for
    portability?
 
 ## First spike result
 
-The executable proof in `spikes/polyglot-tools/` answers enough of the process
-question to proceed without accepting the candidate source APIs yet.
+The executable proof in `spikes/polyglot-tools/` now runs through production
+apply, generated Claude and Codex MCP configurations, and production hosts.
 
 | Concern | Evidence from the spike |
 | --- | --- |
 | TypeScript | A direct `tools/*.ts` default export using Zod can report JSON Schema and validate both sides of an async call. `deno check --frozen` verifies the host and tool without executing the handler. |
 | Python | A direct `tools/*.py` module with `description`, Pydantic `Input` and `Output` models, and `execute` can be loaded by a generic host. `uv sync --locked` and `uv run --locked` provide the prepared environment. |
 | Go | One package directory per tool works with `Description`, `Input`, `Output`, and `Execute`. Minimal generated registration glue imports each package and builds a cached host from a disposable Go module. |
-| Go schemas | Go has no single Zod-equivalent incumbent. The spike keeps schema-generation and validation libraries in the generated host module; authored tools use ordinary structs and JSON Schema tags. This choice needs API review before promotion. |
-| Runtime | One JSONL process per language served inspection and repeated calls without restarting. Stdout stayed protocol-only and stderr carried process diagnostics. |
+| Go schemas | Go has no single Zod-equivalent incumbent. Schema-generation and validation libraries stay in the generated host module; authored tools use ordinary structs and JSON Schema tags. |
+| Runtime | One JSONL process per language served inspection and repeated calls without restarting. Stdout stayed protocol-only, and process exits surfaced bounded diagnostics without forwarding raw stderr to the model. |
 | Validation | The combined catalog rejected cross-language duplicates. The hosts rejected invalid definitions, inputs, and outputs. The supervisor detected process loss and terminated a host whose call exceeded its deadline. |
 | Generated state | Deno and Python keep their native lockfiles. Go host source, module metadata, sums, and binary are reproducible cache output keyed by tool source and host-template content. No normalized tool inventory is written. |
 
-The deadline proof currently terminates the whole language host. Graceful
-per-call cancellation, restart policy, concurrent calls, log routing, and
-bounded output still require production design. The spike also stops one layer
-short of hctl's MCP server and fake harnesses; promotion must prove that literal
-end-to-end path before authored tools are called shipped behavior.
+The deadline proof terminates the whole language host. Graceful per-call
+cancellation, restart policy, concurrent calls, and richer log routing remain
+deliberate limits rather than shipped claims.
 
 ## MVP proof
 
-The completed process spike proves discovery, schemas, persistent calls, and
-the listed failure classes short of graceful cancellation. The next proof is
-to expose the same catalog through hctl's MCP server, call it from fake Claude
-and Codex harnesses, and define bounded output, concurrency, cancellation, and
-restart behavior without expanding into channels or proposals.
+The completed proof covers discovery, native locked preparation, apply for both
+harnesses, generated MCP configuration, schemas, persistent calls, audit
+redaction, and definition, duplicate, input, output, process, and timeout
+failures. It intentionally does not expand into channels or proposals.

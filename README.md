@@ -19,11 +19,19 @@ my-agent/
   instructions.md
   skills/
     research.md
+  tools/
+    repeat.ts
+    add.py
+    hash_text/
+      tool.go
 ```
 
 The directory name becomes the agent name, normalized to lowercase words with
 hyphens. Adding a skill file makes it available on the next `hctl apply`; there
-is no registration file to update. See the [minimal example](examples/minimal).
+is no registration file to update. TypeScript, Python, and Go tool functions
+under `tools/` are exposed through the same managed MCP server. See the
+[minimal example](examples/minimal) and the
+[mixed-language example](spikes/polyglot-tools/fixture).
 
 ## Current journey
 
@@ -65,11 +73,15 @@ and [architecture decisions](docs/adr/).
 ./scripts/bootstrap-tools.sh
 export PATH="$PWD/.tools/go/bin:$PWD/.tools/bin:$PATH"
 ./scripts/check.sh
+# With Deno and uv installed:
+./spikes/polyglot-tools/check.sh
 ```
 
 The bootstrap installs a pinned Go toolchain, `gopls`, `golangci-lint`,
 `goimports`, and `govulncheck` under the ignored `.tools/` directory. Launch
 your editor from the configured shell to make the repository-local `gopls`
-available. The implementation uses the Go standard library. Tests use
-credential-free fake harness processes; live model calls are not part of the
-default suite.
+available. Applying authored tools also requires their native tooling on
+`PATH`: Deno for TypeScript, `uv` for Python, and Go for Go tools. The
+implementation uses the Go standard library; language-specific schema
+libraries remain inside tool hosts. Tests use credential-free fake harness
+processes; live model calls are not part of the default suite.

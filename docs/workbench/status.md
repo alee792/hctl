@@ -13,9 +13,9 @@
 4. Read the [tool-authoring workbench](tool-authoring.md) before designing or
    implementing authored tools.
 
-The product specification is the current contract. Workbench documents record
-settled requirements, candidate designs, implementation drift, and open spikes;
-candidate APIs in them are not accepted contracts.
+The product specification and accepted ADRs are the current contract.
+Workbench documents record settled requirements, implementation evidence, and
+open follow-up questions.
 
 ## Shipped prototype
 
@@ -25,7 +25,8 @@ The repository contains a standard-library Go CLI that:
   files without overwriting hand-authored files;
 - keeps one apply record, migrates legacy projection records, and removes the
   obsolete duplicated runtime manifest;
-- exposes one bounded `echo` tool through stdio MCP;
+- discovers, prepares, validates, and exposes TypeScript, Python, and Go tool
+  functions beside the bounded built-in `echo` tool through stdio MCP;
 - drives local Claude Code and Codex processes headlessly through fake-tested
   bidirectional protocols;
 - maps conversations to resumable harness sessions, queues input FIFO,
@@ -34,8 +35,9 @@ The repository contains a standard-library Go CLI that:
 - passes the repository-local formatting, test, vet, lint, and vulnerability
   checks through `./scripts/check.sh`.
 
-This proves the original MVP seam. Conventionally authored TypeScript, Python,
-and Go tools are design direction, not shipped behavior.
+The credential-free polyglot check applies one mixed project for fake Claude
+and Codex harnesses, launches the MCP command from each generated setup, and
+proves persistent hosts plus bounded failure behavior.
 
 ## Settled direction
 
@@ -56,9 +58,9 @@ and Go tools are design direction, not shipped behavior.
 - TypeScript and Python source should be loaded by generic long-lived hosts.
   Go requires minimal generated build glue and a compiled host cached by source
   fingerprint. No normalized tool manifest is persisted.
-- `apply` generates only the native harness files and one internal apply record
-  needed for safe ownership and stale-source checks. Runtime caches are
-  disposable and stay out of the authored project.
+- The project-visible harness setup contains only native harness files and one
+  internal apply record needed for safe ownership and stale-source checks.
+  Runtime caches are disposable and stay outside authored source.
 - Agent-proposed improvements are human-reviewed proposals. They never mutate
   active authored files automatically.
 - A credential broker is required before the first secret-bearing managed tool
@@ -90,20 +92,13 @@ These are later product promises, not MVP implementation work:
 - Slack, webhooks, OAuth, network listeners, vendor delivery, scheduling,
   deployment integrations, and a hosted SDK remain outside the current MVP.
 
-## Known implementation drift
-
-- The MCP server still contains only the built-in `echo` tool. It does not yet
-  discover `tools/` or supervise language hosts.
-
-This drift is known prototype debt, not a competing product decision.
-
 ## Open questions
 
 The authored-tool questions are enumerated in the
-[tool-authoring workbench](tool-authoring.md#spike-questions). The main unresolved
-areas are whether the spike's source shapes should become the supported API,
-graceful cancellation and host restart behavior, cache ownership, MCP
-integration, and packaging.
+[tool-authoring workbench](tool-authoring.md#remaining-questions). The main unresolved
+areas are whether a future helper package should wrap the intentionally small
+structural source APIs, graceful per-call cancellation and host restart,
+concurrent calls, richer local imports, cache cleanup, and packaging.
 
 Product naming, the concrete credential-broker backend, proposal storage and
 review UX, and specific vendor channel adapters are also intentionally
@@ -111,10 +106,8 @@ unresolved. Do not infer answers from the current prototype.
 
 ## Current design frontier
 
-The first authored-tool process spike now lives in
-`spikes/polyglot-tools/`. It discovers and calls one tool in each language with
-locked native dependencies and persistent hosts, and proves definition,
-duplicate, validation, process, and timeout failures. The next bounded step is
-to promote the stable host mechanics behind hctl's existing MCP server and
-exercise that server through the fake Claude and Codex harnesses. Keep vendor
-channels and proposal execution out of that work.
+The authored-tool journey is now implemented and exercised through generated
+Claude and Codex MCP configurations. The next product decision is whether to
+polish this provisional authoring API or return to another vision item such as
+proposal capture, credential brokering, or broader non-MCP filesystem setup.
+Do not add channels merely to exercise the gateway seam.

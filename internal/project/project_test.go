@@ -41,6 +41,26 @@ func TestLoadDiscoversConventionalProjectDeterministically(t *testing.T) {
 	}
 }
 
+func TestToolSourceChangesFingerprint(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "instructions.md"), "Be concise.\n")
+	write(t, filepath.Join(root, "tools", "add.py"), "description = 'add'\n")
+	write(t, filepath.Join(root, "pyproject.toml"), "[project]\nname = 'agent'\nversion = '0'\n")
+	write(t, filepath.Join(root, "uv.lock"), "version = 1\n")
+	first, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(root, "tools", "add.py"), "description = 'changed'\n")
+	second, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SourceFingerprint == second.SourceFingerprint {
+		t.Fatal("tool source change did not change the fingerprint")
+	}
+}
+
 func TestLoadAllowsInstructionsWithoutSkills(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "Simple Helper")
 	if err := os.Mkdir(root, 0o755); err != nil {
@@ -117,6 +137,9 @@ func agent(t *testing.T, directory string) string {
 
 func write(t *testing.T, path, content string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

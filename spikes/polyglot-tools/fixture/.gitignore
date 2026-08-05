@@ -1,0 +1,10 @@
+/.hctl/
+/.venv/
+/.claude/
+/.agents/
+/.codex/
+/CLAUDE.md
+/AGENTS.md
+/.mcp.json
+__pycache__/
+*.pyc

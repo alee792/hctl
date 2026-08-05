@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"hctl/internal/gateway"
@@ -17,12 +18,13 @@ import (
 	"hctl/internal/mcp"
 	"hctl/internal/project"
 	"hctl/internal/setup"
+	"hctl/internal/tool"
 )
 
 const help = `Usage: hctl <command> [arguments]
 
 Commands:
-  apply AGENT --harness <claude|codex>    Generate and validate native files
+  apply AGENT --harness <claude|codex>    Prepare tools and native files
   gateway AGENT --harness <claude|codex>  Run a headless JSONL gateway
 
 Run "hctl <command> --help" for command details.
@@ -39,13 +41,26 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 	case "gateway":
 		return runGateway(args[1:], input, output, stderr)
 	case "mcp":
-		if len(args) != 3 || args[1] != "serve" {
-			return errors.New("usage: hctl mcp serve AGENT")
-		}
-		return mcp.Serve(args[2], input, output, stderr)
+		return runMCP(args[1:], input, output, stderr)
 	default:
 		return fmt.Errorf("unknown command %q; expected apply or gateway", args[0])
 	}
+}
+
+func runMCP(args []string, input io.Reader, output, stderr io.Writer) error {
+	if len(args) < 2 || args[0] != "serve" {
+		return errors.New("usage: hctl mcp serve AGENT --harness <claude|codex>")
+	}
+	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	harnessName := fs.String("harness", "", "target harness")
+	if err := fs.Parse(args[2:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || (*harnessName != "claude" && *harnessName != "codex") {
+		return errors.New("usage: hctl mcp serve AGENT --harness <claude|codex>")
+	}
+	return mcp.Serve(args[1], *harnessName, input, output, stderr)
 }
 
 func runApply(args []string, output, stderr io.Writer, self string) error {
@@ -77,6 +92,11 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if err := driver.Verify(context.Background()); err != nil {
 		return err
 	}
+	prepareContext, cancelPrepare := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancelPrepare()
+	if err := tool.Prepare(prepareContext, p.Root, p.SourceFingerprint, p.Tools); err != nil {
+		return err
+	}
 	self, err = resolvedSelf(self)
 	if err != nil {
 		return err
@@ -93,7 +113,11 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 			return err
 		}
 	}
-	if _, err := fmt.Fprintln(output, "managed echo via MCP; native harness tools allowed and unmanaged"); err != nil {
+	toolNames := []string{"echo"}
+	for _, source := range p.Tools.Sources {
+		toolNames = append(toolNames, source.Name)
+	}
+	if _, err := fmt.Fprintf(output, "managed tools=%s via MCP; native harness tools allowed and unmanaged\n", strings.Join(toolNames, ",")); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(output, "next: cd %s && %s\n", p.Root, driver.Name()); err != nil {

@@ -7,10 +7,24 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"hctl/internal/project"
+	"hctl/internal/setup"
 )
 
 func TestManagedContract(t *testing.T) {
 	root := testAgent(t)
+	p, err := project.Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.Apply(p, self); err != nil {
+		t.Fatal(err)
+	}
 	input := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
@@ -19,7 +33,7 @@ func TestManagedContract(t *testing.T) {
 		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"text":""}}}`,
 	}, "\n") + "\n"
 	var output, audit bytes.Buffer
-	if err := Serve(root, strings.NewReader(input), &output, &audit); err != nil {
+	if err := Serve(root, "claude", strings.NewReader(input), &output, &audit); err != nil {
 		t.Fatal(err)
 	}
 	responses := decodeLines(t, output.String())

@@ -15,30 +15,51 @@ type Request = {
   params?: { name?: string; arguments?: unknown };
 };
 
+function isStrictObject(schema: z.ZodType | undefined): boolean {
+  const definition = (schema as unknown as {
+    def?: { type?: string; catchall?: { def?: { type?: string } } };
+  })?.def;
+  return definition?.type === "object" &&
+    definition.catchall?.def?.type === "never";
+}
+
 const root = Deno.args[0];
 if (!root) throw new Error("project root is required");
 
 const tools = new Map<string, Tool>();
-for (const entry of Deno.readDirSync(join(root, "tools"))) {
-  if (
-    !entry.isFile || extname(entry.name) !== ".ts" || entry.name.startsWith("_")
-  ) continue;
-  const name = basename(entry.name, ".ts").replaceAll("_", "-");
-  const module = await import(
-    pathToFileURL(join(root, "tools", entry.name)).href
-  );
-  const candidate = module.default as Partial<Tool>;
-  if (
-    typeof candidate?.description !== "string" ||
-    !(candidate.inputSchema instanceof z.ZodType) ||
-    !(candidate.outputSchema instanceof z.ZodType) ||
-    typeof candidate.execute !== "function"
-  ) {
-    throw new Error(
-      `${entry.name} must default-export a description, inputSchema, outputSchema, and execute function`,
+let startupError = "";
+try {
+  const entries = [...Deno.readDirSync(join(root, "tools"))].sort((
+    left,
+    right,
+  ) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    if (
+      !entry.isFile || extname(entry.name) !== ".ts" ||
+      entry.name.startsWith("_")
+    ) continue;
+    const name = basename(entry.name, ".ts").replaceAll("_", "-");
+    const module = await import(
+      pathToFileURL(join(root, "tools", entry.name)).href
     );
+    const candidate = module.default as Partial<Tool>;
+    if (
+      typeof candidate?.description !== "string" ||
+      !(candidate.inputSchema instanceof z.ZodType) ||
+      !isStrictObject(candidate.inputSchema) ||
+      !(candidate.outputSchema instanceof z.ZodType) ||
+      !isStrictObject(candidate.outputSchema) ||
+      typeof candidate.execute !== "function"
+    ) {
+      startupError =
+        `${entry.name} must default-export a description, strict Zod object inputSchema and outputSchema, and execute function`;
+      tools.clear();
+      break;
+    }
+    tools.set(name, candidate as Tool);
   }
-  tools.set(name, candidate as Tool);
+} catch {
+  startupError = "TypeScript tool modules could not be loaded";
 }
 
 const instanceId = `typescript:${Deno.pid}`;
@@ -49,6 +70,7 @@ function reply(value: unknown) {
 }
 
 async function dispatch(request: Request) {
+  if (startupError) throw new Error(startupError);
   if (request.method === "list") {
     return {
       instanceId,

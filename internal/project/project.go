@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"hctl/internal/rootfs"
+	"hctl/internal/tool"
 )
 
 const (
@@ -43,6 +44,7 @@ type Project struct {
 	Harness           string
 	Instructions      []byte
 	Skills            []Skill
+	Tools             tool.Inventory
 	SourceFingerprint string
 	MaxToolInput      int
 }
@@ -72,10 +74,17 @@ func Load(root, harness string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
+	tools, err := tool.Discover(root)
+	if err != nil {
+		return nil, err
+	}
 
 	sources := []SourceRecord{{Path: instructionPath, SHA256: rootfs.SHA256(instructions)}}
 	for _, skill := range skills {
 		sources = append(sources, SourceRecord{Path: skill.Path, SHA256: rootfs.SHA256(skill.Content)})
+	}
+	for _, file := range tools.Files {
+		sources = append(sources, SourceRecord{Path: file.Path, SHA256: file.SHA256})
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].Path < sources[j].Path })
 	canonicalSources, _ := json.Marshal(struct {
@@ -90,6 +99,7 @@ func Load(root, harness string) (*Project, error) {
 		Harness:           harness,
 		Instructions:      instructions,
 		Skills:            skills,
+		Tools:             tools,
 		SourceFingerprint: fingerprint,
 		MaxToolInput:      echoMaxInputBytes,
 	}, nil

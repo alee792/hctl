@@ -31,15 +31,16 @@ if [ -n "$unformatted" ]; then
 fi
 
 deno fmt --check \
-  spikes/polyglot-tools/host/typescript.ts \
+  internal/tool/host/typescript.ts \
   spikes/polyglot-tools/fixture/tools/repeat.ts \
   spikes/polyglot-tools/cases/duplicate/tools/same.ts \
   spikes/polyglot-tools/cases/invalid-signature/tools/bad.ts \
+  spikes/polyglot-tools/cases/process/tools/crash.ts \
   spikes/polyglot-tools/cases/timeout/tools/slow.ts
 
 uv run --locked --project spikes/polyglot-tools/fixture \
   python -m compileall -q \
-  spikes/polyglot-tools/host/python.py \
+  internal/tool/host/python.py \
   spikes/polyglot-tools/fixture/tools/add.py \
   spikes/polyglot-tools/cases/duplicate/tools/same.py \
   spikes/polyglot-tools/cases/invalid-output/tools/bad.py

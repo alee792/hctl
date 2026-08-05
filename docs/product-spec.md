@@ -41,6 +41,11 @@ my-agent/
   instructions.md
   skills/
     research.md
+  tools/
+    get_weather.ts
+    lookup_policy.py
+    hash_text/
+      tool.go
 ```
 
 The directory name supplies the agent name, normalized to lowercase words with
@@ -49,12 +54,22 @@ each visible Markdown file in it is one skill and its frontmatter name must
 match its filename. Adding or removing a skill file updates the compiled
 project without separate registration.
 
+Visible `tools/*.ts` and `tools/*.py` files each declare one tool. A visible
+`tools/NAME/tool.go` directory declares one Go tool. Filenames supply tool
+names, with underscores exposed as hyphens. TypeScript definitions export a
+default object containing `description`, strict Zod `inputSchema` and
+`outputSchema`, and `execute`. Python modules export `description`, Pydantic
+`Input` and `Output` models, and `execute`. Go packages export `Description`,
+`Input`, `Output`, and `Execute`. The runnable mixed-language fixture is the
+canonical syntax example while the product remains experimental.
+
 Authored source files must be regular, bounded UTF-8 files without symlink
 traversal. There is no authored hctl manifest, registry, or duplicated tool
-inventory. Language-native dependency metadata and lockfiles may describe code
-dependencies without registering tools. Compilation produces a deterministic
-apply record and source fingerprint. The bounded `echo` managed tool remains
-an hctl-provided MVP default used to prove the shared boundary; it is not author
+inventory. TypeScript uses root `deno.json` and `deno.lock`; Python uses
+`pyproject.toml` and `uv.lock`; Go uses `go.mod` and an optional `go.sum`.
+These native files describe dependencies without registering tools.
+Compilation produces a deterministic apply record and source fingerprint. The
+bounded `echo` managed tool remains an hctl-provided default; it is not author
 configuration.
 
 ## Apply and handoff
@@ -64,10 +79,11 @@ hctl apply AGENT --harness claude
 hctl apply AGENT --harness codex
 ```
 
-`apply` validates the authored project, target harness executable, and
-protocol readiness. It materializes owned native files directly in the agent
-project so the user can change into that directory and start the selected
-harness normally.
+`apply` validates the authored project, target harness executable, tool
+definitions, locked dependencies, and protocol readiness. It invokes Deno,
+`uv`, or Go only when that language is present, then materializes owned native
+files directly in the agent project so the user can change into that directory
+and start the selected harness normally.
 
 Claude receives `CLAUDE.md`, `.mcp.json`, and `.claude/skills/`. Codex receives
 `AGENTS.md`, `.codex/config.toml`, and `.agents/skills/`. Generated MCP
@@ -118,22 +134,33 @@ OAuth, network listeners, and vendor delivery are outside the MVP.
 
 ## Managed tool boundary
 
-The MVP exposes one bounded, read-only `echo` tool through stdio MCP in both
-harnesses. Inputs and outputs are schema-validated. Audit output contains a
-safe request identifier and lifecycle outcome, never the echoed content.
+The MVP exposes one bounded, read-only `echo` tool plus conventionally authored
+TypeScript, Python, and Go tools through one stdio MCP server in both harnesses.
+Inputs and outputs are schema-validated. Audit output contains a safe request
+identifier, tool name, and lifecycle outcome, never tool arguments or output.
+
+One long-lived process per authored language serves inspection and calls for
+the MCP session. Tool calls are serialized in the current MVP. A call that
+exceeds its deadline terminates that language host and fails clearly; graceful
+per-call cancellation and automatic host restart are not claimed.
 
 The managed boundary is additive. It does not disable, authorize, observe, or
 retry harness-native tools. Secret-bearing tools require a credential
 broker before they ship; no unused broker backend is scaffolded in the MVP.
 
-## Deferred direction: authored tools and proposals
+## Authored tool lifecycle
 
-Managed tools may be authored as TypeScript, Python, or Go function modules
-under `tools/` and included in the validated source fingerprint. Their paths
-register them by convention. hctl-owned language hosts validate and adapt those
-functions to MCP; authors do not write MCP server boilerplate. The exact source
-contracts and build layout require the spike recorded in the
-[tool-authoring workbench](workbench/tool-authoring.md).
+Tool source and native lockfiles join the validated source fingerprint. Apply
+checks TypeScript with `deno check --frozen`, prepares Python with
+`uv sync --locked`, and compiles a generated Go host with native Go module
+tooling. Generic TypeScript and Python hosts plus generated Go build output live
+under disposable `.hctl/cache/tools/`; no normalized tool manifest is written.
+
+The generated MCP command identifies its harness. At startup hctl verifies the
+matching apply record and source fingerprint before loading the cached hosts.
+Authors write typed functions and do not implement MCP protocol code.
+
+## Deferred direction: proposals
 
 Scripts created ad hoc by the agent remain ordinary harness-native workspace
 activity unless a human promotes them into `tools/` and reapplies the project.
@@ -169,13 +196,16 @@ The MVP is complete when credential-free tests prove:
 
 1. One authored project compiles deterministically for both harnesses.
 2. Apply produces native, discoverable harness files and refuses conflicts.
-3. Both generated harness setups expose the same managed MCP tool.
+3. Both generated harness setups expose the same managed MCP tool surface.
 4. Both headless drivers start and resume sessions against fake harnesses.
 5. Input arriving during an active turn is durably accepted and processed
    later in FIFO order.
 6. Caller-provided input IDs are deduplicated.
 7. Restart recovery marks unproven active work uncertain.
 8. Managed audit output remains content-free.
+9. A mixed TypeScript, Python, and Go project is prepared once per apply,
+   exposed identically by both generated MCP configurations, and reuses one
+   host process per language across calls.
 
 ## Explicit non-goals
 

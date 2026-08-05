@@ -38,7 +38,7 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 	if got := snapshot(t, root, paths); !reflect.DeepEqual(got, first) {
 		t.Fatal("same source did not produce byte-identical setup")
 	}
-	if !strings.Contains(read(t, filepath.Join(root, ".mcp.json")), `"command": "/opt/hctl/bin/hctl"`) {
+	if config := read(t, filepath.Join(root, ".mcp.json")); !strings.Contains(config, `"command": "/opt/hctl/bin/hctl"`) || !strings.Contains(config, `"--harness"`) || !strings.Contains(config, `"claude"`) {
 		t.Fatal("Claude MCP configuration does not bind the absolute hctl path")
 	}
 	codex, err := project.Load(root, "codex")
@@ -49,7 +49,7 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := read(t, filepath.Join(root, ".codex", "config.toml"))
-	if !strings.Contains(config, `command = "/opt/hctl/bin/hctl"`) || !strings.Contains(config, `[mcp_servers.managed]`) {
+	if !strings.Contains(config, `command = "/opt/hctl/bin/hctl"`) || !strings.Contains(config, `[mcp_servers.managed]`) || !strings.Contains(config, `"--harness", "codex"`) {
 		t.Fatal("Codex MCP configuration does not bind the shared managed server")
 	}
 

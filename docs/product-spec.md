@@ -17,10 +17,11 @@ or Codex, and may operate the same setup headlessly through channels.
 
 1. The authored directory is the legible, versionable source of truth.
 2. Common behavior is portable; harness-specific differences are explicit.
-3. Compilation and validation happen before a projection or gateway starts.
+3. Compilation and validation happen before harness files are written or a
+   gateway starts.
 4. Generated native files are disposable and visibly tool-owned.
-5. Native harness capabilities remain available and explicitly unmanaged.
-6. Policy applies only at managed capability and durable-state boundaries.
+5. Native harness tools remain available and explicitly unmanaged.
+6. Policy applies only at managed-tool and durable-state boundaries.
 7. Interactive users remain in the native harness interface.
 8. Unsupported behavior fails honestly instead of being silently emulated.
 9. Conventional files register behavior without a second inventory.
@@ -49,9 +50,12 @@ match its filename. Adding or removing a skill file updates the compiled
 project without separate registration.
 
 Authored source files must be regular, bounded UTF-8 files without symlink
-traversal. Compilation produces a deterministic runtime manifest and source
-fingerprint. The bounded `echo` managed tool remains an hctl-provided MVP
-default used to prove the shared boundary; it is not author configuration.
+traversal. There is no authored hctl manifest, registry, or duplicated tool
+inventory. Language-native dependency metadata and lockfiles may describe code
+dependencies without registering tools. Compilation produces a deterministic
+apply record and source fingerprint. The bounded `echo` managed tool remains
+an hctl-provided MVP default used to prove the shared boundary; it is not author
+configuration.
 
 ## Apply and handoff
 
@@ -82,8 +86,8 @@ deterministic.
 Each harness integration declares and verifies:
 
 - its executable and compatible version signal;
-- native projection surfaces;
-- managed capability exposure;
+- native generated-file surfaces;
+- managed tool exposure;
 - new-session and resume behavior;
 - structured input, output, and terminal events; and
 - any interruption or steering behavior that is not portable.
@@ -112,22 +116,27 @@ it is not silently retried.
 The local stdin adapter exercises the future channel seam. Slack, webhooks,
 OAuth, network listeners, and vendor delivery are outside the MVP.
 
-## Managed capability boundary
+## Managed tool boundary
 
 The MVP exposes one bounded, read-only `echo` tool through stdio MCP in both
 harnesses. Inputs and outputs are schema-validated. Audit output contains a
 safe request identifier and lifecycle outcome, never the echoed content.
 
 The managed boundary is additive. It does not disable, authorize, observe, or
-retry harness-native tools. Secret-bearing capabilities require a credential
+retry harness-native tools. Secret-bearing tools require a credential
 broker before they ship; no unused broker backend is scaffolded in the MVP.
 
 ## Deferred direction: authored tools and proposals
 
-Managed tool implementations may be authored as part of the agent project and
-included in its validated source fingerprint. Scripts created ad hoc by the
-agent remain ordinary harness-native workspace activity unless they cross a
-managed boundary.
+Managed tools may be authored as TypeScript, Python, or Go function modules
+under `tools/` and included in the validated source fingerprint. Their paths
+register them by convention. hctl-owned language hosts validate and adapt those
+functions to MCP; authors do not write MCP server boilerplate. The exact source
+contracts and build layout require the spike recorded in the
+[tool-authoring workbench](workbench/tool-authoring.md).
+
+Scripts created ad hoc by the agent remain ordinary harness-native workspace
+activity unless a human promotes them into `tools/` and reapplies the project.
 
 Generated project instructions may encourage the harness to submit reusable
 discoveries through a future managed proposal tool. Instructions can influence
@@ -135,7 +144,7 @@ this behavior but cannot enforce it or observe native filesystem writes.
 
 A proposal records a candidate improvement to instructions, a skill, a tool,
 or other agent feedback. It does not modify active authored source or a running
-projection. Human review and explicit acceptance are required before the
+harness setup. Human review and explicit acceptance are required before the
 change joins the agent project and is reapplied.
 
 Proposal schema, storage, review UX, conflict handling, sensitive-content
@@ -144,7 +153,7 @@ product and security spike. They are outside the MVP and are not scaffolded.
 
 ## Failure and safety behavior
 
-- Missing, stale, ambiguous, or edited projections fail closed.
+- Missing, stale, ambiguous, or edited harness setups fail closed.
 - Input, output, queue, process lifetime, state size, and protocol lines are
   bounded.
 - Durable state is owner-readable only and written atomically.
@@ -159,8 +168,8 @@ product and security spike. They are outside the MVP and are not scaffolded.
 The MVP is complete when credential-free tests prove:
 
 1. One authored project compiles deterministically for both harnesses.
-2. Apply produces native, discoverable projections and refuses conflicts.
-3. Both generated projections expose the same managed MCP capability.
+2. Apply produces native, discoverable harness files and refuses conflicts.
+3. Both generated harness setups expose the same managed MCP tool.
 4. Both headless drivers start and resume sessions against fake harnesses.
 5. Input arriving during an active turn is durably accepted and processed
    later in FIFO order.
@@ -175,5 +184,5 @@ The MVP is complete when credential-free tests prove:
 - Claude Agent SDK or hosted OpenAI agent runtimes
 - Scheduling, workflows, subagents, or deployment orchestration
 - Governance claims over native harness tools
-- Credential storage before a secret-bearing capability exists
+- Credential storage before a secret-bearing tool exists
 - Automatic or unreviewed promotion of agent-authored improvements

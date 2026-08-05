@@ -1,6 +1,6 @@
 ---
 name: echo
-description: Repeat bounded text through the managed capability boundary.
+description: Repeat bounded text through the managed tool boundary.
 ---
 
 Use the managed `echo` tool when asked to repeat text. Explain that native

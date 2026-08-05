@@ -19,4 +19,4 @@ filesystem-forward conventions provide the clearer precedent.
 
 New authored concepts should use an obvious conventional directory before
 adding configuration. Configuration is reserved for settings the layout cannot
-express. Harness-specific filenames remain generated projection details.
+express. Harness-specific filenames remain generated setup details.

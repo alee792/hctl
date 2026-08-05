@@ -7,11 +7,10 @@
 Compile a filesystem-authored project into Claude Code and Codex native
 surfaces. Keep their model loops, context management, native tools, approvals,
 and interactive interfaces. Provide an optional gateway only for headless
-session and managed-capability use.
+sessions and managed-tool use.
 
 ## Consequence
 
 The tool remains an additive compiler and boundary, not another agent runtime.
-It can guarantee behavior only for capabilities and durable state routed
-through that boundary.
-
+It can guarantee behavior only for tools and durable state routed through that
+boundary.

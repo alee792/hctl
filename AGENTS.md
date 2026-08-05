@@ -4,8 +4,8 @@
 
 This is a greenfield experiment for bootstrapping and extending native agent
 harnesses. `hctl` is a temporary internal name, not a product name. Read
-`README.md`, `docs/vision.md`, and `docs/product-spec.md` before changing product
-behavior.
+`README.md`, `docs/vision.md`, `docs/product-spec.md`, `docs/glossary.md`, and
+`docs/workbench/status.md` before changing product behavior.
 
 ## Engineering rules
 
@@ -13,8 +13,8 @@ behavior.
   implementation, refactoring, and review.
 - Keep the native harness responsible for its model loop, context, native
   tools, approvals, and interactive interface.
-- Keep `hctl` responsible only for authored project compilation, projections,
-  gateway sessions, and explicitly managed capabilities.
+- Keep `hctl` responsible only for authored project discovery and validation,
+  generated harness files, gateway sessions, and explicitly managed tools.
 - Keep packages organized by concrete responsibility. Do not introduce generic
   `core`, `services`, `adapters`, or `utils` layers.
 - Use the Go standard library until a concrete requirement proves it

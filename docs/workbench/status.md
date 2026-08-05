@@ -46,6 +46,13 @@ The proof keeps mixed-language agent source separate from its workspace,
 validates generated subagent files for both harnesses, and switches the
 workspace safely to a second agent.
 
+The [credential-free clean-install check](../../spikes/clean-install/README.md)
+builds a fresh hctl binary with the pinned repository Go toolchain into a
+disposable install prefix, applies the minimal example to a fresh workspace
+with fake Codex, verifies that the native MCP setup names that installed
+binary, and proves a missing authored-tool runtime fails clearly before native
+setup is written.
+
 A [live Codex acceptance pass](codex-live-acceptance.md) on CLI 0.144.1 also
 proved native instruction and skill discovery, all three authored-tool hosts,
 a generated custom subagent, and session resume in a fresh external workspace.

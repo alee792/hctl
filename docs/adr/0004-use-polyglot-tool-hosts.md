@@ -33,6 +33,8 @@ requires the native executable for each used language on `PATH`, evaluates
 TypeScript and Python module initialization during inspection, and stores only
 disposable host artifacts under `.hctl/cache/tools/`.
 
-The current MCP server serializes calls. A deadline terminates the affected
-language host; graceful per-call cancellation, restart, concurrent dispatch,
-and relocatable packaging require later evidence before they are promised.
+Apply records the exact Deno and `uv` executables it used inside the disposable
+tool cache so harness startup does not depend on a matching `PATH`. The current
+MCP server serializes calls. A deadline terminates the affected language host;
+graceful per-call cancellation, restart, concurrent dispatch, and relocatable
+packaging require later evidence before they are promised.

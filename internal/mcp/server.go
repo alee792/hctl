@@ -101,6 +101,7 @@ func callManaged(p *project.Project, runtime *tool.Runtime, id, params json.RawM
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
+		Meta      json.RawMessage `json:"_meta"`
 	}
 	if err := decodeStrict(params, &call); err != nil || !portableToolName.MatchString(call.Name) {
 		return nil, requestID, "unknown", errors.New("invalid managed tool call")

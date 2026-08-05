@@ -14,6 +14,10 @@ Reject child tools, skills, dependency files, nested subagents, and names that
 collide with parent tools. A child that needs an independently configured
 runtime should instead be a separately applied agent project.
 
+Portable source names use hyphens. Codex generated agent names replace those
+hyphens with underscores to satisfy its native collaboration identifier rules;
+Claude keeps the portable name.
+
 ## Context
 
 The first design treated every subagent as a complete isolated project. That

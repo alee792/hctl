@@ -46,6 +46,10 @@ The proof keeps mixed-language agent source separate from its workspace,
 validates generated subagent files for both harnesses, and switches the
 workspace safely to a second agent.
 
+A [live Codex acceptance pass](codex-live-acceptance.md) on CLI 0.144.1 also
+proved native instruction and skill discovery, all three authored-tool hosts,
+a generated custom subagent, and session resume in a fresh external workspace.
+
 ## Settled direction
 
 - hctl bootstraps and extends Claude Code and Codex; it does not replace their
@@ -128,7 +132,8 @@ unresolved. Do not infer answers from the current prototype.
 
 Portable source, independent workspaces, authored tools, native inherited
 subagents, and the Agent Skills compatibility contract are implemented and
-exercised through generated Claude and Codex configurations. The next product
-decision is packaging and clean-machine acceptance, proposal capture,
+exercised through generated Claude and Codex configurations. The Codex native
+journey has live evidence; equivalent Claude acceptance and clean-machine
+packaging remain. The next product decision is packaging, proposal capture,
 credential brokering, or another vision item. Do not add channels or image
 deployment merely to exercise those future seams.

@@ -81,6 +81,7 @@ func proveMCP(harness, agent, workspace string, config mcpConfig) {
 	}
 	command := exec.Command(config.Command, config.Args...)
 	command.Dir = workspace
+	command.Env = []string{"PATH=/usr/bin:/bin"}
 	command.Stdin = strings.NewReader(strings.Join(requests, "\n") + "\n")
 	var output, audit bytes.Buffer
 	command.Stdout = &output

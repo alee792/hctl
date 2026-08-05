@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -33,11 +34,17 @@ const (
 	goValidateVersion = "v6.0.2"
 )
 
+type preparedRuntime struct {
+	Deno string `json:"deno,omitempty"`
+	UV   string `json:"uv,omitempty"`
+}
+
 func Prepare(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint string, inventory Inventory) error {
 	if len(inventory.Sources) == 0 {
 		return nil
 	}
 	cache := cacheRelative(sourceFingerprint)
+	prepared := preparedRuntime{}
 	if hasLanguage(inventory, TypeScript) {
 		host := cache + "/typescript.ts"
 		if err := rootfs.WriteAtomic(workspaceRoot, host, typescriptHost, 0o644); err != nil {
@@ -47,6 +54,7 @@ func Prepare(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint s
 		if err != nil {
 			return err
 		}
+		prepared.Deno = deno
 		args := []string{"check", "--config", filepath.Join(sourceRoot, "deno.json"), "--frozen", filepath.Join(workspaceRoot, filepath.FromSlash(host))}
 		for _, file := range inventory.Files {
 			if filepath.Ext(file.Path) == ".ts" {
@@ -67,6 +75,7 @@ func Prepare(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint s
 		if err != nil {
 			return err
 		}
+		prepared.UV = uv
 		environment := environmentWith("UV_PROJECT_ENVIRONMENT", filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/python-venv")))
 		if err := runNativeEnvironment(ctx, workspaceRoot, "Python tool sync", environment, uv, "sync", "--locked", "--project", sourceRoot); err != nil {
 			return err
@@ -76,6 +85,13 @@ func Prepare(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint s
 		if _, err := prepareGo(ctx, sourceRoot, workspaceRoot, sourceFingerprint, inventory); err != nil {
 			return err
 		}
+	}
+	receipt, err := json.Marshal(prepared)
+	if err != nil {
+		return errors.New("cannot record prepared tool runtime")
+	}
+	if err := rootfs.WriteAtomic(workspaceRoot, cache+"/executables.json", append(receipt, '\n'), 0o600); err != nil {
+		return err
 	}
 	runtime, err := Open(ctx, sourceRoot, workspaceRoot, sourceFingerprint, inventory)
 	if err != nil {
@@ -186,7 +202,11 @@ func executable(name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve %s executable", name)
 	}
-	return path, nil
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve %s executable", name)
+	}
+	return resolved, nil
 }
 
 func runNative(ctx context.Context, directory, label, executable string, arguments ...string) error {

@@ -87,10 +87,11 @@ Claude apply warns because Claude does not document the file.
 Apply copies supported skill resources byte-for-byte into the selected
 harness's project skill directory and preserves executable intent in its
 ownership and source fingerprints. The reserved `agents/openai.yaml` resource
-is Codex-only. All authored skill entries must be bounded regular files and real
-directories with valid UTF-8 relative paths. Symlinks are rejected even when a
-native harness supports them, so the portable source boundary remains
-deterministic and cannot escape the agent project.
+is copied unchanged to either target and warns for Claude. All authored skill
+entries must be bounded regular files and real directories with valid UTF-8
+relative paths. Symlinks are rejected even when a native harness supports them,
+so the portable source boundary remains deterministic and cannot escape the
+agent project.
 
 Immediate directories under `subagents/` define native harness subagents. Each
 contains only an `instructions.md` file with the same description-and-body
@@ -98,7 +99,9 @@ contract. The MVP allows one level and at most eight subagents. A subagent
 inherits the selected parent's generated instructions, skills, managed MCP
 tools, native tools, and permissions through native harness behavior. Child
 skills, tools, dependency files, and nested subagents are rejected rather than
-silently ignored. Subagent and tool names may not collide.
+silently ignored. Subagent and tool names may not collide. Portable subagent
+names use hyphens; generated Codex agent identifiers use underscores because
+that harness requires them.
 
 Visible `tools/*.ts` and `tools/*.py` files each declare one tool. A visible
 `tools/NAME/tool.go` directory declares one Go tool. Filenames supply tool
@@ -211,6 +214,10 @@ per-call cancellation and automatic host restart are not claimed.
 The managed boundary is additive. It does not disable, authorize, observe, or
 retry harness-native tools. Secret-bearing tools require a credential
 broker before they ship; no unused broker backend is scaffolded in the MVP.
+Codex treats the generated managed server as required and delegates its tool
+approval to hctl, avoiding a second harness approval prompt after hctl records
+authorization where Codex user and administrator policy permits. This setting
+does not affect native or unrelated MCP tools.
 
 ## Authored tool lifecycle
 
@@ -220,6 +227,8 @@ checks TypeScript with `deno check --frozen`, prepares Python with
 tooling. Generic TypeScript and Python hosts, their local runtime environments,
 and generated Go build output live under the workspace's disposable
 `.hctl/cache/tools/`; no normalized tool manifest is written.
+The cache records the exact Deno and `uv` executables used during apply so a
+harness can start the managed server without inheriting the same shell `PATH`.
 
 The generated MCP command identifies its harness. At startup hctl verifies the
 matching workspace apply record, selected agent identity, and source

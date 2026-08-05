@@ -184,6 +184,10 @@ format.
 | Normalized tool manifest | Not persisted | The language hosts report their tool schemas at inspection and startup; hctl combines them in memory. |
 | Dependency environment/cache | Owned by native Deno, Python, or Go tooling | `apply` prepares and verifies the locked environment rather than inventing another package manager. |
 
+The disposable cache also records the absolute Deno and `uv` executables used
+by `apply`. The managed MCP server reuses those exact executables instead of
+depending on the native harness process to inherit the author's shell `PATH`.
+
 Generated build glue, compiled Go hosts, and extracted host support files belong
 in an hctl cache, not among authored project files. They must be safe to delete
 and reproduce. A future `package` command may intentionally collect relocatable
@@ -212,6 +216,11 @@ The intended lifecycle is:
    catalog.
 8. Verify the source fingerprint, start the required long-lived language hosts,
    combine their catalogs in memory, and dispatch calls until the session ends.
+
+Codex marks this one generated server required and sets its tool approval mode
+to `approve` because hctl is already the authorization and audit boundary for
+these calls. Codex user or administrator policy may still override that setting.
+Other Codex tools and MCP servers retain their native policy.
 
 Inspection necessarily imports or evaluates module-level TypeScript and Python
 code even though it does not call tool functions. Static parsing cannot safely
@@ -253,7 +262,7 @@ apply, generated Claude and Codex MCP configurations, and production hosts.
 | Go schemas | Go has no single Zod-equivalent incumbent. Schema-generation and validation libraries stay in the generated host module; authored tools use ordinary structs and JSON Schema tags. |
 | Runtime | One JSONL process per language served inspection and repeated calls without restarting. Stdout stayed protocol-only, and process exits surfaced bounded diagnostics without forwarding raw stderr to the model. |
 | Validation | The combined catalog rejected cross-language duplicates. The hosts rejected invalid definitions, inputs, and outputs. The supervisor detected process loss and terminated a host whose call exceeded its deadline. |
-| Generated state | Deno and Python keep their native lockfiles. Go host source, module metadata, sums, and binary are reproducible cache output keyed by tool source and host-template content. No normalized tool inventory is written. |
+| Generated state | Deno and Python keep their native lockfiles. The cache records their prepared executable paths. Go host source, module metadata, sums, and binary are reproducible cache output keyed by tool source and host-template content. No normalized tool inventory is written. |
 
 The deadline proof terminates the whole language host. Graceful per-call
 cancellation, restart policy, concurrent calls, and richer log routing remain

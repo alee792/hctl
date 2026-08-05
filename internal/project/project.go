@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	GeneratorVersion  = "hctl/0.5.0-dev"
+	GeneratorVersion  = "hctl/0.6.0-dev"
 	maxSourceBytes    = 128 << 10
 	maxSkills         = 8
 	maxSkillFiles     = 128

@@ -71,10 +71,10 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 		t.Fatalf("Codex executable skill resource mode = %v, %v", info, err)
 	}
 	config := read(t, filepath.Join(root, ".codex", "config.toml"))
-	if !strings.Contains(config, `command = "/opt/hctl/bin/hctl"`) || !strings.Contains(config, `[mcp_servers.managed]`) || !strings.Contains(config, `"--workspace"`) || !strings.Contains(config, `"--harness", "codex"`) {
+	if !strings.Contains(config, `command = "/opt/hctl/bin/hctl"`) || !strings.Contains(config, `[mcp_servers.managed]`) || !strings.Contains(config, `"--workspace"`) || !strings.Contains(config, `"--harness", "codex"`) || !strings.Contains(config, "required = true") || !strings.Contains(config, `default_tools_approval_mode = "approve"`) {
 		t.Fatal("Codex MCP configuration does not bind the shared managed server")
 	}
-	if child := read(t, filepath.Join(root, ".codex", "agents", "docs-reviewer.toml")); !strings.Contains(child, `description = "Review docs."`) || !strings.Contains(child, `developer_instructions = "Review documentation."`) {
+	if child := read(t, filepath.Join(root, ".codex", "agents", "docs-reviewer.toml")); !strings.Contains(child, `name = "docs_reviewer"`) || !strings.Contains(child, `description = "Review docs."`) || !strings.Contains(child, `developer_instructions = "Review documentation."`) {
 		t.Fatalf("Codex subagent = %q", child)
 	}
 

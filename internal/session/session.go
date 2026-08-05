@@ -23,13 +23,14 @@ type State struct {
 }
 
 type Conversation struct {
-	ID                  string            `json:"id"`
-	Harness             string            `json:"harness"`
-	ManifestFingerprint string            `json:"manifest_fingerprint"`
-	SessionID           string            `json:"session_id,omitempty"`
-	Queue               []Input           `json:"queue"`
-	Outcomes            map[string]string `json:"outcomes"`
-	OutcomeOrder        []string          `json:"outcome_order"`
+	ID                        string            `json:"id"`
+	Harness                   string            `json:"harness"`
+	SourceFingerprint         string            `json:"source_fingerprint,omitempty"`
+	LegacyManifestFingerprint string            `json:"manifest_fingerprint,omitempty"`
+	SessionID                 string            `json:"session_id,omitempty"`
+	Queue                     []Input           `json:"queue"`
+	Outcomes                  map[string]string `json:"outcomes"`
+	OutcomeOrder              []string          `json:"outcome_order"`
 }
 
 type Input struct {
@@ -60,8 +61,18 @@ func Load(root string) (*State, error) {
 		return nil, errors.New("gateway state is invalid")
 	}
 	for key, conversation := range state.Conversations {
+		if conversation != nil && conversation.LegacyManifestFingerprint != "" {
+			if conversation.SourceFingerprint != "" && conversation.SourceFingerprint != conversation.LegacyManifestFingerprint {
+				return nil, errors.New("gateway conversation source fingerprints conflict")
+			}
+			conversation.SourceFingerprint = conversation.LegacyManifestFingerprint
+			conversation.LegacyManifestFingerprint = ""
+		}
 		if conversation == nil || key != conversation.Harness+":"+conversation.ID || (conversation.Harness != "claude" && conversation.Harness != "codex") || len(conversation.Queue) > maxQueue || len(conversation.OutcomeOrder) > maxRecentOutcome {
 			return nil, errors.New("gateway conversation state is invalid")
+		}
+		if conversation.SourceFingerprint == "" {
+			return nil, errors.New("gateway conversation source fingerprint is missing")
 		}
 		if conversation.Outcomes == nil {
 			conversation.Outcomes = map[string]string{}
@@ -101,11 +112,11 @@ func (s *State) GetOrCreate(harness, id, fingerprint string) (*Conversation, err
 	key := harness + ":" + id
 	conversation := s.Conversations[key]
 	if conversation == nil {
-		conversation = &Conversation{ID: id, Harness: harness, ManifestFingerprint: fingerprint, Outcomes: map[string]string{}}
+		conversation = &Conversation{ID: id, Harness: harness, SourceFingerprint: fingerprint, Outcomes: map[string]string{}}
 		s.Conversations[key] = conversation
 	}
-	if conversation.Harness != harness || conversation.ID != id || conversation.ManifestFingerprint != fingerprint {
-		return nil, errors.New("conversation mapping belongs to a different harness or manifest; choose a new conversation id")
+	if conversation.Harness != harness || conversation.ID != id || conversation.SourceFingerprint != fingerprint {
+		return nil, errors.New("conversation mapping belongs to a different harness or source; choose a new conversation id")
 	}
 	return conversation, nil
 }

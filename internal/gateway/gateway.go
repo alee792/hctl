@@ -88,7 +88,7 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 	if err != nil {
 		return err
 	}
-	conversation, err := state.GetOrCreate(driver.Name(), conversationID, p.Manifest.SourceFingerprint)
+	conversation, err := state.GetOrCreate(driver.Name(), conversationID, p.SourceFingerprint)
 	if err != nil {
 		return err
 	}

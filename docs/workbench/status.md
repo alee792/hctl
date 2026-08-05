@@ -23,6 +23,8 @@ The repository contains a standard-library Go CLI that:
 
 - applies instructions and Markdown skills to native Claude Code and Codex
   files without overwriting hand-authored files;
+- keeps one apply record, migrates legacy projection records, and removes the
+  obsolete duplicated runtime manifest;
 - exposes one bounded `echo` tool through stdio MCP;
 - drives local Claude Code and Codex processes headlessly through fake-tested
   bidirectional protocols;
@@ -62,6 +64,11 @@ and Go tools are design direction, not shipped behavior.
 - A credential broker is required before the first secret-bearing managed tool
   or connection ships. Secrets must remain out of authored files, generated
   harness files, the harness environment, and model-visible input or output.
+- Authored tools are trusted project code in the local MVP. Process boundaries,
+  validation, cancellation, and limits provide reliability; hctl does not claim
+  to contain malicious tool code or provide an OS sandbox.
+- `apply` prepares locked tool dependencies through native Deno, Python, and Go
+  tooling. hctl does not invent a second package manager or dependency file.
 
 ## Retained product horizon
 
@@ -85,16 +92,8 @@ These are later product promises, not MVP implementation work:
 
 ## Known implementation drift
 
-- The Go implementation still uses `Manifest`, `projection`, and `capability`
-  in internal names and some generated or user-visible text.
-- Apply currently writes both `.hctl/manifests/<harness>.json` and
-  `.hctl/projections/<harness>.json`. The target keeps one apply record and
-  removes the redundant runtime manifest.
 - The MCP server still contains only the built-in `echo` tool. It does not yet
   discover `tools/` or supervise language hosts.
-- The generated example files in `examples/minimal/` may reflect an earlier
-  apply until the implementation terminology is migrated and the example is
-  reapplied.
 
 This drift is known prototype debt, not a competing product decision.
 
@@ -102,8 +101,9 @@ This drift is known prototype debt, not a competing product decision.
 
 The authored-tool questions are enumerated in the
 [tool-authoring workbench](tool-authoring.md#spike-questions). The main unresolved
-areas are the exact TypeScript, Python, and Go source contracts; Go package and
-build layout; locked dependency setup; subprocess isolation; and packaging.
+areas are whether the spike's source shapes should become the supported API,
+graceful cancellation and host restart behavior, cache ownership, MCP
+integration, and packaging.
 
 Product naming, the concrete credential-broker backend, proposal storage and
 review UX, and specific vendor channel adapters are also intentionally
@@ -111,8 +111,10 @@ unresolved. Do not infer answers from the current prototype.
 
 ## Current design frontier
 
-The next bounded exploration is the authored-tool proof described in the
-[workbench](tool-authoring.md#mvp-proof): discover one tool in each supported
-language without an hctl manifest, expose all three through the same MCP
-boundary, and prove persistent-host behavior and failure diagnostics against
-fake harnesses. Keep vendor channels and proposal execution out of that spike.
+The first authored-tool process spike now lives in
+`spikes/polyglot-tools/`. It discovers and calls one tool in each language with
+locked native dependencies and persistent hosts, and proves definition,
+duplicate, validation, process, and timeout failures. The next bounded step is
+to promote the stable host mechanics behind hctl's existing MCP server and
+exercise that server through the fake Claude and Codex harnesses. Keep vendor
+channels and proposal execution out of that work.

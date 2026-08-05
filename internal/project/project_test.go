@@ -18,10 +18,10 @@ func TestLoadDiscoversConventionalProjectDeterministically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Name != "my-agent" || first.Manifest.Agent != "my-agent" {
+	if first.Name != "my-agent" {
 		t.Fatalf("derived name = %q", first.Name)
 	}
-	if first.Manifest.SourceFingerprint != second.Manifest.SourceFingerprint {
+	if first.SourceFingerprint != second.SourceFingerprint {
 		t.Fatal("same source produced different fingerprints")
 	}
 	if len(first.Skills) != 1 || first.Skills[0].Path != "skills/echo.md" {
@@ -33,7 +33,7 @@ func TestLoadDiscoversConventionalProjectDeterministically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed.Manifest.SourceFingerprint == first.Manifest.SourceFingerprint {
+	if changed.SourceFingerprint == first.SourceFingerprint {
 		t.Fatal("adding a conventional skill did not change the fingerprint")
 	}
 	if len(changed.Skills) != 2 || changed.Skills[1].Name != "research" {

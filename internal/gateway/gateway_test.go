@@ -72,7 +72,7 @@ func TestRecoversActiveInputAsUncertain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conversation, err := state.GetOrCreate("claude", "thread-a", p.Manifest.SourceFingerprint)
+	conversation, err := state.GetOrCreate("claude", "thread-a", p.SourceFingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}

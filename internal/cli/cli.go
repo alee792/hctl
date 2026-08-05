@@ -16,7 +16,7 @@ import (
 	"hctl/internal/harness/codex"
 	"hctl/internal/mcp"
 	"hctl/internal/project"
-	"hctl/internal/projection"
+	"hctl/internal/setup"
 )
 
 const help = `Usage: hctl <command> [arguments]
@@ -81,11 +81,11 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if err != nil {
 		return err
 	}
-	files, err := projection.Apply(p, self)
+	files, err := setup.Apply(p, self)
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(output, "applied agent=%s harness=%s fingerprint=%s\n", p.Name, driver.Name(), p.Manifest.SourceFingerprint); err != nil {
+	if _, err := fmt.Fprintf(output, "applied agent=%s harness=%s fingerprint=%s\n", p.Name, driver.Name(), p.SourceFingerprint); err != nil {
 		return err
 	}
 	for _, path := range files {
@@ -93,7 +93,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 			return err
 		}
 	}
-	if _, err := fmt.Fprintln(output, "managed echo via MCP; native harness capabilities allowed and unmanaged"); err != nil {
+	if _, err := fmt.Fprintln(output, "managed echo via MCP; native harness tools allowed and unmanaged"); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(output, "next: cd %s && %s\n", p.Root, driver.Name()); err != nil {
@@ -137,7 +137,7 @@ func runGateway(args []string, input io.Reader, output, stderr io.Writer) error 
 	if err != nil {
 		return err
 	}
-	if err := projection.Verify(p); err != nil {
+	if err := setup.Verify(p); err != nil {
 		return err
 	}
 	driver, err := newDriver(*harnessName, *command)

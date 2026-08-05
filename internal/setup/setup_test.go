@@ -1,6 +1,7 @@
-package projection
+package setup
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"hctl/internal/project"
+	"hctl/internal/rootfs"
 )
 
 func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
@@ -22,10 +24,9 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 	}
 	want := []string{
 		".claude/skills/echo/SKILL.md",
-		".hctl/manifests/claude.json",
 		".mcp.json",
 		"CLAUDE.md",
-		".hctl/projections/claude.json",
+		".hctl/apply/claude.json",
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("paths = %v, want %v", paths, want)
@@ -35,7 +36,7 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 		t.Fatalf("second apply: %v", err)
 	}
 	if got := snapshot(t, root, paths); !reflect.DeepEqual(got, first) {
-		t.Fatal("same source did not produce byte-identical projection")
+		t.Fatal("same source did not produce byte-identical setup")
 	}
 	if !strings.Contains(read(t, filepath.Join(root, ".mcp.json")), `"command": "/opt/hctl/bin/hctl"`) {
 		t.Fatal("Claude MCP configuration does not bind the absolute hctl path")
@@ -72,6 +73,45 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 	}
 }
 
+func TestApplyMigratesLegacyProjectionRecord(t *testing.T) {
+	root := testAgent(t)
+	p, err := project.Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := filesFor(p, "/opt/hctl/bin/hctl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := make([]ownedFile, 0, len(files)+1)
+	for path, data := range files {
+		writeBytes(t, root, path, data)
+		owned = append(owned, ownedFile{Path: path, SHA256: rootfs.SHA256(data)})
+	}
+	manifestPath := ".hctl/manifests/claude.json"
+	manifest := []byte("{}\n")
+	writeBytes(t, root, manifestPath, manifest)
+	owned = append(owned, ownedFile{Path: manifestPath, SHA256: rootfs.SHA256(manifest)})
+	legacy := applyRecord{SchemaVersion: 1, Generator: project.GeneratorVersion, Harness: "claude", SourceFingerprint: p.SourceFingerprint, Files: owned}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBytes(t, root, legacyRecordPath("claude"), data)
+
+	if _, err := Apply(p, "/opt/hctl/bin/hctl"); err != nil {
+		t.Fatal(err)
+	}
+	for _, obsolete := range []string{manifestPath, legacyRecordPath("claude")} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(obsolete))); !os.IsNotExist(err) {
+			t.Fatalf("obsolete file %s still exists", obsolete)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(applyRecordPath("claude")))); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testAgent(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -86,6 +126,17 @@ func testAgent(t *testing.T) string {
 func write(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeBytes(t *testing.T, root, path string, content []byte) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(path))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

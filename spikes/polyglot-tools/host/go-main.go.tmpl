@@ -1,0 +1,166 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+
+	invopop "github.com/invopop/jsonschema"
+	tekuri "github.com/santhosh-tekuri/jsonschema/v6"
+{{IMPORTS}}
+)
+
+type request struct {
+	ID     string `json:"id"`
+	Method string `json:"method"`
+	Params struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"params"`
+}
+
+type response struct {
+	ID     string `json:"id"`
+	Result any    `json:"result,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+type toolInfo struct {
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	InputSchema  json.RawMessage `json:"inputSchema"`
+	OutputSchema json.RawMessage `json:"outputSchema"`
+}
+
+type hostedTool interface {
+	info() toolInfo
+	call(context.Context, json.RawMessage) (any, error)
+}
+
+type typedTool[I, O any] struct {
+	metadata  toolInfo
+	input     *tekuri.Schema
+	output    *tekuri.Schema
+	execute   func(context.Context, I) (O, error)
+}
+
+func newTool[I, O any](name, description string, execute func(context.Context, I) (O, error)) hostedTool {
+	reflector := invopop.Reflector{DoNotReference: true}
+	inputJSON, err := json.Marshal(reflector.Reflect(new(I)))
+	if err != nil {
+		panic(fmt.Sprintf("%s input schema: %v", name, err))
+	}
+	outputJSON, err := json.Marshal(reflector.Reflect(new(O)))
+	if err != nil {
+		panic(fmt.Sprintf("%s output schema: %v", name, err))
+	}
+	return &typedTool[I, O]{
+		metadata: toolInfo{Name: name, Description: description, InputSchema: inputJSON, OutputSchema: outputJSON},
+		input: compileSchema(name+" input", inputJSON), output: compileSchema(name+" output", outputJSON), execute: execute,
+	}
+}
+
+func compileSchema(name string, source []byte) *tekuri.Schema {
+	var document any
+	if err := json.Unmarshal(source, &document); err != nil {
+		panic(fmt.Sprintf("%s schema: %v", name, err))
+	}
+	compiler := tekuri.NewCompiler()
+	if err := compiler.AddResource(name, document); err != nil {
+		panic(fmt.Sprintf("%s schema: %v", name, err))
+	}
+	schema, err := compiler.Compile(name)
+	if err != nil {
+		panic(fmt.Sprintf("%s schema: %v", name, err))
+	}
+	return schema
+}
+
+func (tool *typedTool[I, O]) info() toolInfo { return tool.metadata }
+
+func (tool *typedTool[I, O]) call(ctx context.Context, raw json.RawMessage) (any, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, errors.New("arguments must be JSON")
+	}
+	if err := tool.input.Validate(value); err != nil {
+		return nil, fmt.Errorf("invalid input: %w", err)
+	}
+	var input I
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return nil, fmt.Errorf("invalid input: %w", err)
+	}
+	result, err := tool.execute(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("encode output: %w", err)
+	}
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return nil, fmt.Errorf("decode output: %w", err)
+	}
+	if err := tool.output.Validate(value); err != nil {
+		return nil, fmt.Errorf("invalid output: %w", err)
+	}
+	return result, nil
+}
+
+var tools = []hostedTool{
+{{TOOLS}}
+}
+
+func main() {
+	byName := make(map[string]hostedTool, len(tools))
+	for _, tool := range tools {
+		info := tool.info()
+		if _, exists := byName[info.Name]; exists {
+			panic("duplicate tool name: " + info.Name)
+		}
+		byName[info.Name] = tool
+	}
+	instanceID := fmt.Sprintf("go:%d", os.Getpid())
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 4096), 64<<10)
+	encoder := json.NewEncoder(os.Stdout)
+	for scanner.Scan() {
+		var request request
+		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+			_ = encoder.Encode(response{Error: "invalid request: " + err.Error()})
+			continue
+		}
+		switch request.Method {
+		case "list":
+			catalog := make([]toolInfo, 0, len(tools))
+			for _, tool := range tools {
+				catalog = append(catalog, tool.info())
+			}
+			_ = encoder.Encode(response{ID: request.ID, Result: map[string]any{"instanceId": instanceID, "tools": catalog}})
+		case "call":
+			tool, exists := byName[request.Params.Name]
+			if !exists {
+				_ = encoder.Encode(response{ID: request.ID, Error: "unknown Go tool " + request.Params.Name})
+				continue
+			}
+			result, err := tool.call(context.Background(), request.Params.Arguments)
+			if err != nil {
+				_ = encoder.Encode(response{ID: request.ID, Error: err.Error()})
+				continue
+			}
+			_ = encoder.Encode(response{ID: request.ID, Result: map[string]any{"instanceId": instanceID, "output": result}})
+		default:
+			_ = encoder.Encode(response{ID: request.ID, Error: "unknown method"})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "read protocol:", err)
+		os.Exit(1)
+	}
+}

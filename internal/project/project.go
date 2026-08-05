@@ -18,7 +18,6 @@ import (
 
 const (
 	GeneratorVersion  = "hctl/0.1.0-dev"
-	ManifestVersion   = 1
 	maxSourceBytes    = 128 << 10
 	maxSkills         = 8
 	echoMaxInputBytes = 1024
@@ -38,52 +37,14 @@ type SourceRecord struct {
 	SHA256 string `json:"sha256"`
 }
 
-type ManifestSkill struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Source      string `json:"source"`
-	SHA256      string `json:"sha256"`
-}
-
-type ManifestManaged struct {
-	Name        string `json:"name"`
-	Transport   string `json:"transport"`
-	Enforcement string `json:"enforcement"`
-	MaxInput    int    `json:"max_input_bytes"`
-}
-
-type ManifestNative struct {
-	Posture    string `json:"posture"`
-	Governance string `json:"governance"`
-}
-
-type ManifestDriver struct {
-	Executable string `json:"executable"`
-	Protocol   string `json:"protocol"`
-	Resume     string `json:"resume"`
-}
-
-type Manifest struct {
-	SchemaVersion     int               `json:"schema_version"`
-	Generator         string            `json:"generator"`
-	Agent             string            `json:"agent"`
-	Harness           string            `json:"harness"`
-	SourceFingerprint string            `json:"source_fingerprint"`
-	Sources           []SourceRecord    `json:"sources"`
-	Instructions      SourceRecord      `json:"instructions"`
-	Skills            []ManifestSkill   `json:"skills"`
-	Managed           []ManifestManaged `json:"managed_capabilities"`
-	Native            ManifestNative    `json:"native_capabilities"`
-	Driver            ManifestDriver    `json:"driver"`
-}
-
 type Project struct {
-	Root            string
-	Name            string
-	Instructions    []byte
-	Skills          []Skill
-	MaxManagedInput int
-	Manifest        Manifest
+	Root              string
+	Name              string
+	Harness           string
+	Instructions      []byte
+	Skills            []Skill
+	SourceFingerprint string
+	MaxToolInput      int
 }
 
 func Load(root, harness string) (*Project, error) {
@@ -123,40 +84,14 @@ func Load(root, harness string) (*Project, error) {
 	}{Agent: name, Sources: sources})
 	fingerprint := rootfs.SHA256(canonicalSources)
 
-	driver := ManifestDriver{Executable: harness}
-	if harness == "claude" {
-		driver.Executable = "claude"
-		driver.Protocol = "stream-json"
-		driver.Resume = "--resume"
-	} else {
-		driver.Executable = "codex"
-		driver.Protocol = "app-server-v2-jsonl"
-		driver.Resume = "thread/resume"
-	}
-	manifestSkills := make([]ManifestSkill, 0, len(skills))
-	for _, skill := range skills {
-		manifestSkills = append(manifestSkills, ManifestSkill{Name: skill.Name, Description: skill.Description, Source: skill.Path, SHA256: rootfs.SHA256(skill.Content)})
-	}
-
 	return &Project{
-		Root:            root,
-		Name:            name,
-		Instructions:    instructions,
-		Skills:          skills,
-		MaxManagedInput: echoMaxInputBytes,
-		Manifest: Manifest{
-			SchemaVersion:     ManifestVersion,
-			Generator:         GeneratorVersion,
-			Agent:             name,
-			Harness:           harness,
-			SourceFingerprint: fingerprint,
-			Sources:           sources,
-			Instructions:      SourceRecord{Path: instructionPath, SHA256: rootfs.SHA256(instructions)},
-			Skills:            manifestSkills,
-			Managed:           []ManifestManaged{{Name: "echo", Transport: "stdio-mcp", Enforcement: "managed", MaxInput: echoMaxInputBytes}},
-			Native:            ManifestNative{Posture: "allowed", Governance: "unmanaged"},
-			Driver:            driver,
-		},
+		Root:              root,
+		Name:              name,
+		Harness:           harness,
+		Instructions:      instructions,
+		Skills:            skills,
+		SourceFingerprint: fingerprint,
+		MaxToolInput:      echoMaxInputBytes,
 	}, nil
 }
 

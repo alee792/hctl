@@ -49,7 +49,7 @@ func Serve(root string, input io.Reader, output, audit io.Writer) error {
 			tool := map[string]any{
 				"name":         "echo",
 				"description":  "Return bounded text through the managed boundary.",
-				"inputSchema":  map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"text": map[string]any{"type": "string", "maxLength": p.MaxManagedInput}}, "required": []string{"text"}},
+				"inputSchema":  map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"text": map[string]any{"type": "string", "maxLength": p.MaxToolInput}}, "required": []string{"text"}},
 				"outputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"text": map[string]any{"type": "string"}}, "required": []string{"text"}},
 				"annotations":  map[string]any{"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
 			}
@@ -93,7 +93,7 @@ func callEcho(p *project.Project, id, params json.RawMessage, audit io.Writer) (
 	var arguments struct {
 		Text string `json:"text"`
 	}
-	if err := decodeStrict(call.Arguments, &arguments); err != nil || arguments.Text == "" || !utf8.ValidString(arguments.Text) || len([]byte(arguments.Text)) > p.MaxManagedInput {
+	if err := decodeStrict(call.Arguments, &arguments); err != nil || arguments.Text == "" || !utf8.ValidString(arguments.Text) || len([]byte(arguments.Text)) > p.MaxToolInput {
 		return nil, requestID, errors.New("echo text must be non-empty and within the configured byte limit")
 	}
 	if err := writeAudit(audit, p.Name, requestID, "authorized"); err != nil {
@@ -107,8 +107,8 @@ func callEcho(p *project.Project, id, params json.RawMessage, audit io.Writer) (
 }
 
 func writeAudit(audit io.Writer, agent, requestID, outcome string) error {
-	if _, err := fmt.Fprintf(audit, "managed agent=%s capability=echo request=%s outcome=%s\n", agent, requestID, outcome); err != nil {
-		return errors.New("cannot write managed capability audit")
+	if _, err := fmt.Fprintf(audit, "managed agent=%s tool=echo request=%s outcome=%s\n", agent, requestID, outcome); err != nil {
+		return errors.New("cannot write managed tool audit")
 	}
 	return nil
 }

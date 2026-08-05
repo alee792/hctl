@@ -1,4 +1,4 @@
-package projection
+package setup
 
 import (
 	"bytes"
@@ -25,7 +25,7 @@ type ownedFile struct {
 	SHA256 string `json:"sha256"`
 }
 
-type ownership struct {
+type applyRecord struct {
 	SchemaVersion     int         `json:"schema_version"`
 	Generator         string      `json:"generator"`
 	Harness           string      `json:"harness"`
@@ -41,19 +41,19 @@ func Apply(p *project.Project, executable string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	metaPath := metadataPath(p.Manifest.Harness)
-	prior, exists, err := loadOwnership(p.Root, metaPath)
+	recordPath := applyRecordPath(p.Harness)
+	prior, exists, legacy, err := loadApplyRecord(p.Root, p.Harness)
 	if err != nil {
 		return nil, err
 	}
 	priorFiles := map[string]ownedFile{}
 	if exists {
-		if prior.SchemaVersion != 1 || prior.Harness != p.Manifest.Harness {
-			return nil, errors.New("projection ownership metadata is incompatible; remove the generated projection manually")
+		if prior.SchemaVersion != 1 || prior.Harness != p.Harness {
+			return nil, errors.New("apply record is incompatible; remove the generated harness files manually")
 		}
 		for _, owned := range prior.Files {
-			if !allowedPath(p.Manifest.Harness, owned.Path) || priorFiles[owned.Path].Path != "" {
-				return nil, errors.New("projection ownership metadata contains an invalid path")
+			if !allowedOwnedPath(p.Harness, owned.Path, legacy) || priorFiles[owned.Path].Path != "" {
+				return nil, errors.New("apply record contains an invalid path")
 			}
 			priorFiles[owned.Path] = owned
 			actual, present, err := generatedHash(p.Root, owned.Path)
@@ -66,8 +66,8 @@ func Apply(p *project.Project, executable string) ([]string, error) {
 		}
 	}
 	for path := range files {
-		if !allowedPath(p.Manifest.Harness, path) {
-			return nil, errors.New("internal projection path is not allowed")
+		if !allowedPath(p.Harness, path) {
+			return nil, errors.New("generated harness path is not allowed")
 		}
 		_, present, err := generatedHash(p.Root, path)
 		if err != nil {
@@ -93,55 +93,55 @@ func Apply(p *project.Project, executable string) ([]string, error) {
 			}
 		}
 	}
-	meta := ownership{SchemaVersion: 1, Generator: project.GeneratorVersion, Harness: p.Manifest.Harness, SourceFingerprint: p.Manifest.SourceFingerprint, Files: owned}
+	meta := applyRecord{SchemaVersion: 1, Generator: project.GeneratorVersion, Harness: p.Harness, SourceFingerprint: p.SourceFingerprint, Files: owned}
 	metaBytes, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
-		return nil, errors.New("cannot encode projection ownership")
+		return nil, errors.New("cannot encode apply record")
 	}
-	if err := rootfs.WriteAtomic(p.Root, metaPath, append(metaBytes, '\n'), 0o644); err != nil {
+	if err := rootfs.WriteAtomic(p.Root, recordPath, append(metaBytes, '\n'), 0o644); err != nil {
 		return nil, err
+	}
+	if legacy {
+		if err := rootfs.RemoveRegular(p.Root, legacyRecordPath(p.Harness)); err != nil {
+			return nil, err
+		}
 	}
 	if err := Verify(p); err != nil {
 		return nil, err
 	}
-	return append(paths, metaPath), nil
+	return append(paths, recordPath), nil
 }
 
 func Verify(p *project.Project) error {
-	meta, exists, err := loadOwnership(p.Root, metadataPath(p.Manifest.Harness))
+	meta, exists, err := readApplyRecord(p.Root, applyRecordPath(p.Harness))
 	if err != nil {
 		return err
 	}
-	if !exists || meta.Generator != project.GeneratorVersion || meta.SourceFingerprint != p.Manifest.SourceFingerprint || meta.Harness != p.Manifest.Harness {
-		return fmt.Errorf("%s projection is missing or stale; run hctl apply first", p.Manifest.Harness)
+	if !exists || meta.Generator != project.GeneratorVersion || meta.SourceFingerprint != p.SourceFingerprint || meta.Harness != p.Harness {
+		return fmt.Errorf("%s setup is missing or stale; run hctl apply first", p.Harness)
 	}
 	if len(meta.Files) == 0 {
-		return fmt.Errorf("%s projection is incomplete; run hctl apply first", p.Manifest.Harness)
+		return fmt.Errorf("%s setup is incomplete; run hctl apply first", p.Harness)
 	}
 	seen := map[string]bool{}
 	for _, owned := range meta.Files {
-		if seen[owned.Path] || !allowedPath(p.Manifest.Harness, owned.Path) {
-			return errors.New("projection ownership metadata contains an invalid path")
+		if seen[owned.Path] || !allowedPath(p.Harness, owned.Path) {
+			return errors.New("apply record contains an invalid path")
 		}
 		seen[owned.Path] = true
 		actual, present, err := generatedHash(p.Root, owned.Path)
 		if err != nil || !present || actual != owned.SHA256 {
-			return fmt.Errorf("%s projection file %s is missing or changed; run hctl apply first", p.Manifest.Harness, owned.Path)
+			return fmt.Errorf("%s generated file %s is missing or changed; run hctl apply first", p.Harness, owned.Path)
 		}
 	}
 	return nil
 }
 
 func filesFor(p *project.Project, executable string) (map[string][]byte, error) {
-	manifestBytes, err := json.MarshalIndent(p.Manifest, "", "  ")
-	if err != nil {
-		return nil, errors.New("cannot encode manifest")
-	}
-	manifestBytes = append(manifestBytes, '\n')
-	files := map[string][]byte{fmt.Sprintf(".hctl/manifests/%s.json", p.Manifest.Harness): manifestBytes}
-	header := fmt.Sprintf("<!-- Generated by %s from source %s. Safe to discard; edit portable source instead. -->\n\n", project.GeneratorVersion, p.Manifest.SourceFingerprint)
-	instructions := header + "# " + p.Name + "\n\n" + strings.TrimSpace(string(p.Instructions)) + "\n\n## Capability boundary\n\nThe `echo` MCP tool is managed. Native harness capabilities remain allowed and unmanaged.\n"
-	if p.Manifest.Harness == "claude" {
+	files := map[string][]byte{}
+	header := fmt.Sprintf("<!-- Generated by %s from source %s. Safe to discard; edit portable source instead. -->\n\n", project.GeneratorVersion, p.SourceFingerprint)
+	instructions := header + "# " + p.Name + "\n\n" + strings.TrimSpace(string(p.Instructions)) + "\n\n## Tool boundary\n\nThe `echo` MCP tool is managed. Native harness tools remain allowed and unmanaged.\n"
+	if p.Harness == "claude" {
 		files["CLAUDE.md"] = []byte(instructions)
 		config := map[string]any{"mcpServers": map[string]any{"managed": map[string]any{"type": "stdio", "command": executable, "args": []string{"mcp", "serve", "."}}}}
 		configBytes, err := json.MarshalIndent(config, "", "  ")
@@ -150,13 +150,13 @@ func filesFor(p *project.Project, executable string) (map[string][]byte, error) 
 		}
 		files[".mcp.json"] = append(configBytes, '\n')
 		for _, skill := range p.Skills {
-			files[fmt.Sprintf(".claude/skills/%s/SKILL.md", skill.Name)] = markGeneratedSkill(skill.Content, p.Manifest.SourceFingerprint)
+			files[fmt.Sprintf(".claude/skills/%s/SKILL.md", skill.Name)] = markGeneratedSkill(skill.Content, p.SourceFingerprint)
 		}
 	} else {
 		files["AGENTS.md"] = []byte(instructions)
 		files[".codex/config.toml"] = []byte("# Generated by " + project.GeneratorVersion + "; safe to discard.\n[mcp_servers.managed]\ncommand = " + strconv.Quote(executable) + "\nargs = [\"mcp\", \"serve\", \".\"]\n")
 		for _, skill := range p.Skills {
-			files[fmt.Sprintf(".agents/skills/%s/SKILL.md", skill.Name)] = markGeneratedSkill(skill.Content, p.Manifest.SourceFingerprint)
+			files[fmt.Sprintf(".agents/skills/%s/SKILL.md", skill.Name)] = markGeneratedSkill(skill.Content, p.SourceFingerprint)
 		}
 	}
 	return files, nil
@@ -175,12 +175,25 @@ func markGeneratedSkill(content []byte, fingerprint string) []byte {
 	return out
 }
 
-func metadataPath(harness string) string {
+func applyRecordPath(harness string) string {
+	return fmt.Sprintf(".hctl/apply/%s.json", harness)
+}
+
+func legacyRecordPath(harness string) string {
 	return fmt.Sprintf(".hctl/projections/%s.json", harness)
 }
 
-func loadOwnership(root, relative string) (ownership, bool, error) {
-	var meta ownership
+func loadApplyRecord(root, harness string) (applyRecord, bool, bool, error) {
+	meta, exists, err := readApplyRecord(root, applyRecordPath(harness))
+	if err != nil || exists {
+		return meta, exists, false, err
+	}
+	meta, exists, err = readApplyRecord(root, legacyRecordPath(harness))
+	return meta, exists, exists, err
+}
+
+func readApplyRecord(root, relative string) (applyRecord, bool, error) {
+	var meta applyRecord
 	data, _, exists, err := rootfs.ReadOptional(root, relative, maxMetadataBytes)
 	if err != nil || !exists {
 		return meta, exists, err
@@ -188,19 +201,16 @@ func loadOwnership(root, relative string) (ownership, bool, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&meta); err != nil {
-		return meta, false, errors.New("projection ownership metadata is invalid")
+		return meta, false, errors.New("apply record is invalid")
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return meta, false, errors.New("projection ownership metadata is invalid")
+		return meta, false, errors.New("apply record is invalid")
 	}
 	return meta, true, nil
 }
 
 func allowedPath(harness, path string) bool {
-	if path == fmt.Sprintf(".hctl/manifests/%s.json", harness) {
-		return true
-	}
 	if harness == "claude" {
 		if path == "CLAUDE.md" || path == ".mcp.json" {
 			return true
@@ -211,6 +221,10 @@ func allowedPath(harness, path string) bool {
 		return true
 	}
 	return generatedSkillPath(path, ".agents/skills/")
+}
+
+func allowedOwnedPath(harness, path string, legacy bool) bool {
+	return allowedPath(harness, path) || legacy && path == fmt.Sprintf(".hctl/manifests/%s.json", harness)
 }
 
 func generatedSkillPath(path, prefix string) bool {

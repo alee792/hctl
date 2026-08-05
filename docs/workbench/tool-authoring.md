@@ -28,15 +28,15 @@ the source of truth.
 9. Ad hoc scripts created by a running harness remain native workspace
    activity. They become hctl tools only when a human adds them to the authored
    `tools/` directory and reapplies the project.
+10. Authored tools are trusted project code for the local MVP. hctl provides
+    process and protocol safety but does not claim malicious-code containment.
+11. `apply` prepares locked dependencies by invoking native Deno, Python, and
+    Go tooling. hctl does not define another dependency manifest or installer.
 
-The existing MVP still contains `capability` in internal identifiers, generated
-copy, and audit wording. Public occurrences should migrate to the concrete term
-`tool`; internal umbrella naming may remain only where it genuinely represents
-more than tools.
-
-Likewise, `projection` is unnecessary architecture jargon. Public language uses
-`generated harness files` for the files, `harness setup` for their collective
-effect, and `apply record` for hctl's ownership bookkeeping.
+The implementation now uses `tool`, `generated harness files`, `harness setup`,
+and `apply record` for these concrete concepts. `Capability` remains appropriate
+only where it genuinely represents more than tools; `projection` is retained
+only in migration code that recognizes an older apply-record location.
 
 ## Authoring model
 
@@ -166,18 +166,17 @@ format.
 | Python tool wrapper | Not generated per tool | A generic Python host imports the authored definitions directly. |
 | Go tool host | Compiled and cached by source fingerprint | Go cannot dynamically import authored source, so hctl must generate minimal build glue and compile it. |
 | Normalized tool manifest | Not persisted | The language hosts report their tool schemas at inspection and startup; hctl combines them in memory. |
-| Dependency environment/cache | Owned by the native language tooling | hctl verifies and invokes the locked environment rather than inventing another package manager. |
+| Dependency environment/cache | Owned by native Deno, Python, or Go tooling | `apply` prepares and verifies the locked environment rather than inventing another package manager. |
 
 Generated build glue, compiled Go hosts, and extracted host support files belong
 in an hctl cache, not among authored project files. They must be safe to delete
 and reproduce. A future `package` command may intentionally collect relocatable
 runtime artifacts; `apply` should not package by accident.
 
-The current MVP writes both `.hctl/manifests/<harness>.json` and
-`.hctl/projections/<harness>.json`. The former repeats runtime facts that can be
-reconstructed from source and should be removed. The apply record is the
-minimum state needed for safe reapply and should be renamed as part of that
-migration.
+The MVP now writes only `.hctl/apply/<harness>.json`. Apply migrates an intact
+legacy `.hctl/projections/<harness>.json` record and removes its duplicated
+`.hctl/manifests/<harness>.json` file. This keeps backward compatibility out of
+the current authoring model.
 
 ### Literal lifecycle
 
@@ -187,8 +186,8 @@ The intended lifecycle is:
 2. Select the language adapter from the file extension.
 3. Start each required adapter in inspection mode. It loads module definitions
    and reports schemas without invoking a tool function.
-4. Validate schemas, duplicate names, dependencies, and the source fingerprint
-   across all languages.
+4. Prepare locked dependencies with native tooling, then validate schemas,
+   duplicate names, and the source fingerprint across all languages.
 5. Compile and cache a Go host only when Go tools are present.
 6. Generate the native harness files and their apply record.
 7. Configure the harness to start `hctl mcp serve AGENT` when the session needs
@@ -199,7 +198,8 @@ The intended lifecycle is:
 Inspection necessarily imports or evaluates module-level TypeScript and Python
 code even though it does not call tool functions. Static parsing cannot safely
 recover arbitrary runtime schemas. Inspection must therefore run in a bounded
-subprocess with the same declared permissions that will apply at runtime.
+subprocess. This is a reliability boundary for trusted project code, not an OS
+sandbox or malicious-code-containment claim.
 
 `apply` necessarily prepares the local tool runtime because the generated
 harness setup must be immediately usable. A future `package` command may
@@ -219,8 +219,8 @@ output, never an authored tool inventory.
    support both while compiling to one strict schema?
 4. What Go directory/package convention lets multiple tools and local imports
    compile without an hctl registry file?
-5. Which native dependency files are discovered for each language, and how are
-   locked/offline installs reported?
+5. Which native dependency files and commands are used for each language, and
+   how are locked/offline failures reported?
 6. Does one host per language provide sufficient crash isolation, or is an
    optional stronger isolation mode needed later?
 7. How are logs, stdout, cancellation, timeouts, and oversized results kept
@@ -228,11 +228,31 @@ output, never an authored tool inventory.
 8. Which artifacts should `apply` cache, and which must `package` rebuild for
    portability?
 
+## First spike result
+
+The executable proof in `spikes/polyglot-tools/` answers enough of the process
+question to proceed without accepting the candidate source APIs yet.
+
+| Concern | Evidence from the spike |
+| --- | --- |
+| TypeScript | A direct `tools/*.ts` default export using Zod can report JSON Schema and validate both sides of an async call. `deno check --frozen` verifies the host and tool without executing the handler. |
+| Python | A direct `tools/*.py` module with `description`, Pydantic `Input` and `Output` models, and `execute` can be loaded by a generic host. `uv sync --locked` and `uv run --locked` provide the prepared environment. |
+| Go | One package directory per tool works with `Description`, `Input`, `Output`, and `Execute`. Minimal generated registration glue imports each package and builds a cached host from a disposable Go module. |
+| Go schemas | Go has no single Zod-equivalent incumbent. The spike keeps schema-generation and validation libraries in the generated host module; authored tools use ordinary structs and JSON Schema tags. This choice needs API review before promotion. |
+| Runtime | One JSONL process per language served inspection and repeated calls without restarting. Stdout stayed protocol-only and stderr carried process diagnostics. |
+| Validation | The combined catalog rejected cross-language duplicates. The hosts rejected invalid definitions, inputs, and outputs. The supervisor detected process loss and terminated a host whose call exceeded its deadline. |
+| Generated state | Deno and Python keep their native lockfiles. Go host source, module metadata, sums, and binary are reproducible cache output keyed by tool source and host-template content. No normalized tool inventory is written. |
+
+The deadline proof currently terminates the whole language host. Graceful
+per-call cancellation, restart policy, concurrent calls, log routing, and
+bounded output still require production design. The spike also stops one layer
+short of hctl's MCP server and fake harnesses; promotion must prove that literal
+end-to-end path before authored tools are called shipped behavior.
+
 ## MVP proof
 
-The first useful proof is one small tool in each language, all discovered from
-files with no hctl manifest, exposed through the same MCP server, callable from
-fake Claude and Codex harnesses, and exercised more than once without
-restarting its language host. Invalid signatures, invalid input, invalid
-output, process failure, cancellation, and duplicate tool names must fail with
-clear diagnostics.
+The completed process spike proves discovery, schemas, persistent calls, and
+the listed failure classes short of graceful cancellation. The next proof is
+to expose the same catalog through hctl's MCP server, call it from fake Claude
+and Codex harnesses, and define bounded output, concurrency, cancellation, and
+restart behavior without expanding into channels or proposals.

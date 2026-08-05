@@ -49,7 +49,8 @@ A mixed-language project should be able to look approximately like this:
 my-agent/
   instructions.md
   skills/
-    research.md
+    research/
+      SKILL.md
   tools/
     get_weather.ts
     lookup_policy.py

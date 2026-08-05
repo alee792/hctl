@@ -64,11 +64,15 @@ func testAgent(t *testing.T) string {
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		"instructions.md": "---\ndescription: Test agent.\n---\n\nBe concise.\n",
-		"skills/echo.md":  "---\nname: echo\ndescription: Repeat safely.\n---\n\nUse echo.\n",
+		"instructions.md":      "---\ndescription: Test agent.\n---\n\nBe concise.\n",
+		"skills/echo/SKILL.md": "---\nname: echo\ndescription: Repeat safely.\n---\n\nUse echo.\n",
 	}
 	for path, content := range files {
-		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(content), 0o644); err != nil {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}

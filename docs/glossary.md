@@ -11,8 +11,9 @@ files, CLI guidance, or product documentation.
 | Agent project | The portable authored filesystem source for one agent: instructions, skills, tools, subagents, and native dependency files. It is not coupled to the repository that stores it or the workspace where it is used. |
 | Agent source | The selected agent-project directory from which hctl discovers and validates authored files. |
 | Workspace | The independently selected directory where the harness operates. Generated harness files, hctl state, caches, and authored tool processes belong here. It defaults to the agent source for a standalone agent. |
-| Instructions | Always-on authored guidance projected into the native harness. |
-| Skill | Reusable instructions and supporting files loaded when relevant. A skill is not itself a callable tool. |
+| Instructions | Always-on authored guidance applied to the native harness. |
+| Skill | An open Agent Skills directory containing `SKILL.md` and optional supporting files loaded when relevant. A skill is not itself a callable tool. |
+| Skill resource | A regular file beneath a skill directory, commonly under `scripts/`, `references/`, or `assets/`. Hctl copies resources into native project skill directories without interpreting their content. |
 | Tool | A function the model can call through a declared, schema-validated input and output contract. |
 | Tool file | Source under `tools/` that exports one tool using a supported language contract. Its path registers it by convention; there is no separate hctl manifest. |
 | Tool host | An hctl-owned, long-lived language process that loads tool files and exposes them through MCP. Authors write functions, not host protocol code. |

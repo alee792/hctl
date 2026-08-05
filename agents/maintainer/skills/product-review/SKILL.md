@@ -1,6 +1,6 @@
 ---
 name: product-review
-description: Review changes against hctl's literal author and operator journeys.
+description: Review changes against hctl's literal author and operator journeys. Use when planning, implementing, or checking product behavior.
 ---
 
 Trace the requested journey from authored agent files through `hctl apply`, the

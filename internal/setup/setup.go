@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -16,13 +17,22 @@ import (
 	"hctl/internal/rootfs"
 )
 
-const maxMetadataBytes = 64 << 10
+const maxMetadataBytes = 8 << 20
 
-var portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+var (
+	portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	skillName    = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+)
+
+type generatedFile struct {
+	Content []byte
+	Mode    os.FileMode
+}
 
 type ownedFile struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
+	Mode   uint32 `json:"mode,omitempty"`
 }
 
 type applyRecord struct {
@@ -50,7 +60,8 @@ func Apply(p *project.Project, executable string) ([]string, error) {
 	}
 	priorFiles := map[string]ownedFile{}
 	if exists {
-		if (prior.SchemaVersion != 2 && (prior.SchemaVersion != 1 || p.SourceRoot != p.WorkspaceRoot)) || prior.Harness != p.Harness {
+		compatible := prior.SchemaVersion == 3 || prior.SchemaVersion == 2 || prior.SchemaVersion == 1 && p.SourceRoot == p.WorkspaceRoot
+		if !compatible || prior.Harness != p.Harness {
 			return nil, errors.New("apply record is incompatible; remove the generated harness files manually")
 		}
 		for _, owned := range prior.Files {
@@ -58,12 +69,15 @@ func Apply(p *project.Project, executable string) ([]string, error) {
 				return nil, errors.New("apply record contains an invalid path")
 			}
 			priorFiles[owned.Path] = owned
-			actual, present, err := generatedHash(p.WorkspaceRoot, owned.Path)
+			actual, mode, present, err := generatedState(p.WorkspaceRoot, owned.Path)
 			if err != nil {
 				return nil, err
 			}
 			if present && actual != owned.SHA256 {
 				return nil, fmt.Errorf("generated file %s was changed; refusing to overwrite it", owned.Path)
+			}
+			if present && prior.SchemaVersion == 3 && uint32(mode.Perm()) != owned.Mode {
+				return nil, fmt.Errorf("generated file %s mode was changed; refusing to overwrite it", owned.Path)
 			}
 		}
 	}
@@ -71,7 +85,7 @@ func Apply(p *project.Project, executable string) ([]string, error) {
 		if !allowedPath(p.Harness, path) {
 			return nil, errors.New("generated harness path is not allowed")
 		}
-		_, present, err := generatedHash(p.WorkspaceRoot, path)
+		_, _, present, err := generatedState(p.WorkspaceRoot, path)
 		if err != nil {
 			return nil, err
 		}
@@ -83,10 +97,11 @@ func Apply(p *project.Project, executable string) ([]string, error) {
 	paths := sortedKeys(files)
 	owned := make([]ownedFile, 0, len(paths))
 	for _, path := range paths {
-		if err := rootfs.WriteAtomic(p.WorkspaceRoot, path, files[path], 0o644); err != nil {
+		file := files[path]
+		if err := rootfs.WriteAtomic(p.WorkspaceRoot, path, file.Content, file.Mode); err != nil {
 			return nil, err
 		}
-		owned = append(owned, ownedFile{Path: path, SHA256: rootfs.SHA256(files[path])})
+		owned = append(owned, ownedFile{Path: path, SHA256: rootfs.SHA256(file.Content), Mode: uint32(file.Mode.Perm())})
 	}
 	for path := range priorFiles {
 		if _, retained := files[path]; !retained {
@@ -95,7 +110,7 @@ func Apply(p *project.Project, executable string) ([]string, error) {
 			}
 		}
 	}
-	meta := applyRecord{SchemaVersion: 2, Generator: project.GeneratorVersion, Harness: p.Harness, AgentID: p.AgentID, Source: p.SourceReference, SourceFingerprint: p.SourceFingerprint, Files: owned}
+	meta := applyRecord{SchemaVersion: 3, Generator: project.GeneratorVersion, Harness: p.Harness, AgentID: p.AgentID, Source: p.SourceReference, SourceFingerprint: p.SourceFingerprint, Files: owned}
 	metaBytes, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return nil, errors.New("cannot encode apply record")
@@ -119,7 +134,7 @@ func Verify(p *project.Project) error {
 	if err != nil {
 		return err
 	}
-	if !exists || meta.SchemaVersion != 2 || meta.Generator != project.GeneratorVersion || meta.AgentID != p.AgentID || meta.Source != p.SourceReference || meta.SourceFingerprint != p.SourceFingerprint || meta.Harness != p.Harness {
+	if !exists || meta.SchemaVersion != 3 || meta.Generator != project.GeneratorVersion || meta.AgentID != p.AgentID || meta.Source != p.SourceReference || meta.SourceFingerprint != p.SourceFingerprint || meta.Harness != p.Harness {
 		return fmt.Errorf("%s setup is missing or stale; run hctl apply first", p.Harness)
 	}
 	if len(meta.Files) == 0 {
@@ -131,61 +146,119 @@ func Verify(p *project.Project) error {
 			return errors.New("apply record contains an invalid path")
 		}
 		seen[owned.Path] = true
-		actual, present, err := generatedHash(p.WorkspaceRoot, owned.Path)
-		if err != nil || !present || actual != owned.SHA256 {
+		actual, mode, present, err := generatedState(p.WorkspaceRoot, owned.Path)
+		if err != nil || !present || actual != owned.SHA256 || uint32(mode.Perm()) != owned.Mode {
 			return fmt.Errorf("%s generated file %s is missing or changed; run hctl apply first", p.Harness, owned.Path)
 		}
 	}
 	return nil
 }
 
-func filesFor(p *project.Project, executable string) (map[string][]byte, error) {
-	files := map[string][]byte{}
+func filesFor(p *project.Project, executable string) (map[string]generatedFile, error) {
+	files := map[string]generatedFile{}
 	header := fmt.Sprintf("<!-- Generated by %s from source %s. Safe to discard; edit portable source instead. -->\n\n", project.GeneratorVersion, p.SourceFingerprint)
 	instructions := header + "# " + p.Name + "\n\n" + strings.TrimSpace(string(p.Instructions)) + "\n\n## Tool boundary\n\nTools exposed by the hctl MCP server are managed. Native harness tools remain allowed and unmanaged.\n"
 	mcpArgs := []string{"mcp", "serve", p.SourceRoot, "--workspace", p.WorkspaceRoot, "--harness", p.Harness}
 	if p.Harness == "claude" {
-		files["CLAUDE.md"] = []byte(instructions)
+		files["CLAUDE.md"] = generatedFile{Content: []byte(instructions), Mode: 0o644}
 		config := map[string]any{"mcpServers": map[string]any{"managed": map[string]any{"type": "stdio", "command": executable, "args": mcpArgs}}}
 		configBytes, err := json.MarshalIndent(config, "", "  ")
 		if err != nil {
 			return nil, errors.New("cannot encode Claude MCP configuration")
 		}
-		files[".mcp.json"] = append(configBytes, '\n')
+		files[".mcp.json"] = generatedFile{Content: append(configBytes, '\n'), Mode: 0o644}
 		for _, skill := range p.Skills {
-			files[fmt.Sprintf(".claude/skills/%s/SKILL.md", skill.Name)] = markGeneratedSkill(skill.Content, p.SourceFingerprint)
+			for _, file := range skill.Files {
+				if file.Path == "agents/openai.yaml" {
+					return nil, fmt.Errorf("skill %q contains Codex-only agents/openai.yaml; cannot apply it to Claude", skill.Name)
+				}
+				content := file.Content
+				if file.Path == "SKILL.md" {
+					marked, markErr := markGeneratedSkill(content, p.SourceFingerprint)
+					if markErr != nil {
+						return nil, fmt.Errorf("skill %q: %w", skill.Name, markErr)
+					}
+					content = marked
+				}
+				files[fmt.Sprintf(".claude/skills/%s/%s", skill.Name, file.Path)] = generatedFile{Content: content, Mode: generatedMode(file.Executable)}
+			}
 		}
 		for _, subagent := range p.Subagents {
-			files[fmt.Sprintf(".claude/agents/%s.md", subagent.Name)] = []byte("---\nname: " + subagent.Name + "\ndescription: " + strconv.Quote(subagent.Description) + "\n---\n\n" + strings.TrimSpace(string(subagent.Instructions)) + "\n")
+			files[fmt.Sprintf(".claude/agents/%s.md", subagent.Name)] = generatedFile{Content: []byte("---\nname: " + subagent.Name + "\ndescription: " + strconv.Quote(subagent.Description) + "\n---\n\n" + strings.TrimSpace(string(subagent.Instructions)) + "\n"), Mode: 0o644}
 		}
 	} else {
-		files["AGENTS.md"] = []byte(instructions)
+		files["AGENTS.md"] = generatedFile{Content: []byte(instructions), Mode: 0o644}
 		quotedArgs := make([]string, len(mcpArgs))
 		for index, argument := range mcpArgs {
 			quotedArgs[index] = strconv.Quote(argument)
 		}
-		files[".codex/config.toml"] = []byte("# Generated by " + project.GeneratorVersion + "; safe to discard.\n[mcp_servers.managed]\ncommand = " + strconv.Quote(executable) + "\nargs = [" + strings.Join(quotedArgs, ", ") + "]\n")
+		files[".codex/config.toml"] = generatedFile{Content: []byte("# Generated by " + project.GeneratorVersion + "; safe to discard.\n[mcp_servers.managed]\ncommand = " + strconv.Quote(executable) + "\nargs = [" + strings.Join(quotedArgs, ", ") + "]\n"), Mode: 0o644}
 		for _, skill := range p.Skills {
-			files[fmt.Sprintf(".agents/skills/%s/SKILL.md", skill.Name)] = markGeneratedSkill(skill.Content, p.SourceFingerprint)
+			if skill.AllowedToolsPresent {
+				return nil, fmt.Errorf("skill %q field allowed-tools is not enforced by Codex", skill.Name)
+			}
+			if len(skill.ClaudeFields) > 0 {
+				return nil, fmt.Errorf("skill %q fields %s are Claude-only and cannot be applied to Codex", skill.Name, strings.Join(skill.ClaudeFields, ", "))
+			}
+			for _, file := range skill.Files {
+				content := file.Content
+				if file.Path == "SKILL.md" {
+					marked, markErr := markGeneratedSkill(content, p.SourceFingerprint)
+					if markErr != nil {
+						return nil, fmt.Errorf("skill %q: %w", skill.Name, markErr)
+					}
+					content = marked
+				}
+				files[fmt.Sprintf(".agents/skills/%s/%s", skill.Name, file.Path)] = generatedFile{Content: content, Mode: generatedMode(file.Executable)}
+			}
 		}
 		for _, subagent := range p.Subagents {
-			files[fmt.Sprintf(".codex/agents/%s.toml", subagent.Name)] = []byte("name = " + strconv.Quote(subagent.Name) + "\ndescription = " + strconv.Quote(subagent.Description) + "\ndeveloper_instructions = " + strconv.Quote(strings.TrimSpace(string(subagent.Instructions))) + "\n")
+			files[fmt.Sprintf(".codex/agents/%s.toml", subagent.Name)] = generatedFile{Content: []byte("name = " + strconv.Quote(subagent.Name) + "\ndescription = " + strconv.Quote(subagent.Description) + "\ndeveloper_instructions = " + strconv.Quote(strings.TrimSpace(string(subagent.Instructions))) + "\n"), Mode: 0o644}
 		}
 	}
 	return files, nil
 }
 
-func markGeneratedSkill(content []byte, fingerprint string) []byte {
-	marker := []byte("---\n")
-	second := bytes.Index(content[len(marker):], marker)
-	if second < 0 {
-		return content
+func markGeneratedSkill(content []byte, fingerprint string) ([]byte, error) {
+	insert, err := frontmatterEnd(content)
+	if err != nil {
+		return nil, err
 	}
-	insert := len(marker) + second + len(marker)
 	out := append([]byte{}, content[:insert]...)
+	if len(out) > 0 && out[len(out)-1] != '\n' {
+		out = append(out, '\n')
+	}
 	out = append(out, []byte(fmt.Sprintf("<!-- Generated by %s from source %s. Safe to discard. -->\n", project.GeneratorVersion, fingerprint))...)
 	out = append(out, content[insert:]...)
-	return out
+	return out, nil
+}
+
+func frontmatterEnd(content []byte) (int, error) {
+	position := 0
+	for lineNumber := 0; position < len(content); lineNumber++ {
+		newline := bytes.IndexByte(content[position:], '\n')
+		end := len(content)
+		if newline >= 0 {
+			end = position + newline + 1
+		}
+		line := bytes.TrimSuffix(content[position:end], []byte{'\n'})
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if lineNumber == 0 && !bytes.Equal(line, []byte("---")) {
+			return 0, errors.New("SKILL.md frontmatter is missing")
+		}
+		if lineNumber > 0 && bytes.Equal(line, []byte("---")) {
+			return end, nil
+		}
+		position = end
+	}
+	return 0, errors.New("SKILL.md frontmatter is not closed")
+}
+
+func generatedMode(executable bool) os.FileMode {
+	if executable {
+		return 0o755
+	}
+	return 0o644
 }
 
 func applyRecordPath(harness string) string {
@@ -241,11 +314,16 @@ func allowedOwnedPath(harness, path string, legacy bool) bool {
 }
 
 func generatedSkillPath(path, prefix string) bool {
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/SKILL.md") {
+	if !strings.HasPrefix(path, prefix) {
 		return false
 	}
-	name := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/SKILL.md")
-	return portableName.MatchString(name) && !strings.Contains(name, "/")
+	remainder := strings.TrimPrefix(path, prefix)
+	name, resource, ok := strings.Cut(remainder, "/")
+	if !ok || len(name) > 64 || !skillName.MatchString(name) {
+		return false
+	}
+	_, err := rootfs.CleanRelative(resource)
+	return err == nil
 }
 
 func generatedSubagentPath(path, prefix, suffix string) bool {
@@ -256,15 +334,15 @@ func generatedSubagentPath(path, prefix, suffix string) bool {
 	return portableName.MatchString(name) && !strings.Contains(name, "/")
 }
 
-func generatedHash(root, relative string) (string, bool, error) {
-	data, _, exists, err := rootfs.ReadOptional(root, relative, 1<<20)
+func generatedState(root, relative string) (string, os.FileMode, bool, error) {
+	data, mode, exists, err := rootfs.ReadOptional(root, relative, 1<<20)
 	if err != nil || !exists {
-		return "", exists, err
+		return "", mode, exists, err
 	}
-	return rootfs.SHA256(data), true, nil
+	return rootfs.SHA256(data), mode, true, nil
 }
 
-func sortedKeys(values map[string][]byte) []string {
+func sortedKeys(values map[string]generatedFile) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)

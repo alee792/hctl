@@ -19,11 +19,13 @@ open follow-up questions.
 
 ## Shipped prototype
 
-The repository contains a standard-library Go CLI that:
+The repository contains a small Go CLI, with one maintained YAML dependency,
+that:
 
-- applies portable agent instructions, Markdown skills, and immediate
-  instructions-only subagents to an independently selected workspace as native
-  Claude Code and Codex files without overwriting hand-authored files;
+- applies portable agent instructions, open Agent Skills directories with
+  bundled resources, and immediate instructions-only subagents to an
+  independently selected workspace as native Claude Code and Codex files
+  without overwriting hand-authored files;
 - keeps one apply record, migrates legacy projection records, and removes the
   obsolete duplicated runtime manifest;
 - discovers, prepares, validates, and exposes TypeScript, Python, and Go tool
@@ -82,6 +84,10 @@ workspace safely to a second agent.
 - Immediate subagents use native Claude and Codex configuration, inherit their
   parent's skills and tools, and may not define child tools, skills,
   dependencies, or further subagents in the current slice.
+- Skills use the open `skills/NAME/SKILL.md` layout. Portable documentary
+  metadata and regular-file resources survive both native project harness
+  setups; unsupported vendor behavior fails rather than being silently
+  emulated.
 
 ## Retained product horizon
 
@@ -120,9 +126,9 @@ unresolved. Do not infer answers from the current prototype.
 
 ## Current design frontier
 
-Portable source, independent workspaces, authored tools, and native inherited
-subagents are implemented and exercised through generated Claude and Codex
-configurations. The next product decision is whether to run the deferred skill
-compatibility spike or return to proposal capture, credential brokering, or
-another vision item. Do not add channels or image deployment merely to
-exercise those future seams.
+Portable source, independent workspaces, authored tools, native inherited
+subagents, and the Agent Skills compatibility contract are implemented and
+exercised through generated Claude and Codex configurations. The next product
+decision is packaging and clean-machine acceptance, proposal capture,
+credential brokering, or another vision item. Do not add channels or image
+deployment merely to exercise those future seams.

@@ -20,7 +20,8 @@ instructions-only subagents are discovered by convention:
 my-agent/
   instructions.md
   skills/
-    research.md
+    research/
+      SKILL.md
   tools/
     repeat.ts
     add.py
@@ -40,11 +41,13 @@ Read the project guidance before changing behavior.
 ```
 
 The directory name becomes the agent name, normalized to lowercase words with
-hyphens. Adding a skill file makes it available on the next `hctl apply`; there
-is no registration file to update. TypeScript, Python, and Go tool functions
-under `tools/` are exposed through the same managed MCP server. Immediate
-subagents inherit their parent's generated skills and tools through the native
-harness. See the
+hyphens. Each skill follows the open Agent Skills layout: a named directory
+containing `SKILL.md` and optional scripts, references, assets, or other
+resources. Adding a skill directory makes it available on the next apply;
+there is no registration file to update. TypeScript, Python, and Go tool
+functions under `tools/` are exposed through the same managed MCP server.
+Immediate subagents inherit their parent's generated skills and tools through
+the native harness. See the
 [minimal example](examples/minimal) and the
 [mixed-language example](spikes/polyglot-tools/fixture).
 
@@ -106,6 +109,7 @@ The bootstrap installs a pinned Go toolchain, `gopls`, `golangci-lint`,
 your editor from the configured shell to make the repository-local `gopls`
 available. Applying authored tools also requires their native tooling on
 `PATH`: Deno for TypeScript, `uv` for Python, and Go for Go tools. The
-implementation uses the Go standard library; language-specific schema
-libraries remain inside tool hosts. Tests use credential-free fake harness
-processes; live model calls are not part of the default suite.
+implementation otherwise favors the Go standard library and uses one maintained
+YAML dependency for standards-compliant skill frontmatter; language-specific
+schema libraries remain inside tool hosts. Tests use credential-free fake
+harness processes; live model calls are not part of the default suite.

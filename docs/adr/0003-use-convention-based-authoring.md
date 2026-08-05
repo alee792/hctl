@@ -6,8 +6,12 @@
 
 Make the authored directory layout the project API. Derive the agent name from
 the directory, load descriptive `instructions.md`, and discover optional
-`skills/*.md`, `tools/`, and immediate `subagents/` without a registry or
-required configuration file.
+Agent Skills directories at `skills/NAME/SKILL.md`, `tools/`, and immediate
+`subagents/` without a registry or required configuration file. Copy supported
+regular skill resources into each harness's project skill location. Keep
+harness-specific skill metadata beside `SKILL.md` only when the target has an
+honest native representation; fail rather than copying a reserved vendor file
+to another harness.
 
 ## Context
 
@@ -20,4 +24,7 @@ filesystem-forward conventions provide the clearer precedent.
 
 New authored concepts should use an obvious conventional directory before
 adding configuration. Configuration is reserved for settings the layout cannot
-express. Harness-specific filenames remain generated setup details.
+express. Harness-specific filenames remain generated setup details. The hard
+cut from provisional `skills/*.md` avoids carrying a compatibility layer before
+release; existing experimental agents must move each file to
+`skills/NAME/SKILL.md`.

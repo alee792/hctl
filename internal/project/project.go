@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,25 +14,44 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"go.yaml.in/yaml/v3"
+
 	"hctl/internal/rootfs"
 	"hctl/internal/tool"
 )
 
 const (
-	GeneratorVersion  = "hctl/0.2.0-dev"
+	GeneratorVersion  = "hctl/0.3.0-dev"
 	maxSourceBytes    = 128 << 10
 	maxSkills         = 8
+	maxSkillFiles     = 128
+	maxSkillFileBytes = 1 << 20
+	maxSkillBytes     = 8 << 20
 	maxSubagents      = 8
 	echoMaxInputBytes = 1024
 )
 
-var portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+var (
+	portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	skillName    = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+)
 
 type Skill struct {
-	Name        string
-	Description string
-	Path        string
-	Content     []byte
+	Name                string
+	Description         string
+	License             string
+	Compatibility       string
+	Metadata            map[string]string
+	AllowedTools        string
+	AllowedToolsPresent bool
+	ClaudeFields        []string
+	Files               []SkillFile
+}
+
+type SkillFile struct {
+	Path       string
+	Content    []byte
+	Executable bool
 }
 
 type Subagent struct {
@@ -43,8 +63,9 @@ type Subagent struct {
 }
 
 type SourceRecord struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
+	Path       string `json:"path"`
+	SHA256     string `json:"sha256"`
+	Executable bool   `json:"executable,omitempty"`
 }
 
 type Project struct {
@@ -119,7 +140,13 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 
 	sources := []SourceRecord{{Path: instructionPath, SHA256: rootfs.SHA256(instructionSource)}}
 	for _, skill := range skills {
-		sources = append(sources, SourceRecord{Path: skill.Path, SHA256: rootfs.SHA256(skill.Content)})
+		for _, file := range skill.Files {
+			sources = append(sources, SourceRecord{
+				Path:       "skills/" + skill.Name + "/" + file.Path,
+				SHA256:     rootfs.SHA256(file.Content),
+				Executable: file.Executable,
+			})
+		}
 	}
 	for _, subagent := range subagents {
 		sources = append(sources, SourceRecord{Path: subagent.Path, SHA256: rootfs.SHA256(subagent.Source)})
@@ -271,34 +298,118 @@ func loadSkills(root string) ([]Skill, error) {
 		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-		if !strings.HasSuffix(entry.Name(), ".md") {
-			return nil, fmt.Errorf("skills may contain Markdown files only; found %q", entry.Name())
+		if strings.HasSuffix(entry.Name(), ".md") {
+			name := strings.TrimSuffix(entry.Name(), ".md")
+			return nil, fmt.Errorf("skill %q uses the removed flat layout; move it to %q", "skills/"+entry.Name(), "skills/"+name+"/SKILL.md")
+		}
+		entryInfo, err := entry.Info()
+		if err != nil || !entryInfo.IsDir() || entryInfo.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("skills may contain real skill directories only; found %q", entry.Name())
 		}
 		if len(skills) == maxSkills {
 			return nil, fmt.Errorf("agent may contain at most %d skills", maxSkills)
 		}
-		name := strings.TrimSuffix(entry.Name(), ".md")
-		if !portableName.MatchString(name) {
-			return nil, fmt.Errorf("skill filename %q must use lowercase letters, numbers, and hyphens", entry.Name())
+		name := entry.Name()
+		if !validSkillName(name) {
+			return nil, fmt.Errorf("skill directory %q must be 1-64 lowercase ASCII letters, numbers, and single hyphens", name)
 		}
-		path := "skills/" + entry.Name()
-		content, err := rootfs.ReadSource(root, path, maxSourceBytes)
+		files, err := loadSkillFiles(root, name)
 		if err != nil {
-			return nil, fmt.Errorf("skill %q: %w", path, err)
+			return nil, fmt.Errorf("skill %q: %w", name, err)
 		}
-		if !utf8.Valid(content) {
-			return nil, fmt.Errorf("skill %q must be valid UTF-8", path)
-		}
-		declaredName, description, err := parseSkill(content)
+		frontmatter, err := parseSkill(files[0].Content)
 		if err != nil {
-			return nil, fmt.Errorf("skill %q: %w", path, err)
+			return nil, fmt.Errorf("skill %q SKILL.md: %w", name, err)
 		}
-		if declaredName != name {
-			return nil, fmt.Errorf("skill %q name must match its filename", path)
+		if frontmatter.Name != name {
+			return nil, fmt.Errorf("skill %q name must match its parent directory", name)
 		}
-		skills = append(skills, Skill{Name: name, Description: description, Path: path, Content: content})
+		skills = append(skills, Skill{
+			Name:                name,
+			Description:         frontmatter.Description,
+			License:             frontmatter.License,
+			Compatibility:       frontmatter.Compatibility,
+			Metadata:            frontmatter.Metadata,
+			AllowedTools:        frontmatter.AllowedTools,
+			AllowedToolsPresent: frontmatter.AllowedToolsPresent,
+			ClaudeFields:        frontmatter.ClaudeFields,
+			Files:               files,
+		})
 	}
 	return skills, nil
+}
+
+func loadSkillFiles(root, name string) ([]SkillFile, error) {
+	directory := filepath.Join(root, "skills", name)
+	files := []SkillFile{}
+	total := 0
+	err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return errors.New("cannot read skill directory")
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return errors.New("cannot inspect skill resource")
+		}
+		sourcePath, err := filepath.Rel(root, path)
+		if err != nil {
+			return errors.New("cannot describe skill resource path")
+		}
+		sourcePath = filepath.ToSlash(sourcePath)
+		if !utf8.ValidString(sourcePath) {
+			return errors.New("skill resource paths must be valid UTF-8")
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s must not contain symlinks", sourcePath)
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s must be a regular file", sourcePath)
+		}
+		if len(files) == maxSkillFiles {
+			return fmt.Errorf("may contain at most %d files", maxSkillFiles)
+		}
+		relative, err := filepath.Rel(directory, path)
+		if err != nil {
+			return errors.New("cannot describe skill resource path")
+		}
+		relative = filepath.ToSlash(relative)
+		limit := int64(maxSkillFileBytes)
+		if relative == "SKILL.md" {
+			limit = maxSourceBytes
+		}
+		content, err := rootfs.ReadSource(root, sourcePath, limit)
+		if err != nil {
+			return err
+		}
+		total += len(content)
+		if total > maxSkillBytes {
+			return fmt.Errorf("resources exceed %d bytes", maxSkillBytes)
+		}
+		files = append(files, SkillFile{Path: relative, Content: content, Executable: info.Mode().Perm()&0o111 != 0})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].Path == "SKILL.md" && files[j].Path != "SKILL.md" {
+			return true
+		}
+		if files[j].Path == "SKILL.md" {
+			return false
+		}
+		return files[i].Path < files[j].Path
+	})
+	if len(files) == 0 || files[0].Path != "SKILL.md" {
+		return nil, errors.New("SKILL.md is required")
+	}
+	if !utf8.Valid(files[0].Content) {
+		return nil, errors.New("SKILL.md must be valid UTF-8")
+	}
+	return files, nil
 }
 
 func nameFromRoot(root string) string {
@@ -328,28 +439,164 @@ func nameFromRoot(root string) string {
 	return result
 }
 
-func parseSkill(content []byte) (string, string, error) {
-	scanner := bufio.NewScanner(bytes.NewReader(content))
-	if !scanner.Scan() || scanner.Text() != "---" {
-		return "", "", errors.New("skill file must start with YAML frontmatter")
+type skillFrontmatter struct {
+	Name                string
+	Description         string
+	License             string
+	Compatibility       string
+	Metadata            map[string]string
+	AllowedTools        string
+	AllowedToolsPresent bool
+	ClaudeFields        []string
+}
+
+var claudeSkillFields = map[string]bool{
+	"when_to_use":              true,
+	"argument-hint":            true,
+	"arguments":                true,
+	"disable-model-invocation": true,
+	"user-invocable":           true,
+	"disallowed-tools":         true,
+	"model":                    true,
+	"effort":                   true,
+	"context":                  true,
+	"agent":                    true,
+	"background":               true,
+	"hooks":                    true,
+	"paths":                    true,
+	"shell":                    true,
+}
+
+func parseSkill(content []byte) (skillFrontmatter, error) {
+	block, err := yamlFrontmatter(content)
+	if err != nil {
+		return skillFrontmatter{}, err
 	}
-	fields := map[string]string{}
-	closed := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "---" {
-			closed = true
-			break
+	decoder := yaml.NewDecoder(bytes.NewReader(block))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return skillFrontmatter{}, errors.New("frontmatter must be valid YAML")
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return skillFrontmatter{}, errors.New("frontmatter must contain one YAML document")
+	}
+	if err := validateYAMLTree(&document); err != nil {
+		return skillFrontmatter{}, fmt.Errorf("frontmatter: %w", err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return skillFrontmatter{}, errors.New("frontmatter must be a YAML mapping")
+	}
+
+	result := skillFrontmatter{}
+	compatibilityPresent := false
+	root := document.Content[0]
+	for index := 0; index < len(root.Content); index += 2 {
+		key, value := root.Content[index].Value, root.Content[index+1]
+		switch key {
+		case "name":
+			result.Name, err = yamlString(value, key)
+		case "description":
+			result.Description, err = yamlString(value, key)
+		case "license":
+			result.License, err = yamlString(value, key)
+		case "compatibility":
+			compatibilityPresent = true
+			result.Compatibility, err = yamlString(value, key)
+		case "metadata":
+			result.Metadata, err = yamlStringMap(value, key)
+		case "allowed-tools":
+			result.AllowedToolsPresent = true
+			result.AllowedTools, err = yamlString(value, key)
+		default:
+			if !claudeSkillFields[key] {
+				return skillFrontmatter{}, fmt.Errorf("frontmatter field %q is not supported", key)
+			}
+			if value.Tag == "!!null" {
+				return skillFrontmatter{}, fmt.Errorf("frontmatter field %q must not be null", key)
+			}
+			result.ClaudeFields = append(result.ClaudeFields, key)
 		}
-		key, value, ok := strings.Cut(line, ":")
-		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-		if !ok || (key != "name" && key != "description") || value == "" || fields[key] != "" {
-			return "", "", errors.New("frontmatter supports one plain name and description only")
+		if err != nil {
+			return skillFrontmatter{}, err
 		}
-		fields[key] = value
 	}
-	if !closed || !portableName.MatchString(fields["name"]) || fields["description"] == "" {
-		return "", "", errors.New("frontmatter requires a portable name and non-empty description")
+	if !validSkillName(result.Name) {
+		return skillFrontmatter{}, errors.New("frontmatter name must be 1-64 lowercase ASCII letters, numbers, and single hyphens")
 	}
-	return fields["name"], fields["description"], nil
+	if strings.TrimSpace(result.Description) == "" || len([]rune(result.Description)) > 1024 {
+		return skillFrontmatter{}, errors.New("frontmatter description must contain 1-1024 characters")
+	}
+	if compatibilityPresent && (strings.TrimSpace(result.Compatibility) == "" || len([]rune(result.Compatibility)) > 500) {
+		return skillFrontmatter{}, errors.New("frontmatter compatibility must contain 1-500 characters when provided")
+	}
+	sort.Strings(result.ClaudeFields)
+	return result, nil
+}
+
+func yamlFrontmatter(content []byte) ([]byte, error) {
+	if !utf8.Valid(content) {
+		return nil, errors.New("SKILL.md must be valid UTF-8")
+	}
+	lines := bytes.Split(content, []byte("\n"))
+	if len(lines) == 0 || string(bytes.TrimSuffix(lines[0], []byte("\r"))) != "---" {
+		return nil, errors.New("SKILL.md must start with YAML frontmatter")
+	}
+	for index := 1; index < len(lines); index++ {
+		if string(bytes.TrimSuffix(lines[index], []byte("\r"))) == "---" {
+			return bytes.Join(lines[1:index], []byte("\n")), nil
+		}
+	}
+	return nil, errors.New("SKILL.md frontmatter is not closed")
+}
+
+func validateYAMLTree(node *yaml.Node) error {
+	if node.Kind == yaml.AliasNode {
+		return errors.New("YAML aliases are not supported")
+	}
+	if node.Kind == yaml.MappingNode {
+		seen := map[string]bool{}
+		for index := 0; index < len(node.Content); index += 2 {
+			key := node.Content[index]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+				return errors.New("YAML mapping keys must be strings")
+			}
+			if seen[key.Value] {
+				return fmt.Errorf("YAML field %q is duplicated", key.Value)
+			}
+			seen[key.Value] = true
+		}
+	}
+	for _, child := range node.Content {
+		if err := validateYAMLTree(child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func yamlString(node *yaml.Node, field string) (string, error) {
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!str" {
+		return "", fmt.Errorf("frontmatter field %q must be a string", field)
+	}
+	return node.Value, nil
+}
+
+func yamlStringMap(node *yaml.Node, field string) (map[string]string, error) {
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("frontmatter field %q must map strings to strings", field)
+	}
+	result := make(map[string]string, len(node.Content)/2)
+	for index := 0; index < len(node.Content); index += 2 {
+		value := node.Content[index+1]
+		if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+			return nil, fmt.Errorf("frontmatter field %q must map strings to strings", field)
+		}
+		result[node.Content[index].Value] = value.Value
+	}
+	return result, nil
+}
+
+func validSkillName(name string) bool {
+	return len(name) <= 64 && skillName.MatchString(name)
 }

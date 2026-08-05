@@ -1,6 +1,6 @@
 ---
 name: tool-authoring
-description: Build and review conventionally discovered TypeScript, Python, and Go tools.
+description: Build and review conventionally discovered TypeScript, Python, and Go tools. Use when changing authored tools, language hosts, or their contracts.
 ---
 
 Use the native language contract and lockfiles documented in

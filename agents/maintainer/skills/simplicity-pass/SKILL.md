@@ -1,6 +1,6 @@
 ---
 name: simplicity-pass
-description: Find the smallest complete change that preserves required safety and evidence.
+description: Find the smallest complete change that preserves required safety and evidence. Use during planning, implementation, refactoring, and review.
 ---
 
 Understand the complete path first, then use the earliest solution that holds:

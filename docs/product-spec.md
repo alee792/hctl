@@ -42,7 +42,10 @@ The authoring API is convention-driven. An MVP project is:
 my-agent/
   instructions.md
   skills/
-    research.md
+    research/
+      SKILL.md
+      references/
+        sources.md
   tools/
     get_weather.ts
     lookup_policy.py
@@ -56,10 +59,37 @@ my-agent/
 The directory name supplies the agent name, normalized to lowercase words with
 hyphens. `instructions.md` is required and contains YAML frontmatter with one
 plain `description` plus a non-empty Markdown body. Generated always-on
-instructions contain the body, not the frontmatter. The `skills/` directory is optional;
-each visible Markdown file in it is one skill and its frontmatter name must
-match its filename. Adding or removing a skill file updates the compiled
-project without separate registration.
+instructions contain the body, not the frontmatter.
+
+The `skills/` directory is optional. Each visible immediate directory is one
+skill and contains a required `SKILL.md`; its frontmatter `name` must match the
+directory name. A skill follows the open Agent Skills format and may include
+regular-file resources such as `scripts/`, `references/`, `assets/`, and other
+nested directories. Adding or removing a skill directory updates the compiled
+project without separate registration. Hctl keeps the existing eight-skill
+limit.
+
+`name` and `description` are required. Names contain 1-64 lowercase ASCII
+letters, digits, and single hyphens, without a leading or trailing hyphen.
+Descriptions contain 1-1024 characters. The portable optional frontmatter is
+string `license`, 1-500 character `compatibility`, string-to-string `metadata`,
+and experimental space-separated string `allowed-tools`. Documentary fields
+are preserved without claiming that a harness operationalizes them.
+Harness-specific behavior is accepted only when the selected harness documents
+an exact representation; unsupported security-, invocation-, routing-, or
+model-affecting semantics fail explicitly. In particular, hctl does not pretend
+that Codex enforces `allowed-tools` or a Claude skill model selection. Claude
+operational extensions fail a Codex apply; an OpenAI-host
+`agents/openai.yaml` file is copied byte-for-byte for Codex and fails a Claude
+apply.
+
+Apply copies supported skill resources byte-for-byte into the selected
+harness's project skill directory and preserves executable intent in its
+ownership and source fingerprints. The reserved `agents/openai.yaml` resource
+is Codex-only. All authored skill entries must be bounded regular files and real
+directories with valid UTF-8 relative paths. Symlinks are rejected even when a
+native harness supports them, so the portable source boundary remains
+deterministic and cannot escape the agent project.
 
 Immediate directories under `subagents/` define native harness subagents. Each
 contains only an `instructions.md` file with the same description-and-body
@@ -78,11 +108,12 @@ default object containing `description`, strict Zod `inputSchema` and
 `Input`, `Output`, and `Execute`. The runnable mixed-language fixture is the
 canonical syntax example while the product remains experimental.
 
-Authored source files must be regular, bounded UTF-8 files without symlink
-traversal. There is no authored hctl manifest, registry, or duplicated tool
-inventory. TypeScript uses root `deno.json` and `deno.lock`; Python uses
-`pyproject.toml` and `uv.lock`; Go uses `go.mod` and an optional `go.sum`.
-These native files describe dependencies without registering tools.
+Authored source entries must be bounded regular files and real directories
+without symlink traversal. Contract and code files must be UTF-8; arbitrary
+skill resources may be binary. There is no authored hctl manifest, registry,
+or duplicated tool inventory. TypeScript uses root `deno.json` and `deno.lock`;
+Python uses `pyproject.toml` and `uv.lock`; Go uses `go.mod` and an optional
+`go.sum`. These native files describe dependencies without registering tools.
 Compilation produces a deterministic apply record and source fingerprint. The
 bounded `echo` managed tool remains an hctl-provided default; it is not author
 configuration.
@@ -117,7 +148,9 @@ agent project.
 Claude receives `CLAUDE.md`, `.mcp.json`, `.claude/skills/`, and
 `.claude/agents/`. Codex receives `AGENTS.md`, `.codex/config.toml`,
 `.agents/skills/`, and `.codex/agents/`. Generated MCP configuration uses the
-resolved `hctl` executable, agent-source, and workspace paths.
+resolved `hctl` executable, agent-source, and workspace paths. Hctl generates
+skills only at this project scope; it does not modify user, administrator,
+enterprise, or plugin skill locations.
 
 Codex project configuration remains subject to Codex's native repository-trust
 flow. Apply does not edit the user's global Codex configuration or silently
@@ -244,6 +277,10 @@ The MVP is complete when credential-free tests prove:
 11. Immediate instructions-only subagents are generated in each harness's
     native format and inherit the parent setup without duplicated child tools
     or skills.
+12. Agent Skills directories and their regular-file resources round-trip into
+    both native project skill locations, including executable intent, while
+    unsupported behavioral metadata fails with a field- and harness-specific
+    diagnostic.
 
 ## Explicit non-goals
 

@@ -8,7 +8,9 @@ files, CLI guidance, or product documentation.
 
 | Term | Meaning |
 | --- | --- |
-| Agent project | The authored filesystem source of truth for one agent. |
+| Agent project | The portable authored filesystem source for one agent: instructions, skills, tools, subagents, and native dependency files. It is not coupled to the repository that stores it or the workspace where it is used. |
+| Agent source | The selected agent-project directory from which hctl discovers and validates authored files. |
+| Workspace | The independently selected directory where the harness operates. Generated harness files, hctl state, caches, and authored tool processes belong here. It defaults to the agent source for a standalone agent. |
 | Instructions | Always-on authored guidance projected into the native harness. |
 | Skill | Reusable instructions and supporting files loaded when relevant. A skill is not itself a callable tool. |
 | Tool | A function the model can call through a declared, schema-validated input and output contract. |
@@ -21,7 +23,7 @@ files, CLI guidance, or product documentation.
 | Subagent | A specialized agent delegated work by another agent. |
 | Schedule | A recurring trigger for headless agent work. |
 | Harness | The native agent product hctl prepares and extends, initially Claude Code or Codex. The harness owns the model loop and interactive UX. |
-| Apply | Validate an agent project and prepare the native harness files and local tool runtime needed to use it. |
+| Apply | Validate an agent project and prepare the native harness files and local tool runtime needed to use it in a chosen workspace. |
 | Harness setup | The generated instructions, skills, and MCP configuration that make an agent project usable in one native harness. Individual files are called generated harness files. |
 | Apply record | Generated hctl bookkeeping used to detect a stale or edited harness setup. It is not authored configuration or a tool inventory. |
 | MCP | The protocol boundary through which a harness discovers and invokes tools. Local tool authors do not need to implement it. |
@@ -31,6 +33,7 @@ files, CLI guidance, or product documentation.
 | Session | One resumable interaction context owned by the native harness and mapped by the gateway when used headlessly. |
 | Proposal | A recorded candidate improvement to instructions, a skill, a tool, or other agent feedback. A proposal is inert until a human accepts it into the authored project. |
 | Credential broker | An internal boundary that uses a credential for an authorized tool or connection without exposing the credential value to the agent session. |
+| Agent image | A possible future deployable package containing a harness, an agent project, and hctl. It composes the same source/workspace contract rather than redefining the agent project as a runtime. |
 
 Configuration may be added later only for settings a directory layout cannot
 express. It must not duplicate the filesystem inventory.

@@ -6,12 +6,18 @@ native Claude Code and Codex setups without replacing their model loops or
 interfaces. For headless use, add a session-aware gateway that connects
 external input and governs only what crosses its managed boundary.
 
+An agent project is portable source, not a repository-bound runtime. Apply it
+to any chosen workspace: the agent files define behavior, while the workspace
+defines where the harness operates. A future deployable agent may package a
+harness, an agent project, and hctl into one image without changing that
+separation.
+
 ## Boundary
 
 The selected harness owns intelligence: model calls, context management,
 planning, native tools, approvals, and interactive UX. The tool owns the
-portable filesystem contract and the tools routed through its managed
-boundary.
+portable agent-project contract, generated workspace setup, and the tools
+routed through its managed boundary.
 
 Interactive users work directly in Claude Code or Codex after hctl prepares
 the harness setup. Headless users may place the gateway between an input source

@@ -1,6 +1,6 @@
 # Working status
 
-- Updated: 2026-08-04
+- Updated: 2026-08-05
 - Repository: local-only `hctl` experiment; product naming remains deferred
 - Purpose: let a clean session resume without depending on chat history or the
   previous Roster repository
@@ -45,9 +45,12 @@ proves persistent hosts plus bounded failure behavior.
   model loops, context management, native tools, approvals, or interactive UI.
 - Interactive users run the native harness after `hctl apply`. The gateway is
   an optional headless boundary, not a cross-harness chat UI.
-- The agent project is an ordinary directory. Conventional files are the
-  authoring interface; there is no authored hctl manifest, registry, or second
-  inventory.
+- The agent project is portable source and is not coupled to the repository
+  that stores it. Conventional files are the authoring interface; there is no
+  authored hctl manifest, registry, or second inventory.
+- A workspace is selected independently and defaults to the agent project for
+  the standalone case. Harness files and hctl runtime state are written to the
+  workspace; source discovery remains rooted in the agent project.
 - Author-facing language uses concrete Eve-style terms such as instructions,
   skills, tools, channels, and connections. Avoid using `capability` as a
   synonym for `tool` and `projection` for generated harness files.
@@ -91,6 +94,9 @@ These are later product promises, not MVP implementation work:
   is introduced.
 - Slack, webhooks, OAuth, network listeners, vendor delivery, scheduling,
   deployment integrations, and a hosted SDK remain outside the current MVP.
+- A later deployment path may compose a harness, an agent project, and hctl in
+  an image. This is a packaging and operations layer over the same portable
+  source contract, not a reason to couple source to its storage repository.
 
 ## Open questions
 
@@ -106,8 +112,8 @@ unresolved. Do not infer answers from the current prototype.
 
 ## Current design frontier
 
-The authored-tool journey is now implemented and exercised through generated
-Claude and Codex MCP configurations. The next product decision is whether to
-polish this provisional authoring API or return to another vision item such as
-proposal capture, credential brokering, or broader non-MCP filesystem setup.
-Do not add channels merely to exercise the gateway seam.
+The authored-tool journey is implemented and exercised through generated
+Claude and Codex MCP configurations. The active implementation frontier is
+separating agent source from workspace, then adding native inherited subagent
+setup without claiming filesystem isolation from harness-native tools. Do not
+add channels or image deployment merely to exercise those future seams.

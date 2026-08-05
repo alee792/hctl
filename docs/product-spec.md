@@ -10,12 +10,14 @@
 The primary user is an agent author who understands basic files and directories
 and common AI concepts such as instructions, skills, and tools. They should not
 need to understand registration, manifests, or harness configuration. They
-define one filesystem-authored project, prove it interactively in Claude Code
-or Codex, and may operate the same setup headlessly through channels.
+define one filesystem-authored agent project, apply it to a chosen workspace,
+prove it interactively in Claude Code or Codex, and may operate the same setup
+headlessly through channels.
 
 ## Product principles
 
-1. The authored directory is the legible, versionable source of truth.
+1. The agent project is legible, versionable, portable source and is not
+   coupled to the repository that stores it.
 2. Common behavior is portable; harness-specific differences are explicit.
 3. Compilation and validation happen before harness files are written or a
    gateway starts.
@@ -75,15 +77,29 @@ configuration.
 ## Apply and handoff
 
 ```sh
-hctl apply AGENT --harness claude
-hctl apply AGENT --harness codex
+hctl apply AGENT --workspace WORKSPACE --harness claude
+hctl apply AGENT --workspace WORKSPACE --harness codex
 ```
 
 `apply` validates the authored project, target harness executable, tool
 definitions, locked dependencies, and protocol readiness. It invokes Deno,
 `uv`, or Go only when that language is present, then materializes owned native
-files directly in the agent project so the user can change into that directory
-and start the selected harness normally.
+files in the selected workspace so the user can change into that directory and
+start the selected harness normally. `--workspace` defaults to the agent
+project directory, making a standalone agent the simplest case. Applying an
+agent stored elsewhere is explicit:
+
+```sh
+hctl apply ~/agents/reviewer --workspace ~/Code/example --harness claude
+cd ~/Code/example && claude
+```
+
+The agent project supplies instructions, skills, tools, subagents, and native
+dependency files. The workspace supplies harness-visible working files and is
+the working directory for the harness and authored tools. Generated harness
+files, apply records, gateway state, and runtime caches belong to the
+workspace. Source discovery and dependency preparation remain rooted in the
+agent project.
 
 Claude receives `CLAUDE.md`, `.mcp.json`, and `.claude/skills/`. Codex receives
 `AGENTS.md`, `.codex/config.toml`, and `.agents/skills/`. Generated MCP
@@ -157,8 +173,9 @@ tooling. Generic TypeScript and Python hosts plus generated Go build output live
 under disposable `.hctl/cache/tools/`; no normalized tool manifest is written.
 
 The generated MCP command identifies its harness. At startup hctl verifies the
-matching apply record and source fingerprint before loading the cached hosts.
-Authors write typed functions and do not implement MCP protocol code.
+matching workspace apply record, selected agent identity, and source
+fingerprint before loading the cached hosts. Authors write typed functions and
+do not implement MCP protocol code.
 
 ## Deferred direction: proposals
 
@@ -213,6 +230,7 @@ The MVP is complete when credential-free tests prove:
 - Vendor channels or webhook delivery
 - Claude Agent SDK or hosted OpenAI agent runtimes
 - Scheduling, workflows, subagents, or deployment orchestration
+- Building or deploying packaged agent images
 - Governance claims over native harness tools
 - Credential storage before a secret-bearing tool exists
 - Automatic or unreviewed promotion of agent-authored improvements

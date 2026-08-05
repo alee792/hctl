@@ -25,7 +25,8 @@ headlessly through channels.
 5. Native harness tools remain available and explicitly unmanaged.
 6. Policy applies only at managed-tool and durable-state boundaries.
 7. Interactive users remain in the native harness interface.
-8. Unsupported behavior fails honestly instead of being silently emulated.
+8. Unsupported differences are reported. Apply omits only explicitly safe
+   presentation or discovery metadata; material behavioral loss fails.
 9. Conventional files register behavior without a second inventory.
 10. Author-facing language stays concrete; runtime terminology remains internal.
 
@@ -76,12 +77,15 @@ string `license`, 1-500 character `compatibility`, string-to-string `metadata`,
 and experimental space-separated string `allowed-tools`. Documentary fields
 are preserved without claiming that a harness operationalizes them.
 Harness-specific behavior is accepted only when the selected harness documents
-an exact representation; unsupported security-, invocation-, routing-, or
-model-affecting semantics fail explicitly. In particular, hctl does not pretend
-that Codex enforces `allowed-tools` or a Claude skill model selection. Claude
-operational extensions fail a Codex apply; an OpenAI-host
-`agents/openai.yaml` file is copied byte-for-byte for Codex and fails a Claude
-apply.
+an exact representation. Unsupported presentation or discovery metadata may be
+omitted with a precise warning when losing it cannot change authorization,
+execution, routing, invocation control, dependencies, or model selection.
+Material behavioral loss fails explicitly. In particular, hctl does not
+pretend that Codex enforces `allowed-tools` or a Claude skill model selection.
+Claude presentation fields may be omitted for Codex while operational fields
+fail. An OpenAI-host `agents/openai.yaml` file is copied byte-for-byte for
+Codex; known display-only metadata is omitted with a warning for Claude, while
+behavioral or unknown fields fail.
 
 Apply copies supported skill resources byte-for-byte into the selected
 harness's project skill directory and preserves executable intent in its
@@ -279,8 +283,8 @@ The MVP is complete when credential-free tests prove:
     or skills.
 12. Agent Skills directories and their regular-file resources round-trip into
     both native project skill locations, including executable intent, while
-    unsupported behavioral metadata fails with a field- and harness-specific
-    diagnostic.
+    safely omittable metadata warns and unsupported behavioral metadata fails
+    with field-, path-, and harness-specific diagnostics.
 
 ## Explicit non-goals
 

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	"go.yaml.in/yaml/v3"
+
 	"hctl/internal/project"
 	"hctl/internal/rootfs"
 )
@@ -20,13 +22,50 @@ import (
 const maxMetadataBytes = 8 << 20
 
 var (
-	portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-	skillName    = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	portableName          = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	skillName             = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	omittableClaudeFields = map[string]bool{
+		"argument-hint": true,
+		"when_to_use":   true,
+	}
+	omittableOpenAIInterfaceFields = map[string]bool{
+		"brand_color":       true,
+		"display_name":      true,
+		"icon_large":        true,
+		"icon_small":        true,
+		"short_description": true,
+	}
 )
 
 type generatedFile struct {
 	Content []byte
 	Mode    os.FileMode
+}
+
+type Diagnostic struct {
+	Severity string
+	Path     string
+	Field    string
+	Harness  string
+	Message  string
+}
+
+func (diagnostic Diagnostic) String() string {
+	location := diagnostic.Path
+	if diagnostic.Field != "" {
+		location += ": field " + strconv.Quote(diagnostic.Field)
+	}
+	return diagnostic.Severity + ": " + location + ": " + diagnostic.Message + " for " + diagnostic.Harness
+}
+
+type Result struct {
+	Files       []string
+	Diagnostics []Diagnostic
+}
+
+type generatedSetup struct {
+	Files       map[string]generatedFile
+	Diagnostics []Diagnostic
 }
 
 type ownedFile struct {
@@ -45,52 +84,53 @@ type applyRecord struct {
 	Files             []ownedFile `json:"files"`
 }
 
-func Apply(p *project.Project, executable string) ([]string, error) {
+func Apply(p *project.Project, executable string) (Result, error) {
 	if !filepath.IsAbs(executable) {
-		return nil, errors.New("managed MCP executable path must be absolute")
+		return Result{}, errors.New("managed MCP executable path must be absolute")
 	}
-	files, err := filesFor(p, executable)
+	generated, err := filesFor(p, executable)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
+	files := generated.Files
 	recordPath := applyRecordPath(p.Harness)
 	prior, exists, legacy, err := loadApplyRecord(p.WorkspaceRoot, p.Harness)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	priorFiles := map[string]ownedFile{}
 	if exists {
 		compatible := prior.SchemaVersion == 3 || prior.SchemaVersion == 2 || prior.SchemaVersion == 1 && p.SourceRoot == p.WorkspaceRoot
 		if !compatible || prior.Harness != p.Harness {
-			return nil, errors.New("apply record is incompatible; remove the generated harness files manually")
+			return Result{}, errors.New("apply record is incompatible; remove the generated harness files manually")
 		}
 		for _, owned := range prior.Files {
 			if !allowedOwnedPath(p.Harness, owned.Path, legacy) || priorFiles[owned.Path].Path != "" {
-				return nil, errors.New("apply record contains an invalid path")
+				return Result{}, errors.New("apply record contains an invalid path")
 			}
 			priorFiles[owned.Path] = owned
 			actual, mode, present, err := generatedState(p.WorkspaceRoot, owned.Path)
 			if err != nil {
-				return nil, err
+				return Result{}, err
 			}
 			if present && actual != owned.SHA256 {
-				return nil, fmt.Errorf("generated file %s was changed; refusing to overwrite it", owned.Path)
+				return Result{}, fmt.Errorf("generated file %s was changed; refusing to overwrite it", owned.Path)
 			}
 			if present && prior.SchemaVersion == 3 && uint32(mode.Perm()) != owned.Mode {
-				return nil, fmt.Errorf("generated file %s mode was changed; refusing to overwrite it", owned.Path)
+				return Result{}, fmt.Errorf("generated file %s mode was changed; refusing to overwrite it", owned.Path)
 			}
 		}
 	}
 	for path := range files {
 		if !allowedPath(p.Harness, path) {
-			return nil, errors.New("generated harness path is not allowed")
+			return Result{}, errors.New("generated harness path is not allowed")
 		}
 		_, _, present, err := generatedState(p.WorkspaceRoot, path)
 		if err != nil {
-			return nil, err
+			return Result{}, err
 		}
 		if present && priorFiles[path].Path == "" {
-			return nil, fmt.Errorf("native file %s already exists without hctl ownership; refusing to overwrite it", path)
+			return Result{}, fmt.Errorf("native file %s already exists without hctl ownership; refusing to overwrite it", path)
 		}
 	}
 
@@ -99,34 +139,34 @@ func Apply(p *project.Project, executable string) ([]string, error) {
 	for _, path := range paths {
 		file := files[path]
 		if err := rootfs.WriteAtomic(p.WorkspaceRoot, path, file.Content, file.Mode); err != nil {
-			return nil, err
+			return Result{}, err
 		}
 		owned = append(owned, ownedFile{Path: path, SHA256: rootfs.SHA256(file.Content), Mode: uint32(file.Mode.Perm())})
 	}
 	for path := range priorFiles {
 		if _, retained := files[path]; !retained {
 			if err := rootfs.RemoveRegular(p.WorkspaceRoot, path); err != nil {
-				return nil, err
+				return Result{}, err
 			}
 		}
 	}
 	meta := applyRecord{SchemaVersion: 3, Generator: project.GeneratorVersion, Harness: p.Harness, AgentID: p.AgentID, Source: p.SourceReference, SourceFingerprint: p.SourceFingerprint, Files: owned}
 	metaBytes, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
-		return nil, errors.New("cannot encode apply record")
+		return Result{}, errors.New("cannot encode apply record")
 	}
 	if err := rootfs.WriteAtomic(p.WorkspaceRoot, recordPath, append(metaBytes, '\n'), 0o644); err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	if legacy {
 		if err := rootfs.RemoveRegular(p.WorkspaceRoot, legacyRecordPath(p.Harness)); err != nil {
-			return nil, err
+			return Result{}, err
 		}
 	}
 	if err := Verify(p); err != nil {
-		return nil, err
+		return Result{}, err
 	}
-	return append(paths, recordPath), nil
+	return Result{Files: append(paths, recordPath), Diagnostics: generated.Diagnostics}, nil
 }
 
 func Verify(p *project.Project) error {
@@ -154,8 +194,9 @@ func Verify(p *project.Project) error {
 	return nil
 }
 
-func filesFor(p *project.Project, executable string) (map[string]generatedFile, error) {
+func filesFor(p *project.Project, executable string) (generatedSetup, error) {
 	files := map[string]generatedFile{}
+	diagnostics := []Diagnostic{}
 	header := fmt.Sprintf("<!-- Generated by %s from source %s. Safe to discard; edit portable source instead. -->\n\n", project.GeneratorVersion, p.SourceFingerprint)
 	instructions := header + "# " + p.Name + "\n\n" + strings.TrimSpace(string(p.Instructions)) + "\n\n## Tool boundary\n\nTools exposed by the hctl MCP server are managed. Native harness tools remain allowed and unmanaged.\n"
 	mcpArgs := []string{"mcp", "serve", p.SourceRoot, "--workspace", p.WorkspaceRoot, "--harness", p.Harness}
@@ -164,19 +205,26 @@ func filesFor(p *project.Project, executable string) (map[string]generatedFile, 
 		config := map[string]any{"mcpServers": map[string]any{"managed": map[string]any{"type": "stdio", "command": executable, "args": mcpArgs}}}
 		configBytes, err := json.MarshalIndent(config, "", "  ")
 		if err != nil {
-			return nil, errors.New("cannot encode Claude MCP configuration")
+			return generatedSetup{}, errors.New("cannot encode Claude MCP configuration")
 		}
 		files[".mcp.json"] = generatedFile{Content: append(configBytes, '\n'), Mode: 0o644}
 		for _, skill := range p.Skills {
 			for _, file := range skill.Files {
 				if file.Path == "agents/openai.yaml" {
-					return nil, fmt.Errorf("skill %q contains Codex-only agents/openai.yaml; cannot apply it to Claude", skill.Name)
+					fields, classifyErr := omittableOpenAIFields(file.Content)
+					if classifyErr != nil {
+						return generatedSetup{}, fmt.Errorf("skill %q (skills/%s/%s): %w", skill.Name, skill.Name, file.Path, classifyErr)
+					}
+					for _, field := range fields {
+						diagnostics = append(diagnostics, warning("skills/"+skill.Name+"/"+file.Path, field, "claude", "OpenAI presentation metadata is not supported and was omitted"))
+					}
+					continue
 				}
 				content := file.Content
 				if file.Path == "SKILL.md" {
 					marked, markErr := markGeneratedSkill(content, p.SourceFingerprint)
 					if markErr != nil {
-						return nil, fmt.Errorf("skill %q: %w", skill.Name, markErr)
+						return generatedSetup{}, fmt.Errorf("skill %q: %w", skill.Name, markErr)
 					}
 					content = marked
 				}
@@ -195,17 +243,28 @@ func filesFor(p *project.Project, executable string) (map[string]generatedFile, 
 		files[".codex/config.toml"] = generatedFile{Content: []byte("# Generated by " + project.GeneratorVersion + "; safe to discard.\n[mcp_servers.managed]\ncommand = " + strconv.Quote(executable) + "\nargs = [" + strings.Join(quotedArgs, ", ") + "]\n"), Mode: 0o644}
 		for _, skill := range p.Skills {
 			if skill.AllowedToolsPresent {
-				return nil, fmt.Errorf("skill %q field allowed-tools is not enforced by Codex", skill.Name)
+				return generatedSetup{}, fmt.Errorf("skill %q (skills/%s/SKILL.md): field %q changes tool approval and is not supported by Codex; remove it or apply to Claude", skill.Name, skill.Name, "allowed-tools")
 			}
-			if len(skill.ClaudeFields) > 0 {
-				return nil, fmt.Errorf("skill %q fields %s are Claude-only and cannot be applied to Codex", skill.Name, strings.Join(skill.ClaudeFields, ", "))
+			omitted, blocked := classifyClaudeFields(skill.ClaudeFields)
+			if len(blocked) > 0 {
+				return generatedSetup{}, fmt.Errorf("skill %q (skills/%s/SKILL.md): Claude-only fields %s change behavior and are not supported by Codex; remove them or apply to Claude", skill.Name, skill.Name, strings.Join(blocked, ", "))
+			}
+			for _, field := range omitted {
+				diagnostics = append(diagnostics, warning("skills/"+skill.Name+"/SKILL.md", field, "codex", "Claude presentation or discovery metadata is not supported and was omitted"))
 			}
 			for _, file := range skill.Files {
 				content := file.Content
 				if file.Path == "SKILL.md" {
+					if len(omitted) > 0 {
+						omittedContent, omitErr := omitSkillFields(content, omitted)
+						if omitErr != nil {
+							return generatedSetup{}, fmt.Errorf("skill %q: cannot omit unsupported metadata: %w", skill.Name, omitErr)
+						}
+						content = omittedContent
+					}
 					marked, markErr := markGeneratedSkill(content, p.SourceFingerprint)
 					if markErr != nil {
-						return nil, fmt.Errorf("skill %q: %w", skill.Name, markErr)
+						return generatedSetup{}, fmt.Errorf("skill %q: %w", skill.Name, markErr)
 					}
 					content = marked
 				}
@@ -216,7 +275,114 @@ func filesFor(p *project.Project, executable string) (map[string]generatedFile, 
 			files[fmt.Sprintf(".codex/agents/%s.toml", subagent.Name)] = generatedFile{Content: []byte("name = " + strconv.Quote(subagent.Name) + "\ndescription = " + strconv.Quote(subagent.Description) + "\ndeveloper_instructions = " + strconv.Quote(strings.TrimSpace(string(subagent.Instructions))) + "\n"), Mode: 0o644}
 		}
 	}
-	return files, nil
+	return generatedSetup{Files: files, Diagnostics: diagnostics}, nil
+}
+
+func warning(path, field, harness, message string) Diagnostic {
+	return Diagnostic{Severity: "warning", Path: path, Field: field, Harness: harness, Message: message}
+}
+
+func classifyClaudeFields(fields []string) ([]string, []string) {
+	omitted := []string{}
+	blocked := []string{}
+	for _, field := range fields {
+		if omittableClaudeFields[field] {
+			omitted = append(omitted, field)
+		} else {
+			blocked = append(blocked, field)
+		}
+	}
+	return omitted, blocked
+}
+
+func omittableOpenAIFields(content []byte) ([]string, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return nil, errors.New("agents/openai.yaml must contain valid YAML")
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("agents/openai.yaml must contain one YAML document")
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return nil, errors.New("agents/openai.yaml must be a YAML mapping")
+	}
+	root := document.Content[0]
+	seenRoot := map[string]bool{}
+	fields := []string{}
+	for index := 0; index < len(root.Content); index += 2 {
+		key, value := root.Content[index], root.Content[index+1]
+		if key.Kind != yaml.ScalarNode || key.Tag != "!!str" || seenRoot[key.Value] {
+			return nil, errors.New("agents/openai.yaml must use unique string fields")
+		}
+		seenRoot[key.Value] = true
+		if key.Value != "interface" {
+			return nil, fmt.Errorf("field %q may change OpenAI behavior and cannot be omitted for Claude", key.Value)
+		}
+		if value.Kind != yaml.MappingNode {
+			return nil, errors.New("field \"interface\" must be a mapping")
+		}
+		seenInterface := map[string]bool{}
+		for child := 0; child < len(value.Content); child += 2 {
+			childKey, childValue := value.Content[child], value.Content[child+1]
+			if childKey.Kind != yaml.ScalarNode || childKey.Tag != "!!str" || seenInterface[childKey.Value] {
+				return nil, errors.New("field \"interface\" must use unique string fields")
+			}
+			seenInterface[childKey.Value] = true
+			field := "interface." + childKey.Value
+			if !omittableOpenAIInterfaceFields[childKey.Value] {
+				return nil, fmt.Errorf("field %q may change OpenAI behavior and cannot be omitted for Claude", field)
+			}
+			if childValue.Kind != yaml.ScalarNode || childValue.Tag != "!!str" {
+				return nil, fmt.Errorf("field %q must be a string", field)
+			}
+			fields = append(fields, field)
+		}
+	}
+	if len(fields) == 0 {
+		return nil, errors.New("agents/openai.yaml contains no safely omittable presentation metadata")
+	}
+	sort.Strings(fields)
+	return fields, nil
+}
+
+func omitSkillFields(content []byte, fields []string) ([]byte, error) {
+	frontmatterStart, frontmatterClose, bodyStart, err := frontmatterBounds(content)
+	if err != nil {
+		return nil, err
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(content[frontmatterStart:frontmatterClose]))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return nil, errors.New("SKILL.md frontmatter must be a YAML mapping")
+	}
+	omit := map[string]bool{}
+	for _, field := range fields {
+		omit[field] = true
+	}
+	root := document.Content[0]
+	filtered := make([]*yaml.Node, 0, len(root.Content))
+	for index := 0; index < len(root.Content); index += 2 {
+		if !omit[root.Content[index].Value] {
+			filtered = append(filtered, root.Content[index], root.Content[index+1])
+		}
+	}
+	root.Content = filtered
+	var encoded bytes.Buffer
+	encoder := yaml.NewEncoder(&encoded)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(root); err != nil {
+		return nil, errors.New("cannot encode portable skill frontmatter")
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, errors.New("cannot finish portable skill frontmatter")
+	}
+	result := []byte("---\n")
+	result = append(result, encoded.Bytes()...)
+	result = append(result, []byte("---\n")...)
+	result = append(result, content[bodyStart:]...)
+	return result, nil
 }
 
 func markGeneratedSkill(content []byte, fingerprint string) ([]byte, error) {
@@ -234,7 +400,13 @@ func markGeneratedSkill(content []byte, fingerprint string) ([]byte, error) {
 }
 
 func frontmatterEnd(content []byte) (int, error) {
+	_, _, end, err := frontmatterBounds(content)
+	return end, err
+}
+
+func frontmatterBounds(content []byte) (int, int, int, error) {
 	position := 0
+	frontmatterStart := 0
 	for lineNumber := 0; position < len(content); lineNumber++ {
 		newline := bytes.IndexByte(content[position:], '\n')
 		end := len(content)
@@ -244,14 +416,17 @@ func frontmatterEnd(content []byte) (int, error) {
 		line := bytes.TrimSuffix(content[position:end], []byte{'\n'})
 		line = bytes.TrimSuffix(line, []byte{'\r'})
 		if lineNumber == 0 && !bytes.Equal(line, []byte("---")) {
-			return 0, errors.New("SKILL.md frontmatter is missing")
+			return 0, 0, 0, errors.New("SKILL.md frontmatter is missing")
+		}
+		if lineNumber == 0 {
+			frontmatterStart = end
 		}
 		if lineNumber > 0 && bytes.Equal(line, []byte("---")) {
-			return end, nil
+			return frontmatterStart, position, end, nil
 		}
 		position = end
 	}
-	return 0, errors.New("SKILL.md frontmatter is not closed")
+	return 0, 0, 0, errors.New("SKILL.md frontmatter is not closed")
 }
 
 func generatedMode(executable bool) os.FileMode {

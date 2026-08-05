@@ -10,8 +10,9 @@ Agent Skills directories at `skills/NAME/SKILL.md`, `tools/`, and immediate
 `subagents/` without a registry or required configuration file. Copy supported
 regular skill resources into each harness's project skill location. Keep
 harness-specific skill metadata beside `SKILL.md` only when the target has an
-honest native representation; fail rather than copying a reserved vendor file
-to another harness.
+honest native representation. Warn and omit explicitly classified presentation
+or discovery metadata when safe; fail rather than silently losing behavioral or
+unknown semantics.
 
 ## Context
 

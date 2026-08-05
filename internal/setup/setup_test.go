@@ -18,10 +18,11 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths, err := Apply(p, "/opt/hctl/bin/hctl")
+	result, err := Apply(p, "/opt/hctl/bin/hctl")
 	if err != nil {
 		t.Fatal(err)
 	}
+	paths := result.Files
 	want := []string{
 		".claude/agents/docs-reviewer.md",
 		".claude/skills/echo/SKILL.md",
@@ -97,7 +98,41 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 	}
 }
 
-func TestApplyRejectsCrossHarnessVendorSemantics(t *testing.T) {
+func TestApplyHandlesCrossHarnessVendorSemantics(t *testing.T) {
+	t.Run("Claude presentation metadata to Codex", func(t *testing.T) {
+		root := testAgent(t)
+		write(t, filepath.Join(root, "skills", "echo", "SKILL.md"), `---
+name: echo
+description: Repeat text safely.
+when_to_use: >-
+  When text should be repeated.
+argument-hint: "[text]"
+metadata:
+  author: example
+---
+
+Use echo.
+`)
+		p, err := project.Load(root, "codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := Apply(p, "/opt/hctl/bin/hctl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Diagnostics) != 2 || result.Diagnostics[0].Field != "argument-hint" || result.Diagnostics[1].Field != "when_to_use" {
+			t.Fatalf("Codex diagnostics = %#v", result.Diagnostics)
+		}
+		generated := read(t, filepath.Join(root, ".agents", "skills", "echo", "SKILL.md"))
+		if strings.Contains(generated, "argument-hint") || strings.Contains(generated, "when_to_use") {
+			t.Fatalf("Claude-only presentation fields were retained: %q", generated)
+		}
+		if !strings.Contains(generated, "metadata:") || !strings.Contains(generated, "author: example") || !strings.Contains(generated, "Use echo.") {
+			t.Fatalf("portable skill content was lost: %q", generated)
+		}
+	})
+
 	t.Run("Claude field to Codex", func(t *testing.T) {
 		root := testAgent(t)
 		write(t, filepath.Join(root, "skills", "echo", "SKILL.md"), "---\nname: echo\ndescription: Repeat text safely.\nmodel: sonnet\n---\n\nUse echo.\n")
@@ -105,8 +140,11 @@ func TestApplyRejectsCrossHarnessVendorSemantics(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := filesFor(p, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "Claude-only") {
+		if _, err := Apply(p, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "Claude-only") {
 			t.Fatalf("Claude model field was not rejected for Codex: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "AGENTS.md")); !os.IsNotExist(err) {
+			t.Fatalf("failed apply wrote AGENTS.md: %v", err)
 		}
 	})
 
@@ -117,42 +155,70 @@ func TestApplyRejectsCrossHarnessVendorSemantics(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		files, err := filesFor(claude, "/opt/hctl/bin/hctl")
+		generated, err := filesFor(claude, "/opt/hctl/bin/hctl")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := string(files[".claude/skills/echo/SKILL.md"].Content); !strings.Contains(got, "allowed-tools: Read") {
+		if got := string(generated.Files[".claude/skills/echo/SKILL.md"].Content); !strings.Contains(got, "allowed-tools: Read") {
 			t.Fatalf("Claude allowed-tools field was not preserved: %q", got)
 		}
 		p, err := project.Load(root, "codex")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := filesFor(p, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "not enforced") {
+		if _, err := filesFor(p, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "changes tool approval") {
 			t.Fatalf("allowed-tools was not rejected for Codex: %v", err)
 		}
 	})
 
-	t.Run("Codex metadata to Claude", func(t *testing.T) {
+	t.Run("OpenAI presentation metadata to Claude", func(t *testing.T) {
 		root := testAgent(t)
 		write(t, filepath.Join(root, "skills", "echo", "agents", "openai.yaml"), "interface:\n  display_name: Echo\n")
 		claude, err := project.Load(root, "claude")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := filesFor(claude, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "Codex-only") {
-			t.Fatalf("Codex metadata was not rejected for Claude: %v", err)
+		generated, err := filesFor(claude, "/opt/hctl/bin/hctl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, present := generated.Files[".claude/skills/echo/agents/openai.yaml"]; present {
+			t.Fatal("OpenAI presentation metadata was not omitted for Claude")
+		}
+		if len(generated.Diagnostics) != 1 || generated.Diagnostics[0].Field != "interface.display_name" || !strings.Contains(generated.Diagnostics[0].String(), "omitted for claude") {
+			t.Fatalf("Claude diagnostics = %#v", generated.Diagnostics)
 		}
 		codex, err := project.Load(root, "codex")
 		if err != nil {
 			t.Fatal(err)
 		}
-		files, err := filesFor(codex, "/opt/hctl/bin/hctl")
+		generated, err = filesFor(codex, "/opt/hctl/bin/hctl")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := string(files[".agents/skills/echo/agents/openai.yaml"].Content); got != "interface:\n  display_name: Echo\n" {
+		if got := string(generated.Files[".agents/skills/echo/agents/openai.yaml"].Content); got != "interface:\n  display_name: Echo\n" {
 			t.Fatalf("Codex metadata changed: %q", got)
+		}
+	})
+
+	t.Run("OpenAI behavioral metadata to Claude", func(t *testing.T) {
+		for name, content := range map[string]string{
+			"default prompt": "interface:\n  default_prompt: Review this.\n",
+			"invocation":     "policy:\n  allow_implicit_invocation: false\n",
+			"dependencies":   "dependencies:\n  tools: []\n",
+			"unknown field":  "interface:\n  future_display: Echo\n",
+		} {
+			t.Run(name, func(t *testing.T) {
+				root := testAgent(t)
+				write(t, filepath.Join(root, "skills", "echo", "agents", "openai.yaml"), content)
+				claude, err := project.Load(root, "claude")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := filesFor(claude, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "cannot be omitted for Claude") {
+					t.Fatalf("behavioral OpenAI metadata was not rejected: %v", err)
+				}
+			})
 		}
 	})
 }
@@ -240,10 +306,11 @@ func TestApplyUpgradesSchemaTwoRecordAndResourceModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, err := filesFor(p, "/opt/hctl/bin/hctl")
+	generated, err := filesFor(p, "/opt/hctl/bin/hctl")
 	if err != nil {
 		t.Fatal(err)
 	}
+	files := generated.Files
 	owned := make([]ownedFile, 0, len(files))
 	for path, file := range files {
 		writeBytes(t, root, path, file.Content)
@@ -283,10 +350,11 @@ func TestApplyMigratesLegacyProjectionRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, err := filesFor(p, "/opt/hctl/bin/hctl")
+	generated, err := filesFor(p, "/opt/hctl/bin/hctl")
 	if err != nil {
 		t.Fatal(err)
 	}
+	files := generated.Files
 	owned := make([]ownedFile, 0, len(files)+1)
 	for path, file := range files {
 		writeBytes(t, root, path, file.Content)

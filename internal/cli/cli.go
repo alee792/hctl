@@ -103,14 +103,19 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if err != nil {
 		return err
 	}
-	files, err := setup.Apply(p, self)
+	result, err := setup.Apply(p, self)
 	if err != nil {
 		return err
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if _, err := fmt.Fprintln(stderr, diagnostic.String()); err != nil {
+			return err
+		}
 	}
 	if _, err := fmt.Fprintf(output, "applied agent=%s harness=%s fingerprint=%s\n", p.Name, driver.Name(), p.SourceFingerprint); err != nil {
 		return err
 	}
-	for _, path := range files {
+	for _, path := range result.Files {
 		if _, err := fmt.Fprintln(output, "generated", path); err != nil {
 			return err
 		}

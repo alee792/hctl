@@ -47,7 +47,9 @@ resources. Adding a skill directory makes it available on the next apply;
 there is no registration file to update. TypeScript, Python, and Go tool
 functions under `tools/` are exposed through the same managed MCP server.
 Immediate subagents inherit their parent's generated skills and tools through
-the native harness. See the
+the native harness. Apply warns when it safely omits target-specific
+presentation metadata and fails before writing files when losing behavior
+would be material. See the
 [minimal example](examples/minimal) and the
 [mixed-language example](spikes/polyglot-tools/fixture).
 

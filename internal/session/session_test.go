@@ -38,6 +38,9 @@ func TestLoadMigratesLegacyManifestFingerprint(t *testing.T) {
 	if got := state.Conversations["claude:local"].SourceFingerprint; got != "source-1" {
 		t.Fatalf("source fingerprint = %q", got)
 	}
+	if _, err := state.GetOrCreate("reviewer@123", "claude", "local", "source-1"); err != nil {
+		t.Fatal(err)
+	}
 	if err := Save(root, state); err != nil {
 		t.Fatal(err)
 	}
@@ -45,8 +48,27 @@ func TestLoadMigratesLegacyManifestFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "manifest_fingerprint") || !strings.Contains(string(data), "source_fingerprint") {
+	if strings.Contains(string(data), "manifest_fingerprint") || !strings.Contains(string(data), `"schema_version": 2`) || !strings.Contains(string(data), `"agent_id": "reviewer@123"`) {
 		t.Fatalf("legacy field was not migrated: %s", data)
+	}
+}
+
+func TestConversationKeysSeparateAgentsAndSourceVersions(t *testing.T) {
+	state := &State{SchemaVersion: 2, Conversations: map[string]*Conversation{}}
+	first, err := state.GetOrCreate("reviewer@one", "claude", "local", "fingerprint-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := state.GetOrCreate("reviewer@two", "claude", "local", "fingerprint-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := state.GetOrCreate("reviewer@one", "claude", "local", "fingerprint-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || first == changed || len(state.Conversations) != 3 {
+		t.Fatalf("conversations were not isolated: %#v", state.Conversations)
 	}
 }
 

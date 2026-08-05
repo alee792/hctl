@@ -49,23 +49,24 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 
 func runMCP(args []string, input io.Reader, output, stderr io.Writer) error {
 	if len(args) < 2 || args[0] != "serve" {
-		return errors.New("usage: hctl mcp serve AGENT --harness <claude|codex>")
+		return errors.New("usage: hctl mcp serve AGENT [--workspace DIR] --harness <claude|codex>")
 	}
 	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harnessName := fs.String("harness", "", "target harness")
+	workspace := fs.String("workspace", "", "target workspace (defaults to AGENT)")
 	if err := fs.Parse(args[2:]); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || (*harnessName != "claude" && *harnessName != "codex") {
-		return errors.New("usage: hctl mcp serve AGENT --harness <claude|codex>")
+		return errors.New("usage: hctl mcp serve AGENT [--workspace DIR] --harness <claude|codex>")
 	}
-	return mcp.Serve(args[1], *harnessName, input, output, stderr)
+	return mcp.Serve(args[1], *workspace, *harnessName, input, output, stderr)
 }
 
 func runApply(args []string, output, stderr io.Writer, self string) error {
 	if len(args) == 1 && isHelp(args[0]) {
-		_, err := io.WriteString(output, "Usage: hctl apply AGENT --harness <claude|codex> [--command PATH]\n")
+		_, err := io.WriteString(output, "Usage: hctl apply AGENT [--workspace DIR] --harness <claude|codex> [--command PATH]\n")
 		return err
 	}
 	if len(args) == 0 {
@@ -74,6 +75,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harnessName := fs.String("harness", "", "target harness")
+	workspace := fs.String("workspace", "", "target workspace (defaults to AGENT)")
 	command := fs.String("command", "", "harness executable override")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -81,7 +83,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if fs.NArg() != 0 {
 		return errors.New("unexpected apply arguments")
 	}
-	p, err := project.Load(args[0], *harnessName)
+	p, err := project.Load(args[0], *harnessName, *workspace)
 	if err != nil {
 		return err
 	}
@@ -94,7 +96,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	}
 	prepareContext, cancelPrepare := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancelPrepare()
-	if err := tool.Prepare(prepareContext, p.Root, p.SourceFingerprint, p.Tools); err != nil {
+	if err := tool.Prepare(prepareContext, p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools); err != nil {
 		return err
 	}
 	self, err = resolvedSelf(self)
@@ -120,7 +122,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if _, err := fmt.Fprintf(output, "managed tools=%s via MCP; native harness tools allowed and unmanaged\n", strings.Join(toolNames, ",")); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(output, "next: cd %s && %s\n", p.Root, driver.Name()); err != nil {
+	if _, err := fmt.Fprintf(output, "next: cd %s && %s\n", p.WorkspaceRoot, driver.Name()); err != nil {
 		return err
 	}
 	if driver.Name() == "codex" {
@@ -133,7 +135,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 
 func runGateway(args []string, input io.Reader, output, stderr io.Writer) error {
 	if len(args) == 1 && isHelp(args[0]) {
-		_, err := io.WriteString(output, "Usage: hctl gateway AGENT --harness <claude|codex> [--conversation ID] [--command PATH] [--timeout DURATION]\n")
+		_, err := io.WriteString(output, "Usage: hctl gateway AGENT [--workspace DIR] --harness <claude|codex> [--conversation ID] [--command PATH] [--timeout DURATION]\n")
 		return err
 	}
 	if len(args) == 0 {
@@ -142,6 +144,7 @@ func runGateway(args []string, input io.Reader, output, stderr io.Writer) error 
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harnessName := fs.String("harness", "", "target harness")
+	workspace := fs.String("workspace", "", "target workspace (defaults to AGENT)")
 	conversation := fs.String("conversation", "local", "stable local conversation id")
 	command := fs.String("command", "", "harness executable override")
 	timeout := fs.Duration("timeout", 2*time.Minute, "bounded gateway process lifetime")
@@ -157,7 +160,7 @@ func runGateway(args []string, input io.Reader, output, stderr io.Writer) error 
 	if err := gateway.ValidateConversation(*conversation); err != nil {
 		return err
 	}
-	p, err := project.Load(args[0], *harnessName)
+	p, err := project.Load(args[0], *harnessName, *workspace)
 	if err != nil {
 		return err
 	}

@@ -31,6 +31,10 @@ questions so chat history is not the source of truth.
     process and protocol safety but does not claim malicious-code containment.
 11. `apply` prepares locked dependencies by invoking native Deno, Python, and
     Go tooling. hctl does not define another dependency manifest or installer.
+12. Tool definitions and dependency files are loaded from portable agent
+    source. Tool processes run in the independently selected workspace, and
+    their disposable runtime environments live under that workspace's
+    `.hctl/cache/tools/`.
 
 The implementation now uses `tool`, `generated harness files`, `harness setup`,
 and `apply record` for these concrete concepts. `Capability` remains appropriate

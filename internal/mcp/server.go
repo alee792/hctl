@@ -23,15 +23,15 @@ const maxLineBytes = 64 << 10
 
 var portableToolName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
-func Serve(root, harness string, input io.Reader, output, audit io.Writer) error {
-	p, err := project.Load(root, harness)
+func Serve(source, workspace, harness string, input io.Reader, output, audit io.Writer) error {
+	p, err := project.Load(source, harness, workspace)
 	if err != nil {
 		return err
 	}
 	if err := setup.Verify(p); err != nil {
 		return err
 	}
-	runtime, err := tool.Open(context.Background(), p.Root, p.SourceFingerprint, p.Tools)
+	runtime, err := tool.Open(context.Background(), p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools)
 	if err != nil {
 		return err
 	}
@@ -75,13 +75,13 @@ func Serve(root, harness string, input io.Reader, output, audit io.Writer) error
 		case "tools/call":
 			result, requestID, toolName, err := callManaged(p, runtime, request.ID, request.Params, audit)
 			if err != nil {
-				if auditErr := writeAudit(audit, p.Name, toolName, requestID, "failed"); auditErr != nil {
+				if auditErr := writeAudit(audit, p.AgentID, toolName, requestID, "failed"); auditErr != nil {
 					return auditErr
 				}
 				writeResult(encoder, request.ID, map[string]any{"content": []any{map[string]any{"type": "text", "text": err.Error()}}, "isError": true})
 				continue
 			}
-			if err := writeAudit(audit, p.Name, toolName, requestID, "completed"); err != nil {
+			if err := writeAudit(audit, p.AgentID, toolName, requestID, "completed"); err != nil {
 				return err
 			}
 			writeResult(encoder, request.ID, result)
@@ -105,11 +105,11 @@ func callManaged(p *project.Project, runtime *tool.Runtime, id, params json.RawM
 	if err := decodeStrict(params, &call); err != nil || !portableToolName.MatchString(call.Name) {
 		return nil, requestID, "unknown", errors.New("invalid managed tool call")
 	}
-	if err := writeAudit(audit, p.Name, call.Name, requestID, "requested"); err != nil {
+	if err := writeAudit(audit, p.AgentID, call.Name, requestID, "requested"); err != nil {
 		return nil, requestID, call.Name, err
 	}
 	if call.Name != "echo" {
-		if err := writeAudit(audit, p.Name, call.Name, requestID, "authorized"); err != nil {
+		if err := writeAudit(audit, p.AgentID, call.Name, requestID, "authorized"); err != nil {
 			return nil, requestID, call.Name, err
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -134,7 +134,7 @@ func callManaged(p *project.Project, runtime *tool.Runtime, id, params json.RawM
 	if err := decodeStrict(call.Arguments, &arguments); err != nil || arguments.Text == "" || !utf8.ValidString(arguments.Text) || len([]byte(arguments.Text)) > p.MaxToolInput {
 		return nil, requestID, call.Name, errors.New("echo text must be non-empty and within the configured byte limit")
 	}
-	if err := writeAudit(audit, p.Name, call.Name, requestID, "authorized"); err != nil {
+	if err := writeAudit(audit, p.AgentID, call.Name, requestID, "authorized"); err != nil {
 		return nil, requestID, call.Name, err
 	}
 	return map[string]any{

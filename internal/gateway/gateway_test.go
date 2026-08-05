@@ -56,11 +56,11 @@ func TestAcceptsAndDeduplicatesInputDuringActiveTurn(t *testing.T) {
 	if acceptedSecond < 0 || completedFirst < 0 || acceptedSecond > completedFirst {
 		t.Fatalf("second input was not accepted during the active first turn: %#v", events)
 	}
-	state, err := session.Load(p.Root)
+	state, err := session.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	conversation := state.Conversations["claude:thread-a"]
+	conversation := findConversation(state, "thread-a")
 	if conversation == nil || len(conversation.Queue) != 0 || conversation.Outcomes["message-1"] != "completed" || conversation.Outcomes["message-2"] != "completed" {
 		t.Fatalf("durable state = %#v", conversation)
 	}
@@ -68,11 +68,11 @@ func TestAcceptsAndDeduplicatesInputDuringActiveTurn(t *testing.T) {
 
 func TestRecoversActiveInputAsUncertain(t *testing.T) {
 	p := testProject(t)
-	state, err := session.Load(p.Root)
+	state, err := session.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	conversation, err := state.GetOrCreate("claude", "thread-a", p.SourceFingerprint)
+	conversation, err := state.GetOrCreate(p.AgentID, "claude", "thread-a", p.SourceFingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestRecoversActiveInputAsUncertain(t *testing.T) {
 	if _, err := conversation.StartNext(); err != nil {
 		t.Fatal(err)
 	}
-	if err := session.Save(p.Root, state); err != nil {
+	if err := session.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
 
@@ -96,17 +96,42 @@ func TestRecoversActiveInputAsUncertain(t *testing.T) {
 	}
 }
 
+func TestGatewayRunsHarnessAndStateInSelectedWorkspace(t *testing.T) {
+	standalone := testProject(t)
+	workspace := t.TempDir()
+	p, err := project.Load(standalone.SourceRoot, "claude", workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := &fakeDriver{}
+	input := strings.NewReader("{\"input_id\":\"message-1\",\"text\":\"review\"}\n")
+	if err := Run(context.Background(), p, driver, "thread-a", input, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if driver.openedRoot != p.WorkspaceRoot {
+		t.Fatalf("harness opened in %q, want workspace %q", driver.openedRoot, p.WorkspaceRoot)
+	}
+	if _, err := os.Stat(filepath.Join(p.WorkspaceRoot, ".hctl", "gateway.json")); err != nil {
+		t.Fatalf("workspace state missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(p.SourceRoot, ".hctl")); !os.IsNotExist(err) {
+		t.Fatalf("gateway wrote state into agent source: %v", err)
+	}
+}
+
 type fakeDriver struct {
-	started chan string
-	release chan struct{}
-	inputs  []string
-	mu      sync.Mutex
+	started    chan string
+	release    chan struct{}
+	inputs     []string
+	openedRoot string
+	mu         sync.Mutex
 }
 
 func (d *fakeDriver) Name() string                 { return "claude" }
 func (d *fakeDriver) Executable() string           { return "/fake/claude" }
 func (d *fakeDriver) Verify(context.Context) error { return nil }
-func (d *fakeDriver) Open(context.Context, string, string) (harness.Session, error) {
+func (d *fakeDriver) Open(_ context.Context, root, _ string) (harness.Session, error) {
+	d.openedRoot = root
 	return &fakeSession{driver: d}, nil
 }
 
@@ -202,6 +227,15 @@ func eventIndex(events []Event, typeName, inputID string) int {
 	return -1
 }
 
+func findConversation(state *session.State, id string) *session.Conversation {
+	for _, conversation := range state.Conversations {
+		if conversation.ID == id {
+			return conversation
+		}
+	}
+	return nil
+}
+
 func testProject(t *testing.T) *project.Project {
 	t.Helper()
 	root := t.TempDir()
@@ -209,7 +243,7 @@ func testProject(t *testing.T) *project.Project {
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		"instructions.md": "Be concise.\n",
+		"instructions.md": "---\ndescription: Test agent.\n---\n\nBe concise.\n",
 		"skills/echo.md":  "---\nname: echo\ndescription: Repeat safely.\n---\n\nUse echo.\n",
 	}
 	for path, content := range files {

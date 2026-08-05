@@ -21,8 +21,9 @@ open follow-up questions.
 
 The repository contains a standard-library Go CLI that:
 
-- applies instructions and Markdown skills to native Claude Code and Codex
-  files without overwriting hand-authored files;
+- applies portable agent instructions, Markdown skills, and immediate
+  instructions-only subagents to an independently selected workspace as native
+  Claude Code and Codex files without overwriting hand-authored files;
 - keeps one apply record, migrates legacy projection records, and removes the
   obsolete duplicated runtime manifest;
 - discovers, prepares, validates, and exposes TypeScript, Python, and Go tool
@@ -38,6 +39,10 @@ The repository contains a standard-library Go CLI that:
 The credential-free polyglot check applies one mixed project for fake Claude
 and Codex harnesses, launches the MCP command from each generated setup, and
 proves persistent hosts plus bounded failure behavior.
+
+The proof keeps mixed-language agent source separate from its workspace,
+validates generated subagent files for both harnesses, and switches the
+workspace safely to a second agent.
 
 ## Settled direction
 
@@ -74,6 +79,9 @@ proves persistent hosts plus bounded failure behavior.
   to contain malicious tool code or provide an OS sandbox.
 - `apply` prepares locked tool dependencies through native Deno, Python, and Go
   tooling. hctl does not invent a second package manager or dependency file.
+- Immediate subagents use native Claude and Codex configuration, inherit their
+  parent's skills and tools, and may not define child tools, skills,
+  dependencies, or further subagents in the current slice.
 
 ## Retained product horizon
 
@@ -112,8 +120,9 @@ unresolved. Do not infer answers from the current prototype.
 
 ## Current design frontier
 
-The authored-tool journey is implemented and exercised through generated
-Claude and Codex MCP configurations. The active implementation frontier is
-separating agent source from workspace, then adding native inherited subagent
-setup without claiming filesystem isolation from harness-native tools. Do not
-add channels or image deployment merely to exercise those future seams.
+Portable source, independent workspaces, authored tools, and native inherited
+subagents are implemented and exercised through generated Claude and Codex
+configurations. The next product decision is whether to run the deferred skill
+compatibility spike or return to proposal capture, credential brokering, or
+another vision item. Do not add channels or image deployment merely to
+exercise those future seams.

@@ -1,5 +1,11 @@
 /hctl
 /.hctl/
+/.mcp.json
+/.agents/
+/.claude/
+/.codex/
+/AGENTS.md
+/CLAUDE.md
 /.tools/
 *.test
 __pycache__/

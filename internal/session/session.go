@@ -24,6 +24,7 @@ type State struct {
 
 type Conversation struct {
 	ID                        string            `json:"id"`
+	AgentID                   string            `json:"agent_id,omitempty"`
 	Harness                   string            `json:"harness"`
 	SourceFingerprint         string            `json:"source_fingerprint,omitempty"`
 	LegacyManifestFingerprint string            `json:"manifest_fingerprint,omitempty"`
@@ -45,7 +46,7 @@ func Load(root string) (*State, error) {
 		return nil, errors.New("gateway state must be a small regular file")
 	}
 	if !exists {
-		return &State{SchemaVersion: 1, Conversations: map[string]*Conversation{}}, nil
+		return &State{SchemaVersion: 2, Conversations: map[string]*Conversation{}}, nil
 	}
 	if mode.Perm()&0o077 != 0 {
 		return nil, errors.New("gateway state permissions are too broad; require owner-only access")
@@ -53,7 +54,7 @@ func Load(root string) (*State, error) {
 	var state State
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&state); err != nil || state.SchemaVersion != 1 || state.Conversations == nil {
+	if err := decoder.Decode(&state); err != nil || (state.SchemaVersion != 1 && state.SchemaVersion != 2) || state.Conversations == nil {
 		return nil, errors.New("gateway state is invalid")
 	}
 	var extra any
@@ -68,7 +69,14 @@ func Load(root string) (*State, error) {
 			conversation.SourceFingerprint = conversation.LegacyManifestFingerprint
 			conversation.LegacyManifestFingerprint = ""
 		}
-		if conversation == nil || key != conversation.Harness+":"+conversation.ID || (conversation.Harness != "claude" && conversation.Harness != "codex") || len(conversation.Queue) > maxQueue || len(conversation.OutcomeOrder) > maxRecentOutcome {
+		if conversation == nil {
+			return nil, errors.New("gateway conversation state is invalid")
+		}
+		expectedKey := conversationKey(conversation.AgentID, conversation.Harness, conversation.ID, conversation.SourceFingerprint)
+		if state.SchemaVersion == 1 && conversation.AgentID == "" {
+			expectedKey = conversation.Harness + ":" + conversation.ID
+		}
+		if key != expectedKey || (state.SchemaVersion == 2 && conversation.AgentID == "") || (conversation.Harness != "claude" && conversation.Harness != "codex") || len(conversation.Queue) > maxQueue || len(conversation.OutcomeOrder) > maxRecentOutcome {
 			return nil, errors.New("gateway conversation state is invalid")
 		}
 		if conversation.SourceFingerprint == "" {
@@ -98,6 +106,7 @@ func Load(root string) (*State, error) {
 }
 
 func Save(root string, state *State) error {
+	state.SchemaVersion = 2
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return errors.New("cannot encode gateway state")
@@ -108,17 +117,36 @@ func Save(root string, state *State) error {
 	return rootfs.WriteAtomic(root, statePath, append(data, '\n'), 0o600)
 }
 
-func (s *State) GetOrCreate(harness, id, fingerprint string) (*Conversation, error) {
-	key := harness + ":" + id
+func (s *State) GetOrCreate(agentID, harness, id, fingerprint string) (*Conversation, error) {
+	key := conversationKey(agentID, harness, id, fingerprint)
 	conversation := s.Conversations[key]
+	if conversation == nil && s.SchemaVersion == 1 {
+		if len(s.Conversations) != 1 {
+			return nil, errors.New("legacy gateway state cannot be assigned to an agent unambiguously")
+		}
+		legacyKey := harness + ":" + id
+		legacy := s.Conversations[legacyKey]
+		if legacy == nil || legacy.SourceFingerprint != fingerprint {
+			return nil, errors.New("legacy gateway conversation does not match the selected agent source")
+		}
+		delete(s.Conversations, legacyKey)
+		legacy.AgentID = agentID
+		conversation = legacy
+		s.Conversations[key] = conversation
+		s.SchemaVersion = 2
+	}
 	if conversation == nil {
-		conversation = &Conversation{ID: id, Harness: harness, SourceFingerprint: fingerprint, Outcomes: map[string]string{}}
+		conversation = &Conversation{ID: id, AgentID: agentID, Harness: harness, SourceFingerprint: fingerprint, Outcomes: map[string]string{}}
 		s.Conversations[key] = conversation
 	}
-	if conversation.Harness != harness || conversation.ID != id || conversation.SourceFingerprint != fingerprint {
+	if conversation.AgentID != agentID || conversation.Harness != harness || conversation.ID != id || conversation.SourceFingerprint != fingerprint {
 		return nil, errors.New("conversation mapping belongs to a different harness or source; choose a new conversation id")
 	}
 	return conversation, nil
+}
+
+func conversationKey(agentID, harness, id, fingerprint string) string {
+	return agentID + ":" + fingerprint + ":" + harness + ":" + id
 }
 
 func (c *Conversation) Accept(id, text string) (string, bool, error) {

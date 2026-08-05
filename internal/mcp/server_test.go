@@ -33,7 +33,7 @@ func TestManagedContract(t *testing.T) {
 		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"text":""}}}`,
 	}, "\n") + "\n"
 	var output, audit bytes.Buffer
-	if err := Serve(root, "claude", strings.NewReader(input), &output, &audit); err != nil {
+	if err := Serve(root, root, "claude", strings.NewReader(input), &output, &audit); err != nil {
 		t.Fatal(err)
 	}
 	responses := decodeLines(t, output.String())
@@ -64,7 +64,7 @@ func testAgent(t *testing.T) string {
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		"instructions.md": "Be concise.\n",
+		"instructions.md": "---\ndescription: Test agent.\n---\n\nBe concise.\n",
 		"skills/echo.md":  "---\nname: echo\ndescription: Repeat safely.\n---\n\nUse echo.\n",
 	}
 	for path, content := range files {

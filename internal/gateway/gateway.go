@@ -84,17 +84,17 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 	if !conversationName.MatchString(conversationID) {
 		return errors.New("conversation must use only letters, digits, dot, underscore, and dash")
 	}
-	state, err := session.Load(p.Root)
+	state, err := session.Load(p.WorkspaceRoot)
 	if err != nil {
 		return err
 	}
-	conversation, err := state.GetOrCreate(driver.Name(), conversationID, p.SourceFingerprint)
+	conversation, err := state.GetOrCreate(p.AgentID, driver.Name(), conversationID, p.SourceFingerprint)
 	if err != nil {
 		return err
 	}
 	sink := &eventSink{encoder: json.NewEncoder(output), next: 1, harness: driver.Name(), conversation: conversationID}
 	if uncertain := conversation.RecoverUncertain(); len(uncertain) > 0 {
-		if err := session.Save(p.Root, state); err != nil {
+		if err := session.Save(p.WorkspaceRoot, state); err != nil {
 			return err
 		}
 		for _, id := range uncertain {
@@ -122,7 +122,7 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 		}
 		if active == nil && len(conversation.Queue) > 0 {
 			if process == nil {
-				process, err = driver.Open(ctx, p.Root, conversation.SessionID)
+				process, err = driver.Open(ctx, p.WorkspaceRoot, conversation.SessionID)
 				if err != nil {
 					sink.emit(Event{Type: "driver.process_failed", SessionID: conversation.SessionID, Status: "startup_failure"})
 					return err
@@ -133,7 +133,7 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 					}
 					sink.emit(fromHarness(event, ""))
 				}
-				if err := session.Save(p.Root, state); err != nil {
+				if err := session.Save(p.WorkspaceRoot, state); err != nil {
 					return err
 				}
 			}
@@ -141,7 +141,7 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 			if err != nil {
 				return err
 			}
-			if err := session.Save(p.Root, state); err != nil {
+			if err := session.Save(p.WorkspaceRoot, state); err != nil {
 				return err
 			}
 			active = &next
@@ -187,7 +187,7 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 				sink.emit(Event{Type: "input.duplicate", InputID: result.input.InputID, Bytes: result.bytes, Status: status})
 				continue
 			}
-			if err := session.Save(p.Root, state); err != nil {
+			if err := session.Save(p.WorkspaceRoot, state); err != nil {
 				return err
 			}
 			sink.emit(Event{Type: "input.accepted", InputID: result.input.InputID, Bytes: result.bytes})
@@ -199,7 +199,7 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 			if message.event != nil {
 				if message.event.SessionID != "" && conversation.SessionID != message.event.SessionID {
 					conversation.SessionID = message.event.SessionID
-					if err := session.Save(p.Root, state); err != nil {
+					if err := session.Save(p.WorkspaceRoot, state); err != nil {
 						return err
 					}
 				}
@@ -219,7 +219,7 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 			if err := conversation.Complete(active.ID, message.result.Status); err != nil {
 				return err
 			}
-			if err := session.Save(p.Root, state); err != nil {
+			if err := session.Save(p.WorkspaceRoot, state); err != nil {
 				return err
 			}
 			sink.emit(Event{Type: "turn." + message.result.Status, InputID: active.ID, SessionID: conversation.SessionID, TurnID: message.result.TurnID})

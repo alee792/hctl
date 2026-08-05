@@ -48,13 +48,26 @@ my-agent/
     lookup_policy.py
     hash_text/
       tool.go
+  subagents/
+    researcher/
+      instructions.md
 ```
 
 The directory name supplies the agent name, normalized to lowercase words with
-hyphens. `instructions.md` is required. The `skills/` directory is optional;
+hyphens. `instructions.md` is required and contains YAML frontmatter with one
+plain `description` plus a non-empty Markdown body. Generated always-on
+instructions contain the body, not the frontmatter. The `skills/` directory is optional;
 each visible Markdown file in it is one skill and its frontmatter name must
 match its filename. Adding or removing a skill file updates the compiled
 project without separate registration.
+
+Immediate directories under `subagents/` define native harness subagents. Each
+contains only an `instructions.md` file with the same description-and-body
+contract. The MVP allows one level and at most eight subagents. A subagent
+inherits the selected parent's generated instructions, skills, managed MCP
+tools, native tools, and permissions through native harness behavior. Child
+skills, tools, dependency files, and nested subagents are rejected rather than
+silently ignored. Subagent and tool names may not collide.
 
 Visible `tools/*.ts` and `tools/*.py` files each declare one tool. A visible
 `tools/NAME/tool.go` directory declares one Go tool. Filenames supply tool
@@ -101,9 +114,10 @@ files, apply records, gateway state, and runtime caches belong to the
 workspace. Source discovery and dependency preparation remain rooted in the
 agent project.
 
-Claude receives `CLAUDE.md`, `.mcp.json`, and `.claude/skills/`. Codex receives
-`AGENTS.md`, `.codex/config.toml`, and `.agents/skills/`. Generated MCP
-configuration uses the resolved `hctl` executable path.
+Claude receives `CLAUDE.md`, `.mcp.json`, `.claude/skills/`, and
+`.claude/agents/`. Codex receives `AGENTS.md`, `.codex/config.toml`,
+`.agents/skills/`, and `.codex/agents/`. Generated MCP configuration uses the
+resolved `hctl` executable, agent-source, and workspace paths.
 
 Codex project configuration remains subject to Codex's native repository-trust
 flow. Apply does not edit the user's global Codex configuration or silently
@@ -169,8 +183,9 @@ broker before they ship; no unused broker backend is scaffolded in the MVP.
 Tool source and native lockfiles join the validated source fingerprint. Apply
 checks TypeScript with `deno check --frozen`, prepares Python with
 `uv sync --locked`, and compiles a generated Go host with native Go module
-tooling. Generic TypeScript and Python hosts plus generated Go build output live
-under disposable `.hctl/cache/tools/`; no normalized tool manifest is written.
+tooling. Generic TypeScript and Python hosts, their local runtime environments,
+and generated Go build output live under the workspace's disposable
+`.hctl/cache/tools/`; no normalized tool manifest is written.
 
 The generated MCP command identifies its harness. At startup hctl verifies the
 matching workspace apply record, selected agent identity, and source
@@ -223,13 +238,20 @@ The MVP is complete when credential-free tests prove:
 9. A mixed TypeScript, Python, and Go project is prepared once per apply,
    exposed identically by both generated MCP configurations, and reuses one
    host process per language across calls.
+10. One agent project can be applied outside its source directory; generated
+    files and execution use the selected workspace while dependencies and tool
+    definitions remain rooted in agent source.
+11. Immediate instructions-only subagents are generated in each harness's
+    native format and inherit the parent setup without duplicated child tools
+    or skills.
 
 ## Explicit non-goals
 
 - A model loop, context manager, or cross-harness chat UI
 - Vendor channels or webhook delivery
 - Claude Agent SDK or hosted OpenAI agent runtimes
-- Scheduling, workflows, subagents, or deployment orchestration
+- Scheduling, workflows, independently configured nested subagents, or
+  deployment orchestration
 - Building or deploying packaged agent images
 - Governance claims over native harness tools
 - Credential storage before a secret-bearing tool exists

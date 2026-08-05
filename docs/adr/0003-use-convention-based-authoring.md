@@ -5,8 +5,9 @@
 ## Decision
 
 Make the authored directory layout the project API. Derive the agent name from
-the directory, load `instructions.md`, and discover optional `skills/*.md`
-files without a registry or required configuration file.
+the directory, load descriptive `instructions.md`, and discover optional
+`skills/*.md`, `tools/`, and immediate `subagents/` without a registry or
+required configuration file.
 
 ## Context
 

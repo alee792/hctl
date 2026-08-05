@@ -33,22 +33,39 @@ func main() {
 	run(repository, "go", "build", "-o", binary, "./cmd/hctl")
 	fixture := filepath.Join(repository, "spikes", "polyglot-tools", "fixture")
 	agent := filepath.Join(temporary, "agent")
+	workspace := filepath.Join(temporary, "workspace")
 	copyProject(fixture, agent)
+	must(os.MkdirAll(workspace, 0o755))
+	agent, err = filepath.EvalSymlinks(agent)
+	must(err)
+	workspace, err = filepath.EvalSymlinks(workspace)
+	must(err)
 	claude := fakeHarness(temporary, "claude", "Claude Code")
 	codex := fakeHarness(temporary, "codex", "Codex CLI")
 
-	run(repository, binary, "apply", agent, "--harness", "claude", "--command", claude)
-	run(repository, binary, "apply", agent, "--harness", "codex", "--command", codex)
-	proveMCP("claude", agent, readClaudeConfig(agent))
-	proveMCP("codex", agent, readCodexConfig(agent))
+	run(repository, binary, "apply", agent, "--workspace", workspace, "--harness", "claude", "--command", claude)
+	run(repository, binary, "apply", agent, "--workspace", workspace, "--harness", "codex", "--command", codex)
+	proveMCP("claude", agent, workspace, readClaudeConfig(workspace))
+	proveMCP("codex", agent, workspace, readCodexConfig(workspace))
+	provePortableSource(agent)
+	proveSubagents(workspace)
+	proveSwitch(repository, temporary, binary, claude, workspace)
 	proveApplyFailures(repository, temporary, binary, claude, fixture)
 	proveRuntimeFailures(temporary, fixture)
 
 	fmt.Println("polyglot proof passed through apply and generated Claude/Codex MCP configs")
 }
 
-func proveMCP(harness, agent string, config mcpConfig) {
-	if config.Command == "" || len(config.Args) != 5 || config.Args[0] != "mcp" || config.Args[1] != "serve" || config.Args[3] != "--harness" || config.Args[4] != harness {
+func provePortableSource(agent string) {
+	for _, generated := range []string{".hctl", ".venv", "CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude", ".codex", ".agents"} {
+		if _, err := os.Lstat(filepath.Join(agent, generated)); !os.IsNotExist(err) {
+			fail("apply wrote runtime state into portable agent source: %s", generated)
+		}
+	}
+}
+
+func proveMCP(harness, agent, workspace string, config mcpConfig) {
+	if config.Command == "" || len(config.Args) != 7 || config.Args[0] != "mcp" || config.Args[1] != "serve" || config.Args[2] != agent || config.Args[3] != "--workspace" || config.Args[4] != workspace || config.Args[5] != "--harness" || config.Args[6] != harness {
 		fail("%s generated an invalid MCP command: %#v", harness, config)
 	}
 	requests := []string{
@@ -63,7 +80,7 @@ func proveMCP(harness, agent string, config mcpConfig) {
 		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"repeat","arguments":{"text":"","extra":true}}}`,
 	}
 	command := exec.Command(config.Command, config.Args...)
-	command.Dir = agent
+	command.Dir = workspace
 	command.Stdin = strings.NewReader(strings.Join(requests, "\n") + "\n")
 	var output, audit bytes.Buffer
 	command.Stdout = &output
@@ -100,6 +117,26 @@ func proveMCP(harness, agent string, config mcpConfig) {
 	}
 }
 
+func proveSubagents(workspace string) {
+	for _, path := range []string{".claude/agents/verifier.md", ".codex/agents/verifier.toml"} {
+		data, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(path)))
+		must(err)
+		if !strings.Contains(string(data), "Verify tool results") {
+			fail("generated subagent %s is incomplete", path)
+		}
+	}
+}
+
+func proveSwitch(repository, temporary, binary, claude, workspace string) {
+	second := filepath.Join(temporary, "second-agent")
+	must(os.MkdirAll(second, 0o755))
+	must(os.WriteFile(filepath.Join(second, "instructions.md"), []byte("---\ndescription: A second fixture agent.\n---\n\nBe concise.\n"), 0o644))
+	run(repository, binary, "apply", second, "--workspace", workspace, "--harness", "claude", "--command", claude)
+	if _, err := os.Stat(filepath.Join(workspace, ".claude", "agents", "verifier.md")); !os.IsNotExist(err) {
+		fail("switching agents did not remove obsolete Claude subagent")
+	}
+}
+
 func proveApplyFailures(repository, temporary, binary, claude, fixture string) {
 	duplicate := caseProject(temporary, fixture, "duplicate", "")
 	expectFailure(repository, "duplicate tool name", binary, "apply", duplicate, "--harness", "claude", "--command", claude)
@@ -126,9 +163,9 @@ func proveRuntimeFailures(temporary, fixture string) {
 		loaded, err := project.Load(root, "claude")
 		must(err)
 		prepareContext, cancelPrepare := context.WithTimeout(context.Background(), 2*time.Minute)
-		must(tool.Prepare(prepareContext, loaded.Root, loaded.SourceFingerprint, loaded.Tools))
+		must(tool.Prepare(prepareContext, loaded.SourceRoot, loaded.WorkspaceRoot, loaded.SourceFingerprint, loaded.Tools))
 		cancelPrepare()
-		runtime, err := tool.Open(context.Background(), loaded.Root, loaded.SourceFingerprint, loaded.Tools)
+		runtime, err := tool.Open(context.Background(), loaded.SourceRoot, loaded.WorkspaceRoot, loaded.SourceFingerprint, loaded.Tools)
 		must(err)
 		callContext, cancelCall := context.WithTimeout(context.Background(), test.deadline)
 		_, err = runtime.Call(callContext, test.toolName, test.arguments)

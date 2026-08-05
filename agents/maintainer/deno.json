@@ -1,0 +1,9 @@
+{
+  "imports": {
+    "zod": "npm:zod@4.1.5"
+  },
+  "lock": {
+    "path": "deno.lock",
+    "frozen": true
+  }
+}

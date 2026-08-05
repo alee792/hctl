@@ -1,0 +1,16 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:zod@4.1.5": "4.1.5"
+  },
+  "npm": {
+    "zod@4.1.5": {
+      "integrity": "sha512-rcUUZqlLJgBC33IT3PNMgsCq6TzLQEG/Ei/KTCU0PedSWRMAXoOUN+4t/0H+Q8bdnLPdqUYnvboJT0bn/229qg=="
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "npm:zod@4.1.5"
+    ]
+  }
+}

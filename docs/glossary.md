@@ -20,7 +20,7 @@ files, CLI guidance, or product documentation.
 | Channel | A place where external input reaches an agent, such as Slack, an API, or local stdin. |
 | Connection | Configured access to an external service, commonly through MCP or HTTP. Credential brokering may implement a connection without exposing secrets to the session. |
 | Sandbox | An execution boundary that restricts code access to host resources. Process validation and timeouts alone are not a sandbox. |
-| Subagent | A specialized agent delegated work by another agent. |
+| Subagent | A specialized native harness agent delegated work by a parent. In the MVP it supplies only instructions and inherits the parent's setup; it is not an independently applied agent project. |
 | Schedule | A recurring trigger for headless agent work. |
 | Harness | The native agent product hctl prepares and extends, initially Claude Code or Codex. The harness owns the model loop and interactive UX. |
 | Apply | Validate an agent project and prepare the native harness files and local tool runtime needed to use it in a chosen workspace. |

@@ -50,7 +50,7 @@ type hostCall struct {
 	Output json.RawMessage `json:"output"`
 }
 
-func Open(ctx context.Context, root, sourceFingerprint string, inventory Inventory) (*Runtime, error) {
+func Open(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint string, inventory Inventory) (*Runtime, error) {
 	runtime := &Runtime{tools: map[string]hostedTool{}}
 	if len(inventory.Sources) == 0 {
 		return runtime, nil
@@ -59,12 +59,12 @@ func Open(ctx context.Context, root, sourceFingerprint string, inventory Invento
 		if !hasLanguage(inventory, language) {
 			continue
 		}
-		command, arguments, err := hostCommand(root, sourceFingerprint, language)
+		command, arguments, environment, err := hostCommand(sourceRoot, workspaceRoot, sourceFingerprint, language)
 		if err != nil {
 			runtime.Close()
 			return nil, err
 		}
-		client, err := startClient(ctx, root, string(language), command, arguments...)
+		client, err := startClient(ctx, workspaceRoot, string(language), environment, command, arguments...)
 		if err != nil {
 			runtime.Close()
 			return nil, err
@@ -141,32 +141,34 @@ func (runtime *Runtime) Close() {
 	runtime.clients = nil
 }
 
-func hostCommand(root, sourceFingerprint string, language Language) (string, []string, error) {
+func hostCommand(sourceRoot, workspaceRoot, sourceFingerprint string, language Language) (string, []string, []string, error) {
 	cache := cacheRelative(sourceFingerprint)
 	switch language {
 	case TypeScript:
 		host := cache + "/typescript.ts"
-		if err := verifyCachedSource(root, host, typescriptHost); err != nil {
-			return "", nil, err
+		if err := verifyCachedSource(workspaceRoot, host, typescriptHost); err != nil {
+			return "", nil, nil, err
 		}
 		deno, err := executable("deno")
-		return deno, []string{"run", "--quiet", "--cached-only", "--frozen", "--config", filepath.Join(root, "deno.json"), "--allow-read=" + root, filepath.Join(root, filepath.FromSlash(host)), root}, err
+		environment := environmentWith("DENO_DIR", filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/deno-dir")))
+		return deno, []string{"run", "--quiet", "--cached-only", "--frozen", "--config", filepath.Join(sourceRoot, "deno.json"), "--allow-read=" + sourceRoot + "," + workspaceRoot, filepath.Join(workspaceRoot, filepath.FromSlash(host)), sourceRoot}, environment, err
 	case Python:
 		host := cache + "/python.py"
-		if err := verifyCachedSource(root, host, pythonHost); err != nil {
-			return "", nil, err
+		if err := verifyCachedSource(workspaceRoot, host, pythonHost); err != nil {
+			return "", nil, nil, err
 		}
 		uv, err := executable("uv")
-		return uv, []string{"run", "--locked", "--no-sync", "--project", root, "python", filepath.Join(root, filepath.FromSlash(host)), root}, err
+		environment := environmentWith("UV_PROJECT_ENVIRONMENT", filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/python-venv")))
+		return uv, []string{"run", "--locked", "--no-sync", "--project", sourceRoot, "python", filepath.Join(workspaceRoot, filepath.FromSlash(host)), sourceRoot}, environment, err
 	case Go:
-		binary := filepath.Join(root, filepath.FromSlash(cache+"/go/host"))
+		binary := filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/go/host"))
 		info, err := os.Lstat(binary)
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-			return "", nil, errors.New("go tool runtime is missing; run hctl apply")
+			return "", nil, nil, errors.New("go tool runtime is missing; run hctl apply")
 		}
-		return binary, nil, nil
+		return binary, nil, nil, nil
 	default:
-		return "", nil, errors.New("unsupported tool language")
+		return "", nil, nil, errors.New("unsupported tool language")
 	}
 }
 
@@ -205,9 +207,10 @@ type client struct {
 	done    bool
 }
 
-func startClient(ctx context.Context, directory, name, executable string, arguments ...string) (*client, error) {
+func startClient(ctx context.Context, directory, name string, environment []string, executable string, arguments ...string) (*client, error) {
 	command := exec.CommandContext(ctx, executable, arguments...)
 	command.Dir = directory
+	command.Env = environment
 	input, err := command.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %s tool host input", name)

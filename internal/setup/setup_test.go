@@ -99,7 +99,7 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 }
 
 func TestApplyHandlesCrossHarnessVendorSemantics(t *testing.T) {
-	t.Run("Claude presentation metadata to Codex", func(t *testing.T) {
+	t.Run("Claude fields to Codex", func(t *testing.T) {
 		root := testAgent(t)
 		write(t, filepath.Join(root, "skills", "echo", "SKILL.md"), `---
 name: echo
@@ -107,8 +107,8 @@ description: Repeat text safely.
 when_to_use: >-
   When text should be repeated.
 argument-hint: "[text]"
-metadata:
-  author: example
+model: sonnet
+disallowed-tools: Write
 ---
 
 Use echo.
@@ -121,30 +121,20 @@ Use echo.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Diagnostics) != 2 || result.Diagnostics[0].Field != "argument-hint" || result.Diagnostics[1].Field != "when_to_use" {
+		wantFields := []string{"argument-hint", "disallowed-tools", "model", "when_to_use"}
+		if len(result.Diagnostics) != len(wantFields) {
 			t.Fatalf("Codex diagnostics = %#v", result.Diagnostics)
 		}
+		for index, field := range wantFields {
+			if result.Diagnostics[index].Field != field || !strings.Contains(result.Diagnostics[index].String(), "copied unchanged but may have no effect for codex") {
+				t.Fatalf("Codex diagnostic %d = %#v", index, result.Diagnostics[index])
+			}
+		}
 		generated := read(t, filepath.Join(root, ".agents", "skills", "echo", "SKILL.md"))
-		if strings.Contains(generated, "argument-hint") || strings.Contains(generated, "when_to_use") {
-			t.Fatalf("Claude-only presentation fields were retained: %q", generated)
-		}
-		if !strings.Contains(generated, "metadata:") || !strings.Contains(generated, "author: example") || !strings.Contains(generated, "Use echo.") {
-			t.Fatalf("portable skill content was lost: %q", generated)
-		}
-	})
-
-	t.Run("Claude field to Codex", func(t *testing.T) {
-		root := testAgent(t)
-		write(t, filepath.Join(root, "skills", "echo", "SKILL.md"), "---\nname: echo\ndescription: Repeat text safely.\nmodel: sonnet\n---\n\nUse echo.\n")
-		p, err := project.Load(root, "codex")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := Apply(p, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "Claude-only") {
-			t.Fatalf("Claude model field was not rejected for Codex: %v", err)
-		}
-		if _, err := os.Stat(filepath.Join(root, "AGENTS.md")); !os.IsNotExist(err) {
-			t.Fatalf("failed apply wrote AGENTS.md: %v", err)
+		for _, field := range []string{"when_to_use:", "argument-hint:", "model:", "disallowed-tools:"} {
+			if !strings.Contains(generated, field) {
+				t.Fatalf("field %q was not passed through: %q", field, generated)
+			}
 		}
 	})
 
@@ -166,14 +156,22 @@ Use echo.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := filesFor(p, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "changes tool approval") {
-			t.Fatalf("allowed-tools was not rejected for Codex: %v", err)
+		generated, err = filesFor(p, "/opt/hctl/bin/hctl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(generated.Diagnostics) != 1 || generated.Diagnostics[0].Field != "allowed-tools" {
+			t.Fatalf("Codex allowed-tools diagnostics = %#v", generated.Diagnostics)
+		}
+		if got := string(generated.Files[".agents/skills/echo/SKILL.md"].Content); !strings.Contains(got, "allowed-tools: Read") {
+			t.Fatalf("Codex allowed-tools field was not passed through: %q", got)
 		}
 	})
 
-	t.Run("OpenAI presentation metadata to Claude", func(t *testing.T) {
+	t.Run("OpenAI metadata to Claude", func(t *testing.T) {
 		root := testAgent(t)
-		write(t, filepath.Join(root, "skills", "echo", "agents", "openai.yaml"), "interface:\n  display_name: Echo\n")
+		content := "interface:\n  display_name: Echo\n  default_prompt: Review this.\npolicy:\n  allow_implicit_invocation: false\n"
+		write(t, filepath.Join(root, "skills", "echo", "agents", "openai.yaml"), content)
 		claude, err := project.Load(root, "claude")
 		if err != nil {
 			t.Fatal(err)
@@ -182,10 +180,10 @@ Use echo.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, present := generated.Files[".claude/skills/echo/agents/openai.yaml"]; present {
-			t.Fatal("OpenAI presentation metadata was not omitted for Claude")
+		if got := string(generated.Files[".claude/skills/echo/agents/openai.yaml"].Content); got != content {
+			t.Fatalf("Claude OpenAI metadata changed: %q", got)
 		}
-		if len(generated.Diagnostics) != 1 || generated.Diagnostics[0].Field != "interface.display_name" || !strings.Contains(generated.Diagnostics[0].String(), "omitted for claude") {
+		if len(generated.Diagnostics) != 1 || generated.Diagnostics[0].Field != "" || !strings.Contains(generated.Diagnostics[0].String(), "copied unchanged but may have no effect for claude") {
 			t.Fatalf("Claude diagnostics = %#v", generated.Diagnostics)
 		}
 		codex, err := project.Load(root, "codex")
@@ -196,29 +194,11 @@ Use echo.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := string(generated.Files[".agents/skills/echo/agents/openai.yaml"].Content); got != "interface:\n  display_name: Echo\n" {
+		if got := string(generated.Files[".agents/skills/echo/agents/openai.yaml"].Content); got != content {
 			t.Fatalf("Codex metadata changed: %q", got)
 		}
-	})
-
-	t.Run("OpenAI behavioral metadata to Claude", func(t *testing.T) {
-		for name, content := range map[string]string{
-			"default prompt": "interface:\n  default_prompt: Review this.\n",
-			"invocation":     "policy:\n  allow_implicit_invocation: false\n",
-			"dependencies":   "dependencies:\n  tools: []\n",
-			"unknown field":  "interface:\n  future_display: Echo\n",
-		} {
-			t.Run(name, func(t *testing.T) {
-				root := testAgent(t)
-				write(t, filepath.Join(root, "skills", "echo", "agents", "openai.yaml"), content)
-				claude, err := project.Load(root, "claude")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := filesFor(claude, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "cannot be omitted for Claude") {
-					t.Fatalf("behavioral OpenAI metadata was not rejected: %v", err)
-				}
-			})
+		if len(generated.Diagnostics) != 0 {
+			t.Fatalf("Codex OpenAI diagnostics = %#v", generated.Diagnostics)
 		}
 	})
 }

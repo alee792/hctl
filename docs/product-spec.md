@@ -25,8 +25,8 @@ headlessly through channels.
 5. Native harness tools remain available and explicitly unmanaged.
 6. Policy applies only at managed-tool and durable-state boundaries.
 7. Interactive users remain in the native harness interface.
-8. Unsupported differences are reported. Apply omits only explicitly safe
-   presentation or discovery metadata; material behavioral loss fails.
+8. Unsupported harness behavior is reported without rewriting valid authored
+   source or pretending that hctl enforces it.
 9. Conventional files register behavior without a second inventory.
 10. Author-facing language stays concrete; runtime terminology remains internal.
 
@@ -76,16 +76,13 @@ Descriptions contain 1-1024 characters. The portable optional frontmatter is
 string `license`, 1-500 character `compatibility`, string-to-string `metadata`,
 and experimental space-separated string `allowed-tools`. Documentary fields
 are preserved without claiming that a harness operationalizes them.
-Harness-specific behavior is accepted only when the selected harness documents
-an exact representation. Unsupported presentation or discovery metadata may be
-omitted with a precise warning when losing it cannot change authorization,
-execution, routing, invocation control, dependencies, or model selection.
-Material behavioral loss fails explicitly. In particular, hctl does not
-pretend that Codex enforces `allowed-tools` or a Claude skill model selection.
-Claude presentation fields may be omitted for Codex while operational fields
-fail. An OpenAI-host `agents/openai.yaml` file is copied byte-for-byte for
-Codex; known display-only metadata is omitted with a warning for Claude, while
-behavioral or unknown fields fail.
+Harness-specific behavior is honored only when the selected harness documents
+an exact representation. Recognized vendor fields and files remain intact when
+applied elsewhere, with a precise warning that they may have no effect. Hctl
+does not translate, strip, or enforce them. In particular, it does not pretend
+that Codex honors `allowed-tools` or a Claude skill model selection. An
+OpenAI-host `agents/openai.yaml` file is copied byte-for-byte to either target;
+Claude apply warns because Claude does not document the file.
 
 Apply copies supported skill resources byte-for-byte into the selected
 harness's project skill directory and preserves executable intent in its
@@ -283,8 +280,8 @@ The MVP is complete when credential-free tests prove:
     or skills.
 12. Agent Skills directories and their regular-file resources round-trip into
     both native project skill locations, including executable intent, while
-    safely omittable metadata warns and unsupported behavioral metadata fails
-    with field-, path-, and harness-specific diagnostics.
+    recognized unsupported vendor metadata remains intact and produces a
+    path-, field-, and harness-specific warning.
 
 ## Explicit non-goals
 

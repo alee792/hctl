@@ -23,7 +23,7 @@ func TestApplyPrintsSafeCompatibilityWarning(t *testing.T) {
 	if err := Run([]string{"apply", root, "--harness", "codex", "--command", harness}, strings.NewReader(""), &output, &stderr, self); err != nil {
 		t.Fatal(err)
 	}
-	if got := stderr.String(); !strings.Contains(got, `warning: skills/echo/SKILL.md: field "argument-hint":`) || !strings.Contains(got, "omitted for codex") {
+	if got := stderr.String(); !strings.Contains(got, `warning: skills/echo/SKILL.md: field "argument-hint":`) || !strings.Contains(got, "copied unchanged but may have no effect for codex") {
 		t.Fatalf("warning output = %q", got)
 	}
 	if !strings.Contains(output.String(), "applied agent=") {

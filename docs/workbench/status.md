@@ -86,8 +86,8 @@ workspace safely to a second agent.
   dependencies, or further subagents in the current slice.
 - Skills use the open `skills/NAME/SKILL.md` layout. Portable documentary
   metadata and regular-file resources survive both native project harness
-  setups. Unsupported presentation or discovery metadata warns and is omitted
-  only when explicitly classified as safe; behavioral or unknown loss fails.
+  setups. Recognized vendor metadata is copied unchanged to either target and
+  warns when that harness does not document honoring it.
 
 ## Retained product horizon
 

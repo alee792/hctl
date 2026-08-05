@@ -9,8 +9,10 @@ harnesses. `hctl` is a temporary internal name, not a product name. Read
 
 ## Engineering rules
 
-- Use `.agents/skills/ponytail/SKILL.md` at full intensity for planning,
-  implementation, refactoring, and review.
+- Before planning, implementation, refactoring, or review, silently apply
+  `.agents/skills/ponytail/SKILL.md` at full intensity as the repository's
+  simplicity pass. Do not announce routine use; mention it only when it
+  materially changes the approach or leaves an important deliberate limit.
 - Keep the native harness responsible for its model loop, context, native
   tools, approvals, and interactive interface.
 - Keep `hctl` responsible only for authored project discovery and validation,

@@ -54,6 +54,20 @@ The skill therefore requests native one-command permission when the harness
 offers it and otherwise hands the exact command to the user's terminal. It
 does not weaken sandbox settings or work around protected harness files.
 
+## Parallel review follow-up
+
+After the portable `code-review` skill was applied, a fresh native
+`codex exec --sandbox read-only` session loaded it, ran its Standards and Spec
+axes in isolated subagents, and completed with separate zero-finding reports.
+
+The same review through `hctl gateway` became `turn.uncertain` when native
+subagent collaboration began. An explicit new input resumed the same Codex
+session, but a second delegated attempt ended the same way and the earlier
+subagent reports were not recoverable. This is a reproducible gateway
+integration limitation, not evidence against native skill execution. Do not
+claim headless delegated review support until a focused Codex App Server trace
+explains and fixes the missing terminal event.
+
 ## Unrelated host noise
 
 The installed Codex version reported an available 0.146.1 update, stale model

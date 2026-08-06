@@ -229,6 +229,10 @@ dispatchLoop:
 			if capacity != nil {
 				if err := capacity.acquireTurn(ctx, conversationID, needsResident); err != nil {
 					if errors.Is(err, errCapacityHibernation) && process != nil {
+						select {
+						case <-forceHibernate:
+						default:
+						}
 						if closeErr := closeHarness(process, harnessCloseTimeout, timers); closeErr != nil {
 							sink.emit(Event{Type: "driver.process_failed", SessionID: snapshot.sessionID, Status: "hibernate_failure"})
 							return closeErr

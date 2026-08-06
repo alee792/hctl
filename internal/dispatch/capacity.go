@@ -40,7 +40,7 @@ type capacityState struct {
 	queued      bool
 	hibernating bool
 	idleSince   uint64
-	hibernate   chan<- struct{}
+	hibernate   chan struct{}
 }
 
 type capacityWaiter struct {
@@ -57,7 +57,7 @@ func newCapacityCoordinator(residentLimit, activeLimit int) (*capacityCoordinato
 	return &capacityCoordinator{residentLimit: residentLimit, activeLimit: activeLimit, states: map[string]*capacityState{}, done: make(chan struct{})}, nil
 }
 
-func (c *capacityCoordinator) register(conversation string, hibernate chan<- struct{}) error {
+func (c *capacityCoordinator) register(conversation string, hibernate chan struct{}) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, exists := c.states[conversation]; exists {

@@ -328,6 +328,60 @@ func TestManagerRotatesResidentAfterTurnToPreventStarvation(t *testing.T) {
 	waitManagedEvents(t, events, "turn.completed", map[string]string{"conversation-one": "one-2"})
 }
 
+func TestManagerConsumesSynchronousCapacityHandoffBeforeReopening(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	events := make(chan managedEvent, 64)
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	const conversation = "conversation-one"
+	if _, err := manager.Submit(context.Background(), conversation, Submission{InputID: "one-1", Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "one-1")
+	driver.release("one-1")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{conversation: "one-1"})
+
+	manager.capacity.mu.Lock()
+	state := manager.capacity.states[conversation]
+	if state == nil || !state.resident || state.active {
+		manager.capacity.mu.Unlock()
+		t.Fatalf("resident state before handoff = %#v", state)
+	}
+	submitted := make(chan error, 1)
+	go func() {
+		_, submitErr := manager.Submit(context.Background(), conversation, Submission{InputID: "one-2", Text: "second"})
+		submitted <- submitErr
+	}()
+	if err := <-submitted; err != nil {
+		manager.capacity.mu.Unlock()
+		t.Fatal(err)
+	}
+	state.hibernating = true
+	state.hibernate <- struct{}{}
+	manager.capacity.mu.Unlock()
+
+	driver.waitStarted(t, "one-2")
+	manager.capacity.mu.Lock()
+	pendingHandoff := len(state.hibernate)
+	manager.capacity.mu.Unlock()
+	if pendingHandoff != 0 {
+		t.Fatalf("pending capacity handoff notices = %d, want 0", pendingHandoff)
+	}
+	if got := driver.closeCount(); got != 1 {
+		t.Fatalf("closed harness processes = %d, want one synchronous handoff", got)
+	}
+	driver.release("one-2")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{conversation: "one-2"})
+}
+
 func TestManagerResetRequiresIdleConversation(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()

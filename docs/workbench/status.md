@@ -139,11 +139,12 @@ a generated custom subagent, and session resume in a fresh external workspace.
   precedent with Discord's signed HTTP Interactions transport. A bounded
   `channels/discord.md` description enables one loopback runner for one
   configured application, user, conversation, and harness session. Its default
-  conversation is scoped to that application and user. It flushes a signed
-  command's defer before asynchronous gateway submission, uses at most six
-  response messages, and expires still-pending in-memory tokens after 14
-  minutes without interrupting the harness; bot credentials and Gateway
-  behavior remain deferred.
+  conversation is scoped to that application and user. It bounds pending input
+  and ordinary delivery at 32 each, flushes an admitted signed command's defer
+  before asynchronous gateway submission, uses at most six response messages,
+  and expires still-pending in-memory tokens after 14 minutes without
+  interrupting the harness; bot credentials and Gateway behavior remain
+  deferred.
 
 ## Retained product horizon
 

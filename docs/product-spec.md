@@ -218,7 +218,7 @@ The interaction ID is the durable input ID, so the existing FIFO queue,
 deduplication, session mapping, and uncertain-recovery behavior remain
 authoritative.
 
-Valid commands receive a flushed Discord deferred acknowledgement immediately
+Admitted commands receive a flushed Discord deferred acknowledgement immediately
 after transport authentication, authorization, and bounded input validation;
 the HTTP handler does not wait for durable gateway acceptance. Submission then
 runs asynchronously. Queue-full or other gateway rejection edits the deferred
@@ -240,14 +240,19 @@ immediately and, after 14 minutes from the signed timestamp, updates a still
 pending response with stable expiry text and releases its token, output, and
 turn memory. Expiry delivery does not wait behind ordinary output delivery, and
 state release does not wait on any outbound HTTP request. This cleanup does not
-interrupt or claim to stop the harness.
-HCTL-012 must revisit the separate runtime-turn timeout implied by this limit.
+interrupt or claim to stop the harness. HCTL-012 must revisit the separate
+runtime-turn timeout implied by this limit.
 
 Completed, failed, and recovered-uncertain outcomes have bounded fallback text.
-Delivery has a five-second timeout, follows no redirect, reads at most 64 KiB
-of response, and never retries. A transport failure or invalid successful
-response is recorded as uncertain; an explicit rate limit or other non-success
-response is classified as rate-limited or failed without its response body.
+At most 32 ordinary terminal deliveries run concurrently. If that delivery
+limit is full, hctl releases the detached token and output, performs no outbound
+request or retry, and records only the classified `delivery=saturated` audit;
+the deadline-sensitive expiry path uses its already bounded pending-turn worker
+instead of this ordinary-delivery limit. Delivery has a five-second timeout,
+follows no redirect, reads at most 64 KiB of response, and never retries. A
+transport failure or invalid successful response is recorded as uncertain; an
+explicit rate limit or other non-success response is classified as rate-limited
+or failed without its response body.
 Audit contains only channel, input ID, status class, and classified delivery
 outcome. Listener readiness is a separate operator diagnostic, not an audit
 event.

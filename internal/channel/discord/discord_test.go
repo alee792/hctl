@@ -301,6 +301,33 @@ func TestPendingInteractionAdmissionIsBounded(t *testing.T) {
 	}
 }
 
+func TestNormalDeliverySaturationDropsBoundedStateWithoutOutboundCall(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var audit bytes.Buffer
+	adapter, err := New(Config{
+		ApplicationID: testApplication, AllowedUserID: testUser, PublicKey: publicKey,
+		Listen: "127.0.0.1:0", Audit: &audit,
+		Now: func() time.Time { return time.Unix(2_000_000_000, 0) },
+	}, make(chan gateway.Submission))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < maxDeliveries; index++ {
+		adapter.slots <- struct{}{}
+	}
+	adapter.dispatch(delivery{
+		inputID: "345678901234567890", status: "completed", content: "private output",
+		token: &tokenEntry{token: "private-token", expiresAt: time.Unix(2_000_000_000, 0).Add(time.Minute), done: make(chan struct{})},
+	})
+	adapter.Close()
+	if !strings.Contains(audit.String(), "status=completed delivery=saturated") || strings.Contains(audit.String(), "private") {
+		t.Fatalf("saturated delivery audit = %q", audit.String())
+	}
+}
+
 func TestQueueRejectionPatchesDeferredResponse(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

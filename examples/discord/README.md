@@ -61,13 +61,19 @@ authorization.
 
 ## Visible result and recovery
 
-When the allowed user invokes the command, Discord should show a loading state
-immediately. After gateway acceptance and the native harness turn, hctl edits
-that original response and may add up to five followups. If the local queue
-rejects input, the loading response becomes a stable bounded error. If work is
-still pending after 14 minutes from Discord's signed timestamp, hctl replaces
-the loading response with an expiry notice and releases the in-memory response
-token; this does not interrupt the harness.
+When the allowed user's command is admitted, Discord should show a loading
+state immediately. After gateway acceptance and the native harness turn, hctl
+edits that original response and may add up to five followups. If the local
+queue is already full before admission, Discord shows an immediate private busy
+response. If the durable gateway rejects after the defer, the loading response
+becomes a stable bounded error. If work is still pending after 14 minutes from
+Discord's signed timestamp, hctl replaces the loading response with an expiry
+notice and releases the in-memory response token; this does not interrupt the
+harness.
+
+At most 32 completed responses are delivered concurrently. If that separate
+limit is saturated, hctl drops the detached response state without retrying and
+records `delivery=saturated` in its content-free audit.
 
 Gateway input and session state remain durable, but the interaction token does
 not. After a process restart, Discord can receive a known terminal status only

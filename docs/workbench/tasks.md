@@ -38,9 +38,9 @@ built-in Discord channel. `hctl channel discord` runs one loopback HTTP
 Interactions adapter for one selected harness and hctl conversation. It verifies
 Discord's Ed25519 signature and bounded timestamp, authorizes one configured
 application and user, maps the interaction ID to the existing durable gateway
-input ID, flushes a deferred acknowledgement before gateway acceptance, then
-asynchronously accepts or rejects the input and delivers bounded turn output
-through Discord's interaction response token.
+input ID, flushes an admitted command's deferred acknowledgement before gateway
+acceptance, then asynchronously accepts or rejects the input and delivers
+bounded turn output through Discord's interaction response token.
 
 **Boundaries:** Follow Eve's `channels/`, path-derived identity, normalized
 input, continuation ownership, deferred response, and followup precedent. Use
@@ -71,8 +71,9 @@ runtime identity validation; PING; valid flushed defer before stalled gateway
 acceptance; asynchronous queue rejection; bad/missing/stale signature; wrong
 application; unauthorized user; bounded `message`; interaction-ID
 deduplication; FIFO input while active; completion/failure/uncertain delivery;
-bounded pre-acceptance admission; 14-minute token cleanup independent of a
-blocked normal delivery; six total 2,000-character messages with a retained
+bounded pre-acceptance admission and ordinary-delivery saturation; 14-minute
+token cleanup independent of a blocked normal delivery; six total
+2,000-character messages with a retained
 truncation marker and disabled mentions; scoped default conversations; rate
 limits; timeouts, redirects, response bounds, and ambiguous-delivery behavior;
 an actual loopback runner; separated readiness diagnostics; content-free

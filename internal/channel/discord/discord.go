@@ -37,9 +37,11 @@ const (
 	maxOutputRunes   = maxChunks*maxChunkRunes - 64
 	maxTokenBytes    = 512
 	maxPendingTurns  = 32
+	maxDeliveries    = 32
 	maxClockSkew     = 5 * time.Minute
 	tokenLifetime    = 15 * time.Minute
 	defaultExpiry    = 14 * time.Minute
+	deliveryTimeout  = 5 * time.Second
 )
 
 type Config struct {
@@ -118,6 +120,7 @@ type Adapter struct {
 	stop    sync.Once
 	workers sync.WaitGroup
 	auditMu sync.Mutex
+	slots   chan struct{}
 }
 
 func New(config Config, submissions chan<- gateway.Submission) (*Adapter, error) {
@@ -149,12 +152,12 @@ func New(config Config, submissions chan<- gateway.Submission) (*Adapter, error)
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: deliveryTimeout}
 	if config.HTTPClient != nil {
 		copy := *config.HTTPClient
 		client = &copy
-		if client.Timeout <= 0 {
-			client.Timeout = 5 * time.Second
+		if client.Timeout <= 0 || client.Timeout > deliveryTimeout {
+			client.Timeout = deliveryTimeout
 		}
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -165,6 +168,7 @@ func New(config Config, submissions chan<- gateway.Submission) (*Adapter, error)
 		apiBase:     strings.TrimSuffix(base.String(), "/"),
 		turns:       map[string]*turn{},
 		stopped:     make(chan struct{}),
+		slots:       make(chan struct{}, maxDeliveries),
 	}
 	return a, nil
 }
@@ -459,9 +463,16 @@ func (a *Adapter) dispatch(job delivery) {
 		return
 	default:
 	}
+	select {
+	case a.slots <- struct{}{}:
+	default:
+		a.record(job, "saturated")
+		return
+	}
 	a.workers.Add(1)
 	go func() {
 		defer a.workers.Done()
+		defer func() { <-a.slots }()
 		a.record(job, a.send(job))
 	}()
 }

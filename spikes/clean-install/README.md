@@ -2,11 +2,13 @@
 
 This credential-free proof exercises the `setup-agent` journey without using
 the ignored root `./hctl`. It builds a fresh binary with the pinned
-repository-local Go toolchain into a temporary install prefix, applies
-`examples/minimal` to a separate empty workspace with a version-only fake Codex
-CLI, and verifies the generated Codex instructions, skill resources, apply
-record, and managed MCP configuration. The MCP command must name the installed
-temporary binary and retain the absolute agent-source and workspace paths.
+repository-local Go toolchain into a temporary install prefix, copies the
+minimal agent source outside the checkout, and applies it to a separate empty
+workspace with a version-only fake Codex CLI. It verifies the generated Codex
+instructions, skill resources, apply record, and managed MCP configuration.
+The MCP command must name the installed temporary binary and retain the
+absolute agent-source and workspace paths. The proof also starts that installed
+MCP server and verifies its setup before it lists the built-in `echo` tool.
 
 The same installed binary then applies the existing polyglot fixture with an
 intentionally restricted `PATH`. The check requires the missing Deno runtime to

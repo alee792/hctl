@@ -95,6 +95,24 @@ See [the vision](docs/vision.md), [product specification](docs/product-spec.md),
 [glossary](docs/glossary.md), [current working status](docs/workbench/status.md),
 and [architecture decisions](docs/adr/).
 
+## First install contract
+
+The first supported distribution is `darwin-arm64` only: the exact `vX.Y.Z` Git
+tag names `hctl_X.Y.Z_darwin_arm64.tar.gz`, which contains `hctl` at its archive
+root, plus `hctl_X.Y.Z_SHA256SUMS`. Download the exact release, verify its
+checksum, extract the executable to a stable location on `PATH`, then apply an
+agent source to the chosen workspace. The generated MCP setup records that
+executable's absolute resolved path, so moving it requires `hctl apply` again.
+Replacing the binary at that same path keeps the reference valid, but the
+supported upgrade journey reruns `apply` to refresh any runtime cache.
+
+`go install` is not a supported end-user installation path in the first
+release: it requires a Go toolchain and source/module resolution rather than
+using the released, checked artifact. A `hctl package` command is also not part
+of this contract. On each machine, retain the agent source and its lockfiles,
+install the native runtimes required by its authored tools, and run `apply` to
+rebuild the workspace-local disposable cache.
+
 ## Development
 
 ```sh

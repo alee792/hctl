@@ -5,6 +5,27 @@
 - Initial runtime: local Go executable
 - Initial harnesses: Claude Code and Codex CLI
 
+## Initial installation
+
+The initial supported platform is `darwin-arm64`. The exact `vX.Y.Z` Git tag is
+the authoritative release version and names
+`hctl_X.Y.Z_darwin_arm64.tar.gz`, which contains one `hctl` executable at its
+archive root. The accompanying `hctl_X.Y.Z_SHA256SUMS` manifest supplies its
+SHA-256 checksum. A user downloads and verifies those exact files, extracts the
+executable to a stable location on `PATH`, then runs `hctl apply` with an agent
+source and workspace. The generated MCP configuration records the resolved
+absolute executable path: moving the binary requires reapplying the workspace;
+replacing it at the same path leaves that reference valid, but the supported
+upgrade journey reruns `apply` to refresh any runtime cache.
+
+`go install` is not a supported first-release user journey. It requires a Go
+toolchain and source/module resolution rather than consuming the released,
+checked artifact. `hctl package` is not introduced: portable agent source and
+native lockfiles remain inputs to `apply`, while generated tool hosts and
+dependency environments remain disposable workspace-local caches. Another
+machine installs its needed native runtimes and reruns `apply`; it does not
+reuse a copied `.hctl/cache/` directory.
+
 ## User and job
 
 The primary user is an agent author who understands basic files and directories

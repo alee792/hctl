@@ -246,8 +246,13 @@ authored tool inventory.
    optional stronger isolation mode needed later?
 4. What graceful cancellation, restart, concurrency, and log-routing behavior
    is worth adding beyond the current bounded serial process contract?
-5. Which artifacts must a future `package` command rebuild for
-   portability?
+5. HCTL-001 resolved the first-install case: no `package` command is needed.
+   Another machine keeps the agent source and native lockfiles, installs the
+   required native tool runtimes, and reruns `apply`. The generated Go host,
+   generic host files, prepared dependency environments, executable receipt,
+   and all other `.hctl/cache/` contents remain local disposable output. Revisit
+   a relocatable package only after a concrete distribution need requires more
+   than this source-plus-apply contract.
 
 ## First spike result
 

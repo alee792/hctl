@@ -17,42 +17,51 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### HCTL-001 — Choose the first install and packaging contract
-
-**Outcome:** Recommend the smallest supported way to install a pinned hctl
-version and use it from an unrelated agent project and workspace. Decide what,
-if anything, a future `hctl package` command must add beyond `hctl apply`.
-
-**Scope:** Compare only realistic first-release paths such as `go install` and
-a release archive. Include how the installed executable is referenced by
-generated MCP configuration, which tool-host artifacts remain local caches,
-and what must be rebuilt on another machine. Do not publish a package or build
-a general deployment system.
-
-**Evidence:** Extend the existing
-[clean-install proof](../../spikes/clean-install/README.md) where a concrete
-experiment resolves uncertainty. Record the recommendation and rejected
-alternatives in an ADR if it changes the product contract. The result must
-identify the follow-up implementation task precisely enough for a clean
-session to execute it.
-
-**Context:** [Product specification](../product-spec.md),
-[tool-authoring workbench](tool-authoring.md), and
-[Working status](status.md#current-design-frontier).
-
 ### HCTL-002 — Implement the accepted install journey
 
-**Blocked by:** HCTL-001 and human acceptance of its product-facing choice.
+**Outcome:** Implement the accepted release-archive contract without
+publication. The exact checked-out `vX.Y.Z` Git tag is the only version source.
+Build only `darwin-arm64`, producing `hctl_X.Y.Z_darwin_arm64.tar.gz` with one
+root-level `hctl` executable and `hctl_X.Y.Z_SHA256SUMS` containing its SHA-256
+checksum. Document the exact download, verification, extraction, `PATH`, and
+`apply` journey. Do not add `hctl package`, bundle agent source, tool runtimes,
+workspace cache output, or another platform.
 
-**Outcome:** A user can install a pinned hctl build outside this repository,
-apply the minimal agent to a fresh unrelated workspace, and start a supported
-native harness with the generated managed tools available.
+**Acceptance:** A credential-free check builds and extracts the release-shaped
+archive into an isolated prefix, uses only that extracted executable to apply
+an agent source and workspace outside the checkout, and starts its generated
+managed MCP server. It proves the generated configuration records the resolved
+installed executable, required language runtimes fail before native setup is
+written, and a fresh machine keeps source plus lockfiles and reruns `apply`
+rather than copying `.hctl/cache/`. Run the full quality gate. Do not publish
+without explicit human authorization.
 
-**Evidence:** A credential-free clean-install check covers the documented
-commands, executable discovery, a workspace outside the source checkout,
-required language-runtime detection, and actionable failure before partial
-native setup. Run the full quality gate. Do not publish without explicit human
-authorization.
+**Context:** [ADR 0007](../adr/0007-first-install-release-archive.md),
+[product specification](../product-spec.md#initial-installation), and the
+[clean-install proof](../../spikes/clean-install/README.md).
+
+## Completed
+
+### HCTL-001 — Choose the first install and packaging contract
+
+**Decision:** Start with the `darwin-arm64` platform exercised by the
+clean-install proof. The exact `vX.Y.Z` Git tag names
+`hctl_X.Y.Z_darwin_arm64.tar.gz`, containing a root-level `hctl` executable,
+and `hctl_X.Y.Z_SHA256SUMS`. The generated MCP configuration stores the
+resolved absolute path: moving the executable requires `apply`; replacing it
+in place leaves the path valid, but the supported upgrade journey reruns
+`apply`. `go install` is rejected as the first user journey because it requires
+a Go toolchain and source/module resolution instead of the released artifact.
+Do not introduce `hctl package`: agent source and lockfiles travel to another
+machine, while generated hosts, prepared native dependency environments, and
+`.hctl/cache/` stay disposable and are rebuilt by `apply`.
+
+**Evidence:** The credential-free
+[clean-install proof](../../spikes/clean-install/README.md) copies the minimal
+agent source outside the checkout, applies it with an installed binary to a
+separate workspace, and starts the managed MCP server to list `echo`. The
+runtime behavior and rejected alternatives are recorded in
+[ADR 0007](../adr/0007-first-install-release-archive.md).
 
 ## Waiting on access
 

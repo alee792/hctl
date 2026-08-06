@@ -53,10 +53,10 @@ reviews layer beside the existing hctl-specific review skills.
 
 The [credential-free clean-install check](../../spikes/clean-install/README.md)
 builds a fresh hctl binary with the pinned repository Go toolchain into a
-disposable install prefix, applies the minimal example to a fresh workspace
-with fake Codex, verifies that the native MCP setup names that installed
-binary, and proves a missing authored-tool runtime fails clearly before native
-setup is written.
+disposable install prefix, copies a minimal agent source outside the checkout,
+applies it to a fresh workspace with fake Codex, verifies that the native MCP
+setup names that installed binary, starts that MCP server, and proves a missing
+authored-tool runtime fails clearly before native setup is written.
 
 A [live Codex acceptance pass](codex-live-acceptance.md) on CLI 0.144.1 also
 proved native instruction and skill discovery, all three authored-tool hosts,
@@ -138,7 +138,9 @@ The authored-tool questions are enumerated in the
 [tool-authoring workbench](tool-authoring.md#remaining-questions). The main unresolved
 areas are whether a future helper package should wrap the intentionally small
 structural source APIs, graceful per-call cancellation and host restart,
-concurrent calls, richer local imports, cache cleanup, and packaging.
+concurrent calls, richer local imports, and cache cleanup. HCTL-001 selected a
+versioned release archive for first installation; it deliberately leaves a
+relocatable package command out until a concrete need demonstrates one.
 
 Product naming, the concrete credential-broker backend, proposal storage and
 review UX, and specific vendor channel adapters are also intentionally

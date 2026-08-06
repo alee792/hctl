@@ -1,4 +1,4 @@
-# ADR 0013: Run schedules as fresh gateway tasks
+# ADR 0013: Dispatch schedules as fresh tasks
 
 - Status: accepted
 
@@ -7,7 +7,7 @@
 An agent author can add a Markdown schedule whose path is its name, whose
 frontmatter contains one cron string, and whose body is the task prompt. Apply
 validates and fingerprints that source without starting a clock. An operator
-can trigger one occurrence through the durable gateway, but every accepted
+can dispatch one occurrence through the durable turn dispatcher, but every accepted
 occurrence starts a fresh native-harness session so recurring work does not
 silently inherit old model context. The supplied input ID makes retries
 deduplicatable. Automatic clocks, deployment registration, output delivery,
@@ -26,11 +26,11 @@ bytes in the source fingerprint. It starts no harness process, clock, or
 external registration.
 
 `hctl schedule trigger AGENT NAME --input-id ID` submits one prompt through the
-existing typed gateway. A stable gateway conversation derived from the
+existing typed dispatch seam. A stable dispatcher conversation derived from the
 schedule name retains bounded outcome history for deduplication, but task mode
 opens the native harness without a resume ID for every accepted input. It
 clears the stored native session ID after a terminal result. A crash can still
-retain the active session ID long enough for the existing gateway recovery to
+retain the active session ID long enough for the existing dispatcher recovery to
 classify the occurrence as uncertain; it is never silently retried.
 
 The command reports only the schedule name, input ID, lifecycle status,
@@ -42,21 +42,21 @@ status line is written.
 The `cron` value is parsed as a standard expression in this slice but no clock
 evaluates it. HCTL-015 owns UTC evaluation and overlap behavior when it adds a
 foreground clock. HCTL-014 separately owns durable per-turn deadline behavior;
-the command currently retains the gateway's bounded whole-process timeout.
+the command currently retains the turn dispatcher's bounded whole-process timeout.
 
 ## Context
 
 Eve treats a Markdown schedule as task mode: the file carries one five-field
 cron value and a prompt, each occurrence gets its own session, and model output
 is discarded. Hctl does not own a hosted runtime, so the first useful slice is
-portable source plus explicit one-shot dispatch. Reusing the durable gateway
+portable source plus explicit one-shot dispatch. Reusing the durable turn dispatcher
 preserves its existing input validation, acceptance, deduplication, terminal
 outcomes, and uncertain restart recovery without inventing a second scheduler
 state store.
 
 One durable conversation per occurrence would also create unbounded
 conversation records. A stable conversation per schedule plus fresh native
-sessions keeps deduplication bounded by the gateway's existing recent-outcome
+sessions keeps deduplication bounded by the dispatcher's existing recent-outcome
 limit while preserving task isolation.
 
 ## Consequences
@@ -72,7 +72,7 @@ limit while preserving task isolation.
   overlap management.
 - TypeScript schedule handlers and Eve's channel/authenticated hosted runtime
   remain unsupported.
-- The current gateway keeps only bounded recent outcomes, so deduplication is
+- The current dispatcher keeps only bounded recent outcomes, so deduplication is
   not an unbounded execution ledger.
 
 ## Sources

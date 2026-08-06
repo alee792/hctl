@@ -7,7 +7,7 @@
 Treat an agent project as portable authored source that can be applied to any
 independently selected workspace. The agent source contains instructions,
 skills, tools, subagents, and native dependency files. The workspace contains
-generated harness files, apply records, gateway state, runtime caches, and the
+generated harness files, apply records, dispatch state, runtime caches, and the
 files on which the harness and authored tools operate.
 
 `--workspace` defaults to the agent source directory, preserving a simple
@@ -30,7 +30,7 @@ hctl. Image construction and deployment remain outside the MVP.
 
 ## Consequence
 
-Apply and gateway commands must carry both source and workspace identity.
+Apply and headless run commands must carry both source and workspace identity.
 Generated MCP commands must preserve both paths so runtime verification loads
 the selected source against the correct workspace record. Authored language
 dependencies are resolved from agent source, while tool calls use the workspace

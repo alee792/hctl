@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"hctl/internal/harness"
+	"hctl/internal/secureenv"
 )
 
 type Driver struct{ executable string }
@@ -24,7 +25,9 @@ func (d *Driver) Executable() string { return d.executable }
 func (d *Driver) Verify(ctx context.Context) error {
 	versionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(versionCtx, d.executable, "--version").Output()
+	command := exec.CommandContext(versionCtx, d.executable, "--version")
+	command.Env = secureenv.Child()
+	output, err := command.Output()
 	if err != nil || len(output) > 4096 || !regexp.MustCompile(`\d+\.\d+\.\d+`).Match(output) {
 		return errors.New("claude executable did not provide a compatible semantic version")
 	}

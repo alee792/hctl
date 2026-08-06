@@ -18,7 +18,7 @@ files, CLI guidance, or product documentation.
 | Tool file | Source under `tools/` that exports one tool using a supported language contract. Its path registers it by convention; there is no separate hctl manifest. |
 | Tool host | An hctl-owned, long-lived language process that loads tool files and exposes them through MCP. Authors write functions, not host protocol code. |
 | Dependency lockfile | A language-native file that pins code dependencies. It is allowed beside authored files but does not register tools with hctl. |
-| Channel | A place where external input reaches an agent. The first vendor form is `channels/discord.md`: signed Discord HTTP Interactions normalize one authorized command into the existing durable gateway and return bounded output with its short-lived response token. |
+| Channel | A place where external input reaches an agent. The first vendor form is `channels/discord.md`: its portable participation policy controls an hctl-owned conversational Discord Gateway adapter whose runtime identity and credentials remain outside agent source. |
 | Connection | Filesystem-authored access to an external service through managed tools. The first concrete form is a bounded description at `connections/github.md`, which registers anonymous public GitHub access; a future secret-bearing connection must use the secretless operation broker without exposing credential values to the session. |
 | Sandbox | An execution boundary that restricts code access to host resources. Process validation and timeouts alone are not a sandbox. |
 | Subagent | A specialized native harness agent delegated work by a parent. In the MVP it supplies only instructions and inherits the parent's setup; it is not an independently applied agent project. |
@@ -31,8 +31,8 @@ files, CLI guidance, or product documentation.
 | MCP | The protocol boundary through which a harness discovers and invokes tools. Local tool authors do not need to implement it. |
 | Managed tool | A tool whose requests cross an hctl-owned validation, policy, execution, and audit boundary. |
 | Native tool | A harness-provided tool that remains available but is not governed or observed by hctl. |
-| Gateway | The optional headless boundary that connects input to a resumable native-harness session. |
-| Session | One resumable interaction context owned by the native harness and mapped by the gateway when used headlessly. |
+| Turn dispatcher | The optional headless boundary that connects input to a resumable native-harness session. |
+| Session | One resumable interaction context owned by the native harness and mapped by the turn dispatcher when used headlessly. |
 | Proposal | A workspace-local, human-readable suggestion to change one existing UTF-8 instruction, skill, or managed-tool source file. Its immutable record holds provenance, the target's base content hash, and a diff; a later review record accepts or rejects it. It must not contain credentials, secrets, raw tool output, or conversation transcripts. |
 | Secretless operation broker | A future hctl-owned local process that resolves an opaque credential reference only for an authorized managed operation, uses the value itself against a constrained upstream target, and returns only safe results. It is an execution boundary, not a credential store, vault, or protection from peer processes or native harness capabilities running as the same OS user. |
 | Opaque credential reference | A bounded non-secret identifier that selects a credential inside the secretless operation broker. It is not a credential value, filesystem path, environment-variable name, command, or URI containing credentials. Its eventual author-facing syntax is deferred. |

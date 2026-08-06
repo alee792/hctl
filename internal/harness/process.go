@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+
+	"hctl/internal/secureenv"
 )
 
 const maxHarnessLine = 1 << 20
@@ -20,6 +22,7 @@ type Process struct {
 func StartProcess(ctx context.Context, dir, executable string, args ...string) (*Process, error) {
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Dir = dir
+	cmd.Env = secureenv.Child()
 	input, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, errors.New("cannot open harness input")

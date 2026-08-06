@@ -4,7 +4,7 @@
 
 ## Decision
 
-Before hctl ships a secret-bearing managed tool or connection, add one
+Before hctl ships a secret-bearing model-invocable managed tool or connection, add one
 hctl-owned, local **secretless operation broker** boundary. The broker accepts
 an authorized operation and an opaque credential reference, obtains the value
 from a later-selected backend only when the operation runs, uses the value on
@@ -135,9 +135,10 @@ constrained operations rather than forwarding model-side authority.
 
 ## Consequences
 
-No code, dependency, credential, connection syntax, storage adapter, vault,
-or test fixture is introduced by this ADR. The existing MVP remains
-credential-free. When a concrete secret-bearing managed tool is prioritized,
+This ADR does not govern credentials consumed exclusively inside a built-in
+channel transport and never exposed as a model-invocable operation; that trusted
+boundary is specified separately by ADR 0012. When a concrete secret-bearing
+managed tool is prioritized,
 its proposal must choose the backend and local authorization UX, specify the
 operation-specific allowlist and result schema, test only fake credentials and
 fake backends, and prove that generated files, environments, protocol traffic,

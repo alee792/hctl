@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"hctl/internal/rootfs"
+	"hctl/internal/secureenv"
 )
 
 const (
@@ -170,7 +171,7 @@ func hostCommand(sourceRoot, workspaceRoot, sourceFingerprint string, prepared p
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 			return "", nil, nil, errors.New("go tool runtime is missing; run hctl apply")
 		}
-		return binary, nil, nil, nil
+		return binary, nil, secureenv.Child(), nil
 	default:
 		return "", nil, nil, errors.New("unsupported tool language")
 	}

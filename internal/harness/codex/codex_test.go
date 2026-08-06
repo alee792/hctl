@@ -70,7 +70,7 @@ done
 	if result.Status != "completed" || result.SessionID != "01911111-1111-7111-8111-111111111111" {
 		t.Fatalf("turn result = %#v", result)
 	}
-	if len(events) != 2 || events[0].Type != "turn.started" || events[1].Type != "agent.output.delta" {
+	if len(events) != 2 || events[0].Type != "turn.started" || events[1].Type != "agent.output.delta" || events[1].ItemID != "item-1" {
 		t.Fatalf("events = %#v", events)
 	}
 	if err := session.Close(); err != nil {

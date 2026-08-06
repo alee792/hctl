@@ -12,7 +12,7 @@ harnesses. `hctl` is a temporary internal name, not a product name. Read
 Apply the simplicity-pass skill during planning, implementation, refactoring,
 and review. Keep the native harness responsible for its model loop, context,
 native tools, approvals, and interactive interface. Hctl owns agent-project
-discovery and validation, generated harness files, gateway sessions, and
+discovery and validation, generated harness files, dispatcher-managed sessions, and
 explicitly managed tools.
 
 Keep packages organized by concrete responsibility; do not introduce generic

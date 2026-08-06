@@ -100,6 +100,34 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 	}
 }
 
+func TestGeneratedInstructionsContainDiscordParticipationPolicy(t *testing.T) {
+	root := testAgent(t)
+	if err := os.MkdirAll(filepath.Join(root, "channels"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "channels", "discord.md"), []byte("---\nmode: ambient\n---\n\nParticipate only in review work.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, harness := range []string{"claude", "codex"} {
+		p, err := project.Load(root, harness)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generated, err := filesFor(p, "/opt/hctl/bin/hctl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := "CLAUDE.md"
+		if harness == "codex" {
+			path = "AGENTS.md"
+		}
+		content := string(generated.Files[path].Content)
+		if !strings.Contains(content, "Participate only in review work.") || !strings.Contains(content, "HCTL_NO_REPLY") {
+			t.Fatalf("%s instructions omitted Discord policy: %q", harness, content)
+		}
+	}
+}
+
 func TestSubagentEffortNativeOutput(t *testing.T) {
 	for _, effort := range []string{"", "low", "medium", "high"} {
 		label := effort

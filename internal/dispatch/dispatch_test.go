@@ -1,4 +1,4 @@
-package gateway
+package dispatch
 
 import (
 	"bytes"
@@ -97,7 +97,7 @@ func TestRecoversActiveInputAsUncertain(t *testing.T) {
 	}
 }
 
-func TestGatewayRunsHarnessAndStateInSelectedWorkspace(t *testing.T) {
+func TestDispatcherRunsHarnessAndStateInSelectedWorkspace(t *testing.T) {
 	standalone := testProject(t)
 	workspace := t.TempDir()
 	p, err := project.Load(standalone.SourceRoot, "claude", workspace)
@@ -112,11 +112,11 @@ func TestGatewayRunsHarnessAndStateInSelectedWorkspace(t *testing.T) {
 	if driver.openedRoot != p.WorkspaceRoot {
 		t.Fatalf("harness opened in %q, want workspace %q", driver.openedRoot, p.WorkspaceRoot)
 	}
-	if _, err := os.Stat(filepath.Join(p.WorkspaceRoot, ".hctl", "gateway.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(p.WorkspaceRoot, ".hctl", "dispatch.json")); err != nil {
 		t.Fatalf("workspace state missing: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(p.SourceRoot, ".hctl")); !os.IsNotExist(err) {
-		t.Fatalf("gateway wrote state into agent source: %v", err)
+		t.Fatalf("dispatcher wrote state into agent source: %v", err)
 	}
 }
 

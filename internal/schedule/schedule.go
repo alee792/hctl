@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"hctl/internal/gateway"
+	"hctl/internal/dispatch"
 	"hctl/internal/harness"
 	"hctl/internal/project"
 )
@@ -26,7 +26,7 @@ type Result struct {
 }
 
 func Trigger(ctx context.Context, p *project.Project, driver harness.Driver, name, inputID string) (Result, error) {
-	if err := gateway.ValidateInputID(inputID); err != nil {
+	if err := dispatch.ValidateInputID(inputID); err != nil {
 		return Result{}, err
 	}
 	source, ok := findSchedule(p.Schedules, name)
@@ -42,7 +42,7 @@ func Trigger(ctx context.Context, p *project.Project, driver harness.Driver, nam
 	}
 
 	result := Result{Name: name, InputID: inputID}
-	emit := func(event gateway.Event) error {
+	emit := func(event dispatch.Event) error {
 		if event.InputID != "" && event.InputID != inputID {
 			return nil
 		}
@@ -63,7 +63,7 @@ func Trigger(ctx context.Context, p *project.Project, driver harness.Driver, nam
 		}
 		return nil
 	}
-	if err := gateway.RunTask(ctx, p, driver, conversationID(name), gateway.Submission{InputID: inputID, Text: string(source.Prompt)}, emit); err != nil {
+	if err := dispatch.RunTask(ctx, p, driver, conversationID(name), dispatch.Submission{InputID: inputID, Text: string(source.Prompt)}, emit); err != nil {
 		return result, err
 	}
 	if result.Status == "" {

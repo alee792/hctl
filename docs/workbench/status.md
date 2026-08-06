@@ -37,10 +37,10 @@ that:
   fixed anonymous public GitHub repository and issue operations through the
   same managed MCP server without contacting GitHub during apply;
 - discovers a bounded `channels/discord.md` description and runs one signed,
-  loopback Discord Interactions adapter over the existing durable gateway;
+  loopback Discord Interactions adapter over the existing durable turn dispatcher;
 - discovers nested Markdown schedules, validates and fingerprints their
   five-field cron metadata, and explicitly triggers fresh-session task
-  occurrences through the durable gateway without emitting model text;
+  occurrences through the durable turn dispatcher without emitting model text;
 - drives local Claude Code and Codex processes headlessly through fake-tested
   bidirectional protocols;
 - maps conversations to resumable harness sessions, queues input FIFO,
@@ -80,7 +80,7 @@ a generated custom subagent, and session resume in a fresh external workspace.
 
 - hctl bootstraps and extends Claude Code and Codex; it does not replace their
   model loops, context management, native tools, approvals, or interactive UI.
-- Interactive users run the native harness after `hctl apply`. The gateway is
+- Interactive users run the native harness after `hctl apply`. The turn dispatcher is
   an optional headless boundary, not a cross-harness chat UI.
 - The agent project is portable source and is not coupled to the repository
   that stores it. Conventional files are the authoring interface; there is no
@@ -138,20 +138,16 @@ a generated custom subagent, and session resume in a fresh external workspace.
   repository and issue operations through hctl's existing managed MCP server.
   It deliberately adds no credential, broker, generic OpenAPI runtime, or
   remote MCP proxy.
-- The first Discord channel slice uses Eve's `channels/` and normalized-input
-  precedent with Discord's signed HTTP Interactions transport. A bounded
-  `channels/discord.md` description enables one loopback runner for one
-  configured application, user, conversation, and harness session. Its default
-  conversation is scoped to that application and user. It bounds pending input
-  and ordinary delivery at 32 each, flushes an admitted signed command's defer
-  before asynchronous gateway submission, uses at most six response messages,
-  and expires still-pending in-memory tokens after 14 minutes without
-  interrupting the harness; bot credentials and Gateway behavior remain
-  deferred.
+- The Discord channel uses an outbound Gateway connection and a strict
+  `channels/discord.md` participation policy. Runtime profiles pin the bot
+  application and identity to one authorized user, guild channel, and DM;
+  credentials remain in the OS credential store. `hctl run` auto-applies stale
+  setup, buffers responses for exact no-reply suppression, and exposes `/new`
+  and `/status` without requiring a public listener or tunnel.
 - Root-agent Markdown schedules follow Eve's nested `schedules/` convention:
   strict frontmatter contains one valid standard five-field cron string and the
   body is the task prompt. Apply starts no clock. `hctl schedule trigger`
-  accepts a caller-owned occurrence ID, reuses bounded gateway deduplication,
+  accepts a caller-owned occurrence ID, reuses bounded turn dispatcher deduplication,
   opens a fresh native session for each accepted occurrence, reports lifecycle
   status, and discards model text.
 
@@ -160,10 +156,10 @@ a generated custom subagent, and session resume in a fresh external workspace.
 These are later product promises, not MVP implementation work:
 
 - Advance the remaining schedule runtime as separate bounded slices: per-turn
-  gateway deadlines, then a foreground local clock. Completing that sequence
+  dispatch deadlines, then a foreground local clock. Completing that sequence
   is not permission to add live credentials, contact GitHub or Discord,
   publish, deploy, or replace native harness behavior.
-- Future channel adapters feed the same session-aware gateway exercised by
+- Future channel adapters feed the same session-aware turn dispatcher exercised by
   local input. Network adapters verify their source before acceptance.
 - An external conversation maps to one native-harness session. Accepted input
   is durably queued FIFO; a stable source delivery ID is deduplicated when the
@@ -214,7 +210,7 @@ in ADR 0009; its backend and credential-owner decision remain deferred because
 the first GitHub slice is anonymous. HCTL-010 and HCTL-011 are complete.
 HCTL-012's schedule source and one-shot dispatch are complete. Each occurrence
 uses a fresh native-harness task session, while its stable input ID deduplicates
-retries of that occurrence. Per-turn gateway deadlines and a foreground local
+retries of that occurrence. Per-turn dispatch deadlines and a foreground local
 clock are separate follow-ups.
 Portable sandbox and image/runtime authoring are deferred: the native harnesses
 do not expose equivalent sandbox contracts, native lockfiles already cover
@@ -222,9 +218,10 @@ authored-tool runtimes, and hctl does not own deployment. Do not implement
 proposal capture, image deployment, sandbox source, or broker code merely to
 exercise future seams.
 
-Live Discord acceptance remains waiting on a disposable application, a
-user-controlled public HTTPS handoff, command registration, and explicit human
-authorization. The shipped evidence is credential-free and loopback-only.
+Live Discord acceptance remains pending enrollment of a user-controlled bot and
+authorized guild/channel. The automated evidence uses credential-free tests;
+the runtime itself connects outbound through Discord's Gateway and needs no
+public HTTPS handoff.
 
 The [maintainer task list](tasks.md) turns that frontier into a prioritized,
 permission-aware queue. It is the source for agent assignments; this section

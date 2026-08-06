@@ -2,14 +2,46 @@ package cli
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestHeadlessCommandIsNamedRun(t *testing.T) {
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"run", "--help"}, strings.NewReader(""), &output, &stderr, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "Usage: hctl run AGENT") || strings.Contains(got, "gateway") {
+		t.Fatalf("run help = %q", got)
+	}
+
+	output.Reset()
+	err := Run([]string{"gateway"}, strings.NewReader(""), &output, &stderr, "")
+	if err == nil || !strings.Contains(err.Error(), `unknown command "gateway"`) {
+		t.Fatalf("legacy gateway command error = %v", err)
+	}
+}
+
+func TestRunJSONLAutoAppliesAndScrubsDiscordToken(t *testing.T) {
+	root := t.TempDir()
+	writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	harness := filepath.Join(t.TempDir(), "codex")
+	writeCLIFile(t, harness, "#!/bin/sh\nif [ -n \"$HCTL_DISCORD_TOKEN\" ]; then exit 7; fi\necho 'codex-cli 0.144.1'\n", 0o755)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HCTL_DISCORD_TOKEN", "must-not-reach-child")
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"run", root, "--harness", "codex", "--command", harness, "--input", "jsonl"}, strings.NewReader(""), &output, &stderr, self); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "AGENTS.md")); err != nil {
+		t.Fatal("run did not auto-apply")
+	}
+}
 
 func TestApplyPrintsSafeCompatibilityWarning(t *testing.T) {
 	root := t.TempDir()
@@ -51,30 +83,6 @@ func TestApplyRejectsUnsupportedChannelBeforeWorkspaceMutation(t *testing.T) {
 				t.Fatalf("invalid project mutated workspace: %v, %v", entries, readErr)
 			}
 		})
-	}
-}
-
-func TestDiscordChannelRequiresAppliedSetup(t *testing.T) {
-	source := t.TempDir()
-	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
-	writeCLIFile(t, filepath.Join(source, "channels", "discord.md"), "Receive signed commands.\n", 0o644)
-	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := filepath.Join(t.TempDir(), "claude")
-	writeCLIFile(t, command, "#!/bin/sh\necho 'claude 1.0.0'\n", 0o755)
-	var output, stderr bytes.Buffer
-	err = Run([]string{
-		"channel", "discord", source,
-		"--harness", "claude",
-		"--command", command,
-		"--application-id", "123456789012345678",
-		"--public-key", hex.EncodeToString(publicKey),
-		"--allowed-user", "234567890123456789",
-	}, strings.NewReader(""), &output, &stderr, "")
-	if err == nil || !strings.Contains(err.Error(), "setup is missing or stale") {
-		t.Fatalf("channel setup error = %v", err)
 	}
 }
 

@@ -6,7 +6,7 @@
 
 Compile a filesystem-authored project into Claude Code and Codex native
 surfaces. Keep their model loops, context management, native tools, approvals,
-and interactive interfaces. Provide an optional gateway only for headless
+and interactive interfaces. Provide an optional turn dispatcher only for headless
 sessions and managed-tool use.
 
 ## Consequence

@@ -17,6 +17,7 @@ type Event struct {
 	Type      string
 	SessionID string
 	TurnID    string
+	ItemID    string
 	Delta     string
 	Status    string
 }

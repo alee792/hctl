@@ -18,15 +18,15 @@ smaller than the product horizon in [Working status](status.md).
 ## Ready
 
 No implementation item is ready. HCTL-014 must be shaped from HCTL-012's
-observed gateway behavior before coding starts.
+observed dispatcher behavior before coding starts.
 
 ## Ordered next
 
 Do not start these concurrently. Shape each item using evidence from the
 completed predecessor.
 
-1. **HCTL-014 — Add per-turn gateway deadlines.** Shape an operator runtime
-   deadline at the gateway/session seam after HCTL-012. It must persist timeout
+1. **HCTL-014 — Add per-turn dispatch deadlines.** Shape an operator runtime
+   deadline at the dispatcher/session seam after HCTL-012. It must persist timeout
    as uncertain, abort the affected native process, and state whether later
    queued input can safely reopen a session. Do not put deployment policy in
    portable agent source.
@@ -44,14 +44,14 @@ completed predecessor.
 tasks with strict one-field cron frontmatter and a non-empty Markdown prompt.
 Apply validates, bounds, sorts, and fingerprints them without starting a clock
 or model. `hctl schedule trigger` sends one caller-identified occurrence
-through the durable gateway, opens a fresh native-harness session for each
+through the durable turn dispatcher, opens a fresh native-harness session for each
 accepted occurrence, clears terminal continuation state, reports bounded
 lifecycle metadata, and discards model text. Repeating the same stable input ID
-returns the retained gateway outcome without another harness turn.
+returns the retained dispatch outcome without another harness turn.
 
 **Evidence:** Project tests cover nested discovery for Claude and Codex,
 fingerprint changes, source/path/frontmatter/body bounds, unsupported files,
-and symlinks. Gateway and schedule tests prove fresh sessions, bounded shared
+and symlinks. Dispatcher and schedule tests prove fresh sessions, bounded shared
 deduplication state, prompt submission, duplicate suppression, unknown-name
 failure, and terminal session cleanup. Literal CLI tests apply scheduled agents
 to external workspaces and invoke fake Claude and Codex protocols with two
@@ -59,7 +59,7 @@ occurrence IDs; they prove a duplicate starts no process, neither accepted
 occurrence resumes a prior session, and model output is absent from CLI status.
 No clock, registration, daemon, missed-run replay, channel delivery, credential,
 network request, or live model call is present. See
-[ADR 0013](../adr/0013-run-schedules-as-fresh-gateway-tasks.md).
+[ADR 0013](../adr/0013-run-schedules-as-fresh-dispatch-tasks.md).
 `./scripts/check.sh` passes.
 
 ### HCTL-011 — Add a signed Discord Interactions channel
@@ -68,8 +68,8 @@ network request, or live model call is present. See
 built-in Discord channel. `hctl channel discord` runs one loopback HTTP
 Interactions adapter for one selected harness and hctl conversation. It verifies
 Discord's Ed25519 signature and bounded timestamp, authorizes one configured
-application and user, maps the interaction ID to the existing durable gateway
-input ID, flushes an admitted command's deferred acknowledgement before gateway
+application and user, maps the interaction ID to the existing durable dispatch
+input ID, flushes an admitted command's deferred acknowledgement before dispatch
 acceptance, then asynchronously accepts or rejects the input and delivers
 bounded turn output through Discord's interaction response token.
 
@@ -84,7 +84,7 @@ at runtime; none belong in agent source or generated harness files. Apply makes
 no network request. Unless explicitly overridden, the conversation is derived
 from the application and allowed user.
 
-Refactor the gateway only enough to expose typed submission and events while
+Refactor the turn dispatcher only enough to expose typed submission and events while
 keeping JSONL as its existing adapter and persistence authoritative. One channel
 process owns one conversation and one harness session; do not add concurrent
 multi-conversation state mutation. Accept PING and one application-command
@@ -98,7 +98,7 @@ backend; a bot token would.
 **Evidence:** Credential-free tests with generated Ed25519 keys, fake
 harnesses, and fake Discord HTTP cover discovery/fingerprinting and invalid
 channel source for both harnesses; setup verification; safe listener/path and
-runtime identity validation; PING; valid flushed defer before stalled gateway
+runtime identity validation; PING; valid flushed defer before stalled dispatch
 acceptance; asynchronous queue rejection; bad/missing/stale signature; wrong
 application; unauthorized user; bounded `message`; interaction-ID
 deduplication; FIFO input while active; completion/failure/uncertain delivery;
@@ -119,7 +119,7 @@ Discord's official
 [`Interactions` contract](https://docs.discord.com/developers/interactions/receiving-and-responding),
 [product specification](../product-spec.md), and
 [ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md), and
-[ADR 0012](../adr/0012-use-signed-discord-http-interactions.md). The README,
+[historical ADR 0012](../adr/0012-use-a-conversational-discord-gateway-channel.md). The README,
 product specification, glossary, status, task list, and credential-free example
 record the implemented contract.
 
@@ -221,10 +221,10 @@ transcript-derived content, or imply portable child semantics.
 
 **Evidence:** The credential-safe
 [Codex post-run summary spike](codex-post-run-summary-spike.md) records the
-reproducible schema procedure, current gateway/session/event boundaries, the
+reproducible schema procedure, current dispatcher/session/event boundaries, the
 prior child-stream observation, raw-observation limits, and additive failure
 behavior. Its regression source proves a child completion before the parent
-does not complete the parent gateway turn. No model turn, credential material,
+does not complete the parent dispatched turn. No model turn, credential material,
 native-log content, or transcript was captured for this spike.
 
 **Follow-up:** No implementation is queued. Reopen only when optional
@@ -318,7 +318,7 @@ signatures, tokens, message bodies, or credentials. Any product correction also
 needs a credential-free regression test.
 
 **Context:** [Discord source example](../../examples/discord/README.md) and
-[ADR 0012](../adr/0012-use-signed-discord-http-interactions.md).
+[ADR 0012](../adr/0012-use-a-conversational-discord-gateway-channel.md).
 
 ## Start only with human direction
 

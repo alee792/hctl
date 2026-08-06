@@ -77,9 +77,10 @@ type GitHubConnection struct {
 }
 
 type DiscordChannel struct {
-	Description string
-	Path        string
-	Source      []byte
+	Mode   string
+	Policy []byte
+	Path   string
+	Source []byte
 }
 
 type Schedule struct {
@@ -414,14 +415,49 @@ func loadDiscordChannel(root string) (*DiscordChannel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("discord channel: %w", err)
 	}
+	mode, policy, err := parseDiscordChannel(source)
+	if err != nil {
+		return nil, fmt.Errorf("discord channel: %w", err)
+	}
+	return &DiscordChannel{Mode: mode, Policy: policy, Path: path, Source: source}, nil
+}
+
+func parseDiscordChannel(source []byte) (string, []byte, error) {
 	if !utf8.Valid(source) {
-		return nil, errors.New("discord channel description must be valid UTF-8")
+		return "", nil, errors.New("file must be valid UTF-8")
 	}
-	description := strings.TrimSpace(string(source))
-	if description == "" || len([]rune(description)) > 1024 {
-		return nil, errors.New("discord channel description must contain 1-1024 characters")
+	scanner := bufio.NewScanner(bytes.NewReader(source))
+	if !scanner.Scan() || strings.TrimSuffix(scanner.Text(), "\r") != "---" {
+		return "", nil, errors.New("file must start with YAML frontmatter")
 	}
-	return &DiscordChannel{Description: description, Path: path, Source: source}, nil
+	mode, closed := "", false
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if line == "---" {
+			closed = true
+			break
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(key) != "mode" || mode != "" {
+			return "", nil, errors.New("frontmatter supports one plain mode only")
+		}
+		mode = strings.TrimSpace(value)
+	}
+	if !closed || mode != "ambient" {
+		return "", nil, errors.New("frontmatter requires mode: ambient")
+	}
+	var body []string
+	for scanner.Scan() {
+		body = append(body, strings.TrimSuffix(scanner.Text(), "\r"))
+	}
+	if err := scanner.Err(); err != nil {
+		return "", nil, errors.New("cannot read channel policy")
+	}
+	policy := strings.TrimSpace(strings.Join(body, "\n"))
+	if policy == "" || len([]rune(policy)) > 1024 {
+		return "", nil, errors.New("markdown participation policy must contain 1-1024 characters")
+	}
+	return mode, []byte(policy + "\n"), nil
 }
 
 func loadGitHubConnection(root string) (*GitHubConnection, error) {

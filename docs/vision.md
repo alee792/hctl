@@ -3,7 +3,7 @@
 Define an agent project as files and use it with the capable harness you
 already trust. Compile portable instructions, skills, and managed tools into
 native Claude Code and Codex setups without replacing their model loops or
-interfaces. For headless use, add a session-aware gateway that connects
+interfaces. For headless use, add a session-aware turn dispatcher that connects
 external input and governs only what crosses its managed boundary.
 
 An agent project is portable source, not a repository-bound runtime. Apply it
@@ -20,8 +20,8 @@ portable agent-project contract, generated workspace setup, and the tools
 routed through its managed boundary.
 
 Interactive users work directly in Claude Code or Codex after hctl prepares
-the harness setup. Headless users may place the gateway between an input source
-and a local harness process. The gateway does not become another chat UI or
+the harness setup. Headless users may place the turn dispatcher between an input source
+and a local harness process. The turn dispatcher does not become another chat UI or
 model loop.
 
 Harness-native tools remain valid but unmanaged. The tool never claims that it

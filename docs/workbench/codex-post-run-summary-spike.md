@@ -6,10 +6,10 @@
 
 ## Result
 
-Do not implement a post-run summary yet. The gateway can reliably report the
+Do not implement a post-run summary yet. The turn dispatcher can reliably report the
 parent input outcome it already owns, and Codex exposes child runtime IDs in its
 current App Server protocol. It does not, however, expose a stable native-log
-locator through the gateway contract. Adding a summary now would either invent
+locator through the turn dispatcher contract. Adding a summary now would either invent
 that locator, retain transcript-derived content, or make a Codex-specific
 observation look portable.
 
@@ -17,16 +17,16 @@ observation look portable.
 
 | Fact | Evidence and boundary |
 | --- | --- |
-| Parent outcome | The gateway durably maps its caller `input_id` to `completed`, `failed`, `cancelled`, or `uncertain`; the Codex driver emits the matching parent `threadId` and `turn.id`. This is hctl-owned state, not a model-authored result. |
+| Parent outcome | The turn dispatcher durably maps its caller `input_id` to `completed`, `failed`, `cancelled`, or `uncertain`; the Codex driver emits the matching parent `threadId` and `turn.id`. This is hctl-owned state, not a model-authored result. |
 | Parent runtime IDs | The Codex driver opens or resumes one thread and starts one parent turn. It filters a completion whose `threadId` or `turn.id` differs from that active parent, so a normally identified child cannot complete the parent. |
-| Child runtime activity | The existing live gateway trace recorded child `turn/completed` notifications on the parent stream with a different `threadId` and `turn.id`. The current Codex v2 schema also gives `item/agentMessage/delta` `threadId`, `turnId`, and `itemId`; collaboration items carry `agentThreadId`, and a subagent thread has `parentThreadId`. These are Codex runtime identifiers, not hctl IDs and not a cross-harness promise. |
-| Native log content | Nothing in the gateway reads or copies it. Codex keeps rollout JSONL locally and its current schema describes resuming by `thread_id` and repairing metadata from rollout JSONL, but the driver receives no documented log path or log-reference token. A thread ID alone is only a lookup hint. |
+| Child runtime activity | The existing live turn dispatcher trace recorded child `turn/completed` notifications on the parent stream with a different `threadId` and `turn.id`. The current Codex v2 schema also gives `item/agentMessage/delta` `threadId`, `turnId`, and `itemId`; collaboration items carry `agentThreadId`, and a subagent thread has `parentThreadId`. These are Codex runtime identifiers, not hctl IDs and not a cross-harness promise. |
+| Native log content | Nothing in the turn dispatcher reads or copies it. Codex keeps rollout JSONL locally and its current schema describes resuming by `thread_id` and repairing metadata from rollout JSONL, but the driver receives no documented log path or log-reference token. A thread ID alone is only a lookup hint. |
 
 The live child observation is recorded in
 [Codex live acceptance](codex-live-acceptance.md#parallel-review-follow-up).
 The credential-free regression in `internal/harness/codex/codex_test.go` keeps
 the essential ordering case: a child output and completion arrive before the
-parent completion, and only the parent completes the gateway turn.
+parent completion, and only the parent completes the dispatched turn.
 
 ## Reproducible, credential-safe procedure
 
@@ -78,7 +78,7 @@ In particular, the following remain unobserved and must not be inferred:
 
 Any future Codex-only optional observation must be best-effort and additive:
 
-- Parent completion remains the sole gateway terminal condition. Missing,
+- Parent completion remains the sole turn dispatcher terminal condition. Missing,
   malformed, reordered, or unlinked child events must be omitted from the
   observation rather than changing the parent outcome.
 - Record only bounded identifiers and an explicit observation state such as
@@ -88,16 +88,16 @@ Any future Codex-only optional observation must be best-effort and additive:
   the observed thread ID only after Codex supplies a documented resolver or
   explicit rollout reference. If it cannot, omit the reference.
 - A changed or unsupported Codex protocol must disable child observation and
-  leave the existing parent-only gateway behavior intact.
+  leave the existing parent-only dispatch behavior intact.
 
 The smallest safe next step is therefore **no implementation**. If optional
 Codex observability becomes a product priority, first run the authorized
 capture described above and add one Codex-specific, bounded event test based on
-that capture. Keep the event outside the portable gateway completion contract.
+that capture. Keep the event outside the portable dispatch completion contract.
 
 ## Follow-up task state
 
 HCTL-004 is complete as a research task. No implementation or new queued task
 is justified by the present evidence. Reopen this question only with a product
 decision to prioritize optional Codex observability and authorization for the
-model-backed capture; do not block gateway completion on child visibility.
+model-backed capture; do not block dispatch completion on child visibility.

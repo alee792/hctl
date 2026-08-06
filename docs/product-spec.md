@@ -41,7 +41,7 @@ headlessly through channels.
    coupled to the repository that stores it.
 2. Common behavior is portable; harness-specific differences are explicit.
 3. Compilation and validation happen before harness files are written or a
-   gateway starts.
+   turn dispatcher starts.
 4. Generated native files are disposable and visibly tool-owned.
 5. Native harness tools remain available and explicitly unmanaged.
 6. Policy applies only at managed-tool and durable-state boundaries.
@@ -198,76 +198,28 @@ dynamic MCP proxying, approval UX, and credential-broker code are deferred. Any
 secret-bearing extension must first satisfy
 [ADR 0009](adr/0009-use-a-local-secretless-operation-broker.md).
 
-The optional `channels/discord.md` file contains a 1-1024 character UTF-8
-Markdown description. Its conventional path registers the built-in `discord`
-channel; any other entry under `channels/` fails before workspace mutation.
-The file contains no application identity, user identity, public key, token,
-listener address, or vendor configuration and joins the source fingerprint for
-both harnesses. Apply performs no network request and generates no extra native
-harness file for the channel.
+The optional `channels/discord.md` file contains strict `mode: ambient`
+frontmatter and a 1-1024 character UTF-8 Markdown participation policy. Its
+conventional path registers the built-in `discord` channel; any other entry
+under `channels/` fails before workspace mutation. The file contains no runtime
+identity, authorization ID, profile, or credential. It joins the source
+fingerprint, and apply adds its policy plus the exact `HCTL_NO_REPLY` control
+result to generated native instructions.
 
-`hctl channel discord` requires the selected project to have been applied and
-accepts one application ID, Ed25519 public key, allowed user ID, harness, and
-optional conversation override at runtime. Without an override, its bounded,
-deterministic conversation ID includes both the configured application and
-allowed user so changing either cannot inherit the prior native session. It
-binds a numeric loopback address, serves one clean
-Interactions path, and accepts Discord PING plus application commands with
-exactly one string option named `message`. It verifies the signature over the
-timestamp and raw body, rejects timestamps outside five minutes, validates the
-interaction and application IDs, and authorizes the configured user before
-submitting only the interaction ID and message text to the typed gateway seam.
-The interaction ID is the durable input ID, so the existing FIFO queue,
-deduplication, session mapping, and uncertain-recovery behavior remain
-authoritative.
+`hctl channel setup discord` enrolls an existing bot. Local non-secret profiles
+live in owner-only TOML beneath the OS user configuration directory; tokens live
+in the OS credential store. Deployment selects an owner-only mounted config and
+injects `HCTL_DISCORD_TOKEN`. Every run validates the token's application and bot
+IDs against the selected profile before opening an outbound Gateway connection,
+and removes the token from every child-process environment.
 
-Admitted commands receive a flushed Discord deferred acknowledgement immediately
-after transport authentication, authorization, and bounded input validation;
-the HTTP handler does not wait for durable gateway acceptance. Submission then
-runs asynchronously. Queue-full or other gateway rejection edits the deferred
-original with stable bounded text, while accepted input keeps the gateway's
-existing durable FIFO and deduplication semantics. A model turn cannot start
-before the gateway reports acceptance. Before that acceptance, the adapter
-retains at most 32 pending interactions, matching the durable gateway queue;
-additional valid commands receive an immediate ephemeral queue-full response
-without retaining a token, making an outbound request, or starting a harness
-turn.
-
-The adapter retains the short-lived interaction token only in process memory,
-aggregates bounded text deltas, and updates the fixed original-response
-endpoint. The original plus at most five 2,000-rune followups fit the limit for
-user-installed apps; every payload disables mentions and the final bounded
-chunk retains any truncation marker. Discord documents a three-second initial
-response deadline and a 15-minute interaction-token lifetime. Hctl defers
-immediately and, after 14 minutes from the signed timestamp, updates a still
-pending response with stable expiry text and releases its token, output, and
-turn memory. Expiry delivery does not wait behind ordinary output delivery, and
-state release does not wait on any outbound HTTP request. This cleanup does not
-interrupt or claim to stop the harness. HCTL-012 must revisit the separate
-runtime-turn timeout implied by this limit.
-
-Completed, failed, and recovered-uncertain outcomes have bounded fallback text.
-At most 32 ordinary terminal deliveries run concurrently. If that delivery
-limit is full, hctl releases the detached token and output, classifies the
-delivery as a no-retry `delivery=saturated` failure, and performs no outbound
-request. Discord receives no terminal update and the detached response is no
-longer eligible for pending-turn expiry. The deadline-sensitive expiry path
-uses its already bounded pending-turn worker instead of this ordinary-delivery
-limit. Delivery has a five-second timeout,
-follows no redirect, reads at most 64 KiB of response, and never retries. A
-transport failure or invalid successful response is recorded as uncertain; an
-explicit rate limit or other non-success response is classified as rate-limited
-or failed without its response body.
-Audit contains only channel, input ID, status class, and classified delivery
-outcome. Listener readiness is a separate operator diagnostic, not an audit
-event.
-
-This slice follows Eve's `channels/`, path-derived identity, normalized input,
-continuation, deferred-response, and followup concepts while leaving the native
-harness responsible for the turn. It does not add a Discord Gateway bot,
-incoming webhook, bot token, OAuth, proactive sending, ordinary message or
-mention ingestion, command registration, tunnel, TLS termination, public
-listener, deployment, component, modal, typing, or interruption support.
+`hctl run` auto-applies missing or stale setup, then serves the authorized user
+in one guild channel and DM. Each surface has independent durable dispatcher
+state. Other users, channels, bots, and webhooks are ignored. Output is buffered
+until completion, exact `HCTL_NO_REPLY` is suppressed, and visible replies use
+bounded 2,000-character chunks with mentions disabled. `/new` resets an idle
+surface and `/status` returns redacted runtime state. Explicit `--input jsonl`
+selects the existing headless stream instead.
 
 The optional root `schedules/` directory contains nested Markdown task files.
 The bounded, valid UTF-8 path beneath `schedules/`, without `.md`, is the
@@ -287,11 +239,11 @@ hctl schedule trigger AGENT NAME --workspace WORKSPACE \
 ```
 
 One-shot dispatch requires the selected setup to be current and the operator to
-supply a stable gateway input ID. A conversation derived from the schedule name
+supply a stable dispatch input ID. A conversation derived from the schedule name
 keeps bounded durable deduplication outcomes, while every accepted input opens
 a fresh native-harness task session without a resume ID. Terminal task state
 clears the stored native session ID; active work recovered after restart keeps
-the gateway's existing uncertain semantics and is never silently retried.
+the turn dispatcher's existing uncertain semantics and is never silently retried.
 Completed duplicate input returns the prior status without opening a harness.
 
 The command writes one bounded lifecycle line containing the schedule, input
@@ -346,7 +298,7 @@ The agent project supplies instructions, skills, tools, subagents,
 harness-specific files, and native dependency files. The workspace supplies
 harness-visible working files and is
 the working directory for the harness and authored tools. Generated harness
-files, apply records, gateway state, and runtime caches belong to the
+files, apply records, dispatch state, and runtime caches belong to the
 workspace. Source discovery and dependency preparation remain rooted in the
 agent project.
 
@@ -383,25 +335,32 @@ active turn is queued for the next turn. Codex uses its local App Server JSONL
 protocol. Active-turn steering and interruption are Codex-specific and are not
 part of the portable MVP promise.
 
-## Gateway
+## Headless run
 
 ```sh
-hctl gateway AGENT --harness claude
-hctl gateway AGENT --harness codex
+hctl run AGENT --harness claude
+hctl run AGENT --harness codex
 ```
 
-The gateway accepts bounded JSONL input containing a caller-provided
-`input_id` and `text`. It durably accepts and queues input while a turn is
-active, processes one FIFO turn per conversation, emits ordered JSONL events,
+The `run` command sends bounded JSONL input through the turn dispatcher. Each
+input contains a caller-provided `input_id` and `text`. The dispatcher durably
+accepts and queues input while a turn is active, processes one FIFO turn per
+conversation, emits ordered JSONL events,
 and maps the external conversation to a resumable harness session.
 
 A repeated input ID is deduplicated within its conversation. After a restart,
 an input that was active but lacks a proven terminal result becomes uncertain;
 it is not silently retried.
 
-The local stdin adapter and signed Discord Interactions adapter share the same
-typed submission and event seam. The JSONL gateway remains the reference for
-durable state and event semantics. Other vendor channels, generic webhooks,
+Dispatch state is stored owner-only at `.hctl/dispatch.json`. For migration
+compatibility, if that file is absent, hctl validates an existing owner-only
+`.hctl/gateway.json`, installs the validated bytes atomically at the new path,
+and removes the old regular file. When both paths exist, the dispatch path is
+authoritative.
+
+The local stdin adapter and conversational Discord Gateway adapter share the same
+typed submission and event seam. The JSONL input adapter remains the reference
+for durable state and event semantics. Other vendor channels, generic webhooks,
 OAuth, proactive delivery, and public listener management remain outside the
 MVP.
 
@@ -543,10 +502,10 @@ The MVP is complete when credential-free tests prove:
 13. Harness-specific regular files round-trip only into their selected native
     project directory, join stale-source detection, and use the same collision,
     ownership, modified-file, and cleanup protections as generated setup.
-14. A signed Discord interaction is authorized and immediately deferred, then
-    asynchronously accepted or rejected by the durable gateway. Accepted input
-    is deduplicated and delivered through bounded responses for both harnesses
-    without persisting its token or exposing a non-loopback listener.
+14. An authorized Discord Gateway message is durably dispatched for both
+    harnesses, irrelevant output can resolve to `HCTL_NO_REPLY`, visible output
+    is delivered through bounded replies, and the bot token is absent from
+    source, generated files, state, logs, and child environments.
 15. Nested Markdown schedules validate and fingerprint identically for both
     harnesses, and a one-shot trigger deduplicates stable occurrence IDs while
     opening a fresh native session for each accepted occurrence and discarding
@@ -555,13 +514,12 @@ The MVP is complete when credential-free tests prove:
 ## Explicit non-goals
 
 - A model loop, context manager, or cross-harness chat UI
-- Channels other than signed Discord Interactions, generic webhooks, and
+- Channels other than conversational Discord Gateway, generic webhooks, and
   proactive vendor delivery
 - Claude Agent SDK or hosted OpenAI agent runtimes
 - Automatic schedule clocks, workflows, independently configured nested
   subagents, or deployment orchestration
 - Building or deploying packaged agent images
 - Governance claims over native harness tools
-- Credential storage, enrollment, or backend selection before a
-  secret-bearing tool exists
+- Hosted secret managers and model-visible secret-bearing managed operations
 - Automatic or unreviewed promotion of agent-authored improvements

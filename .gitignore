@@ -6,6 +6,13 @@
 /.codex/
 /AGENTS.md
 /CLAUDE.md
+/agents/*/.hctl/
+/agents/*/.mcp.json
+/agents/*/.agents/
+/agents/*/.claude/
+/agents/*/.codex/
+/agents/*/AGENTS.md
+/agents/*/CLAUDE.md
 /.tools/
 *.test
 __pycache__/

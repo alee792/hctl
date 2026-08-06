@@ -6,7 +6,7 @@ product name is intentionally deferred.
 Define an agent project as files and use it with the capable harness you
 already trust. Apply portable instructions, skills, subagents, and managed
 tools to any workspace as native Claude Code or Codex setup without replacing
-their model loops or interfaces. For headless use, add a session-aware gateway
+their model loops or interfaces. For headless use, add a session-aware turn dispatcher
 that connects external input and governs only what crosses its managed
 boundary.
 
@@ -116,7 +116,7 @@ hctl schedule trigger ~/agents/reviewer billing/sweep \
 ```
 
 Each accepted occurrence starts a fresh native-harness session. Retrying the
-same input ID is deduplicated through the durable gateway. The command reports
+same input ID is deduplicated through the durable turn dispatcher. The command reports
 lifecycle status and discards model text; it does not register a cron job,
 install a daemon, replay missed work, or deliver output to a channel.
 
@@ -137,42 +137,37 @@ hctl apply ~/agents/reviewer --workspace ~/Code/example --harness codex
 cd ~/Code/example && codex
 ```
 
-For headless use, apply the agent first and then submit JSONL input:
+For explicit headless JSONL input:
 
 ```sh
 printf '%s\n' '{"input_id":"local-1","text":"Say hello"}' \
-  | ./hctl gateway agents/maintainer --workspace . --harness claude
+  | ./hctl run agents/maintainer --workspace . --harness claude --input jsonl
 ```
 
 Use `--harness codex` for Codex. Interactive work remains in the native
 harness. Codex loads the generated project configuration after the user trusts
-the repository on first launch. The gateway exists for headless sessions and
+the repository on first launch. The turn dispatcher exists for headless sessions and
 future input adapters.
 
-An agent with `channels/discord.md` can accept one signed Discord application
-command through a loopback-only HTTP Interactions endpoint:
+An agent with `channels/discord.md` can run as a conversational Discord Gateway
+bot without a public listener or tunnel. Enroll an existing bot once, then run
+the agent:
 
 ```sh
-hctl channel discord ~/agents/reviewer --workspace ~/Code/example \
-  --harness codex --application-id "$DISCORD_APPLICATION_ID" \
-  --public-key "$DISCORD_PUBLIC_KEY" --allowed-user "$DISCORD_USER_ID"
+hctl channel setup discord ~/agents/reviewer
+hctl run ~/agents/reviewer --workspace ~/Code/example --harness codex
 ```
 
-The command accepts one string option named `message`. Hctl verifies the
-signature, application, user, timestamp, and input. Admitted commands
-immediately flush a deferred response, then submit to the durable gateway
-asynchronously; local admission overflow returns an immediate private busy
-response instead. Later gateway rejection edits a deferred response with
-stable text. The default conversation is scoped to the configured application
-and user; `--conversation` explicitly overrides it. Hctl uses at most six
-bounded response messages and replaces a
-still-loading pending response after 14 minutes without claiming to interrupt
-the harness. If the separate ordinary-delivery limit was already saturated,
-hctl has released that response state and can only emit a safe operator audit;
-Discord receives no terminal update. The listener is plain loopback HTTP; hctl
-does not register the command, expose a public endpoint, or terminate TLS. The
-short-lived interaction token remains in adapter memory and is not written to
-agent source, generated setup, gateway state, or audit output.
+Setup stores non-secret profile metadata in the OS-standard hctl configuration
+directory and the token in the OS credential store. Run validates that token
+against the configured application and bot IDs, auto-applies stale generated
+setup, opens an outbound Discord Gateway connection, and serves the authorized
+user in one configured guild channel plus DM. The bot reads eligible ambient
+messages, applies the participation policy in `channels/discord.md`, replies in
+the same channel, and stays silent when the agent returns exactly
+`HCTL_NO_REPLY`. `/new` resets an idle conversation and `/status` reports safe
+runtime status. Deployment may mount the same non-secret TOML configuration and
+inject `HCTL_DISCORD_TOKEN`; hctl removes that variable from every child process.
 
 ## Product boundary
 

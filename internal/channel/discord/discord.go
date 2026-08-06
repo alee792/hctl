@@ -1,734 +1,597 @@
 package discord
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
-	"net/url"
-	"path"
-	"strconv"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
+	"unicode"
 
-	"hctl/internal/gateway"
+	"github.com/bwmarrin/discordgo"
+	"github.com/gofrs/flock"
+
+	"hctl/internal/channelconfig"
+	"hctl/internal/dispatch"
 	"hctl/internal/harness"
 	"hctl/internal/project"
+	"hctl/internal/session"
 )
 
 const (
-	DefaultListen = "127.0.0.1:8787"
-	DefaultPath   = "/interactions"
-	DiscordAPI    = "https://discord.com/api/v10"
-
-	maxRequestBytes  = 64 << 10
-	maxResponseBytes = 64 << 10
-	maxMessageBytes  = 32 << 10
+	NoReply          = "HCTL_NO_REPLY"
+	maxOutputRunes   = 6*2000 - 64
 	maxChunks        = 6
-	maxChunkRunes    = 2_000
-	maxOutputRunes   = maxChunks*maxChunkRunes - 64
-	maxTokenBytes    = 512
-	maxPendingTurns  = 32
-	maxDeliveries    = 32
-	maxClockSkew     = 5 * time.Minute
-	tokenLifetime    = 15 * time.Minute
-	defaultExpiry    = 14 * time.Minute
-	deliveryTimeout  = 5 * time.Second
+	defaultTurnLimit = 2 * time.Minute
 )
 
-type Config struct {
+type Identity struct {
 	ApplicationID string
-	AllowedUserID string
-	PublicKey     ed25519.PublicKey
-	Listen        string
-	Path          string
-	APIBase       string
-	HTTPClient    *http.Client
-	Now           func() time.Time
-	ExpiryAfter   time.Duration
-	Audit         io.Writer
-	Diagnostics   io.Writer
+	BotUserID     string
+	BotName       string
 }
 
-type interaction struct {
-	ID            string          `json:"id"`
-	ApplicationID string          `json:"application_id"`
-	Type          int             `json:"type"`
-	Token         string          `json:"token"`
-	Data          interactionData `json:"data"`
-	Member        struct {
-		User interactionUser `json:"user"`
-	} `json:"member"`
-	User interactionUser `json:"user"`
+type Config struct {
+	Profile     string
+	Runtime     channelconfig.Profile
+	Token       string
+	TurnTimeout time.Duration
+	Audit       io.Writer
 }
 
-type interactionUser struct {
-	ID string `json:"id"`
-}
-
-type interactionData struct {
-	Options []interactionOption `json:"options"`
-}
-
-type interactionOption struct {
-	Name  string          `json:"name"`
-	Type  int             `json:"type"`
-	Value json.RawMessage `json:"value"`
-}
-
-type tokenEntry struct {
-	token     string
-	expiresAt time.Time
-	done      chan struct{}
-	once      sync.Once
-}
-
-func (entry *tokenEntry) release() { entry.once.Do(func() { close(entry.done) }) }
-
-type turn struct {
-	token     *tokenEntry
-	output    strings.Builder
+type pendingTurn struct {
+	channelID string
+	messageID string
+	outputs   []*bufferedOutput
+	byItem    map[string]*bufferedOutput
 	runes     int
 	truncated bool
 }
 
-type delivery struct {
-	inputID   string
-	token     *tokenEntry
-	content   string
-	status    string
-	truncated bool
+type bufferedOutput struct {
+	itemID string
+	text   strings.Builder
 }
 
-type Adapter struct {
-	config      Config
-	submissions chan<- gateway.Submission
-	client      *http.Client
-	apiBase     string
-
-	mu      sync.Mutex
-	turns   map[string]*turn
-	stopped chan struct{}
-	stop    sync.Once
-	workers sync.WaitGroup
-	auditMu sync.Mutex
-	slots   chan struct{}
+type surface struct {
+	id           string
+	conversation string
+	submissions  chan dispatch.Submission
+	done         chan error
+	pending      int
+	turns        map[string]*pendingTurn
 }
 
-func New(config Config, submissions chan<- gateway.Submission) (*Adapter, error) {
-	if submissions == nil {
-		return nil, errors.New("discord gateway input is required")
+type Runtime struct {
+	project *project.Project
+	driver  harness.Driver
+	config  Config
+	session *discordgo.Session
+	ctx     context.Context
+	cancel  context.CancelFunc
+
+	mu       sync.Mutex
+	surfaces map[string]*surface
+	closed   bool
+	lock     *flock.Flock
+}
+
+func ValidateIdentity(ctx context.Context, token string) (Identity, error) {
+	if strings.TrimSpace(token) == "" || strings.ContainsAny(token, "\r\n") {
+		return Identity{}, errors.New("discord bot token is empty or malformed")
 	}
-	if err := ValidateRuntime(config); err != nil {
-		return nil, err
-	}
-	if config.Now == nil {
-		config.Now = time.Now
-	}
-	if config.ExpiryAfter == 0 {
-		config.ExpiryAfter = defaultExpiry
-	}
-	if config.ExpiryAfter < 0 || config.ExpiryAfter > defaultExpiry {
-		return nil, errors.New("discord response expiry must be positive and at most 14 minutes")
-	}
-	if config.Audit == nil {
-		config.Audit = io.Discard
-	}
-	if config.Diagnostics == nil {
-		config.Diagnostics = io.Discard
-	}
-	if config.APIBase == "" {
-		config.APIBase = DiscordAPI
-	}
-	base, err := validateAPIBase(config.APIBase)
+	s, err := discordgo.New("Bot " + token)
 	if err != nil {
-		return nil, err
+		return Identity{}, errors.New("discord bot token is malformed")
 	}
-	client := &http.Client{Timeout: deliveryTimeout}
-	if config.HTTPClient != nil {
-		copy := *config.HTTPClient
-		client = &copy
-		if client.Timeout <= 0 || client.Timeout > deliveryTimeout {
-			client.Timeout = deliveryTimeout
+	s.Client.Timeout = 10 * time.Second
+	type result struct {
+		identity Identity
+		err      error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		user, userErr := s.User("@me", discordgo.WithContext(ctx))
+		if userErr != nil || user == nil || !user.Bot {
+			resultCh <- result{err: errors.New("discord token did not identify a bot user")}
+			return
 		}
+		application, appErr := s.Application("@me")
+		if appErr != nil || application == nil || !channelconfig.Snowflake(application.ID) {
+			resultCh <- result{err: errors.New("discord token did not identify an application")}
+			return
+		}
+		resultCh <- result{identity: Identity{ApplicationID: application.ID, BotUserID: user.ID, BotName: user.Username}}
+	}()
+	select {
+	case <-ctx.Done():
+		return Identity{}, errors.New("discord identity validation timed out")
+	case result := <-resultCh:
+		return result.identity, result.err
 	}
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	a := &Adapter{
-		config:      config,
-		submissions: submissions,
-		client:      client,
-		apiBase:     strings.TrimSuffix(base.String(), "/"),
-		turns:       map[string]*turn{},
-		stopped:     make(chan struct{}),
-		slots:       make(chan struct{}, maxDeliveries),
-	}
-	return a, nil
 }
 
-func ValidateRuntime(config Config) error {
-	if !validSnowflake(config.ApplicationID) {
-		return errors.New("discord application ID must be a nonzero decimal snowflake")
-	}
-	if !validSnowflake(config.AllowedUserID) {
-		return errors.New("discord allowed user must be a nonzero decimal snowflake")
-	}
-	if len(config.PublicKey) != ed25519.PublicKeySize {
-		return errors.New("discord public key must be 32 bytes")
-	}
-	listen := config.Listen
-	if listen == "" {
-		listen = DefaultListen
-	}
-	host, port, err := net.SplitHostPort(listen)
-	if err != nil {
-		return errors.New("discord listen address must include a loopback IP and port")
-	}
-	ip := net.ParseIP(host)
-	portNumber, portErr := strconv.Atoi(port)
-	if ip == nil || !ip.IsLoopback() || portErr != nil || portNumber < 0 || portNumber > 65535 {
-		return errors.New("discord listener must use a loopback IP and valid port")
-	}
-	requestPath := config.Path
-	if requestPath == "" {
-		requestPath = DefaultPath
-	}
-	if len(requestPath) > 128 || !strings.HasPrefix(requestPath, "/") || path.Clean(requestPath) != requestPath || strings.ContainsAny(requestPath, "?#") {
-		return errors.New("discord interaction path must be a clean absolute path")
+func ValidateProfile(identity Identity, profile channelconfig.Profile) error {
+	if identity.ApplicationID != profile.ApplicationID || identity.BotUserID != profile.BotUserID {
+		return errors.New("discord token does not match the configured application and bot identity")
 	}
 	return nil
 }
 
-func ParsePublicKey(value string) (ed25519.PublicKey, error) {
-	decoded, err := hex.DecodeString(value)
-	if err != nil || len(decoded) != ed25519.PublicKeySize {
-		return nil, errors.New("discord public key must be 64 hexadecimal characters")
+func ValidateScope(ctx context.Context, token string, profile channelconfig.Profile) error {
+	s, err := discordgo.New("Bot " + token)
+	if err != nil {
+		return errors.New("cannot validate Discord authorization scope")
 	}
-	return ed25519.PublicKey(decoded), nil
+	s.Client.Timeout = 10 * time.Second
+	channel, err := s.Channel(profile.AllowedChannelID, discordgo.WithContext(ctx))
+	if err != nil || channel == nil {
+		return errors.New("bot cannot access the configured Discord channel; install it in the target server and check the channel ID")
+	}
+	if channel.GuildID != profile.AllowedGuildID {
+		return errors.New("configured Discord channel does not belong to the configured guild")
+	}
+	member, err := s.GuildMember(profile.AllowedGuildID, profile.AllowedUserID, discordgo.WithContext(ctx))
+	if err != nil || member == nil || member.User == nil {
+		return errors.New("authorized user is not visible in the configured guild; enter your personal Discord user ID, not the bot or application ID")
+	}
+	if member.User.Bot {
+		return errors.New("authorized user must be a person; enter your personal Discord user ID, not the bot ID")
+	}
+	return nil
 }
 
-func DefaultConversation(applicationID, userID string) string {
-	return "discord-" + applicationID + "-" + userID
+func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, error) {
+	if p == nil || p.DiscordChannel == nil {
+		return nil, errors.New("agent project does not define channels/discord.md")
+	}
+	if driver == nil {
+		return nil, errors.New("discord requires a harness driver")
+	}
+	if config.TurnTimeout == 0 {
+		config.TurnTimeout = defaultTurnLimit
+	}
+	if config.TurnTimeout <= 0 || config.TurnTimeout > 30*time.Minute {
+		return nil, errors.New("discord turn timeout must be greater than zero and at most 30m")
+	}
+	if config.Audit == nil {
+		config.Audit = io.Discard
+	}
+	s, err := discordgo.New("Bot " + config.Token)
+	if err != nil {
+		return nil, errors.New("cannot initialize Discord Gateway client")
+	}
+	s.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentsMessageContent
+	ctx, cancel := context.WithCancel(context.Background())
+	runtime := &Runtime{project: p, driver: driver, config: config, session: s, ctx: ctx, cancel: cancel, surfaces: map[string]*surface{}}
+	s.AddHandler(runtime.handleMessage)
+	s.AddHandler(runtime.handleInteraction)
+	return runtime, nil
 }
 
-func (a *Adapter) Handler() http.Handler { return http.HandlerFunc(a.handle) }
+func (r *Runtime) Run(ctx context.Context) error {
+	identity, err := ValidateIdentity(ctx, r.config.Token)
+	if err != nil {
+		return err
+	}
+	if err := ValidateProfile(identity, r.config.Runtime); err != nil {
+		return err
+	}
+	lock, err := applicationLock(identity.ApplicationID)
+	if err != nil {
+		return err
+	}
+	locked, err := lock.TryLock()
+	if err != nil || !locked {
+		return errors.New("this Discord application is already active in another hctl run")
+	}
+	r.lock = lock
+	defer func() { _ = lock.Unlock() }()
+	if err := r.registerCommands(identity.ApplicationID); err != nil {
+		return err
+	}
+	if err := r.session.Open(); err != nil {
+		return errors.New("cannot connect to the Discord Gateway")
+	}
+	defer r.Close()
+	_, _ = fmt.Fprintf(r.config.Audit, "Discord connected profile=%s agent=%s\n", r.config.Profile, r.project.Name)
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-r.ctx.Done():
+		return nil
+	}
+}
 
-func (a *Adapter) HandleEvent(event gateway.Event) {
-	if event.InputID == "" {
+func (r *Runtime) Close() {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
 		return
 	}
-	a.mu.Lock()
-	current := a.turns[event.InputID]
-	if current == nil {
-		a.mu.Unlock()
+	r.closed = true
+	surfaces := make([]*surface, 0, len(r.surfaces))
+	for _, current := range r.surfaces {
+		surfaces = append(surfaces, current)
+	}
+	r.mu.Unlock()
+	r.cancel()
+	_ = r.session.Close()
+	for _, current := range surfaces {
+		close(current.submissions)
+		<-current.done
+	}
+}
+
+func (r *Runtime) handleMessage(_ *discordgo.Session, incoming *discordgo.MessageCreate) {
+	profile := r.config.Runtime
+	if !eligibleMessage(profile, incoming) {
+		return
+	}
+	surfaceID := incoming.ChannelID
+	current, err := r.surface(surfaceID)
+	if err != nil {
+		return
+	}
+	surfaceKind := "guild"
+	if incoming.GuildID == "" {
+		surfaceKind = "dm"
+	}
+	text, err := json.Marshal(map[string]any{
+		"platform": "discord", "surface": surfaceKind, "direct": directMessage(r.config.Runtime.BotUserID, incoming),
+		"guild_id": incoming.GuildID, "channel_id": incoming.ChannelID, "message_id": incoming.ID,
+		"author_id": incoming.Author.ID, "content": incoming.Content,
+	})
+	if err != nil {
+		return
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	current.pending++
+	current.turns[incoming.ID] = &pendingTurn{channelID: incoming.ChannelID, messageID: incoming.ID}
+	r.mu.Unlock()
+	reply := make(chan dispatch.SubmissionResult, 1)
+	select {
+	case current.submissions <- dispatch.Submission{InputID: incoming.ID, Text: "Discord message (JSON):\n" + string(text), Reply: reply}:
+	case <-r.ctx.Done():
+		r.drop(current, incoming.ID)
+		return
+	}
+	select {
+	case result := <-reply:
+		if result.Status != "queued" && result.Status != "active" && result.Status != "completed" {
+			r.drop(current, incoming.ID)
+		}
+	case <-r.ctx.Done():
+	}
+}
+
+func eligibleMessage(profile channelconfig.Profile, incoming *discordgo.MessageCreate) bool {
+	if incoming == nil || incoming.Author == nil || incoming.Author.Bot || incoming.WebhookID != "" || strings.TrimSpace(incoming.Content) == "" || incoming.Author.ID != profile.AllowedUserID {
+		return false
+	}
+	return incoming.GuildID == "" || incoming.GuildID == profile.AllowedGuildID && incoming.ChannelID == profile.AllowedChannelID
+}
+
+func directMessage(botUserID string, incoming *discordgo.MessageCreate) bool {
+	if incoming == nil || incoming.Message == nil {
+		return false
+	}
+	if incoming.GuildID == "" {
+		return true
+	}
+	for _, mention := range incoming.Mentions {
+		if mention != nil && mention.ID == botUserID {
+			return true
+		}
+	}
+	return incoming.ReferencedMessage != nil && incoming.ReferencedMessage.Author != nil && incoming.ReferencedMessage.Author.ID == botUserID
+}
+
+func (r *Runtime) handleInteraction(_ *discordgo.Session, incoming *discordgo.InteractionCreate) {
+	if incoming == nil || incoming.Type != discordgo.InteractionApplicationCommand {
+		return
+	}
+	userID := ""
+	if incoming.Member != nil && incoming.Member.User != nil {
+		userID = incoming.Member.User.ID
+	} else if incoming.User != nil {
+		userID = incoming.User.ID
+	}
+	if userID != r.config.Runtime.AllowedUserID {
+		r.respond(incoming.Interaction, "Not authorized.")
+		return
+	}
+	if incoming.GuildID != "" && (incoming.GuildID != r.config.Runtime.AllowedGuildID || incoming.ChannelID != r.config.Runtime.AllowedChannelID) {
+		r.respond(incoming.Interaction, "This channel is not configured for hctl.")
+		return
+	}
+	data := incoming.ApplicationCommandData()
+	switch data.Name {
+	case "status":
+		surfaceKind := "guild"
+		if incoming.GuildID == "" {
+			surfaceKind = "dm"
+		}
+		r.mu.Lock()
+		queued := 0
+		if current := r.surfaces[incoming.ChannelID]; current != nil {
+			queued = current.pending
+		}
+		r.mu.Unlock()
+		r.respond(incoming.Interaction, fmt.Sprintf("hctl is online: agent=%s harness=%s surface=%s pending=%d", r.project.Name, r.driver.Name(), surfaceKind, queued))
+	case "new":
+		if err := r.resetSurface(incoming.ChannelID); err != nil {
+			r.respond(incoming.Interaction, "The conversation is busy. Try again after current work finishes.")
+			return
+		}
+		r.respond(incoming.Interaction, "Started a new conversation.")
+	}
+}
+
+func (r *Runtime) surface(id string) (*surface, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if current := r.surfaces[id]; current != nil {
+		return current, nil
+	}
+	conversation := conversationID(r.config.Runtime.ApplicationID, id)
+	current := &surface{id: id, conversation: conversation, submissions: make(chan dispatch.Submission, 32), done: make(chan error, 1), turns: map[string]*pendingTurn{}}
+	r.surfaces[id] = current
+	go func() {
+		err := dispatch.RunSubmissionsWithTurnTimeout(r.ctx, r.project, r.driver, conversation, current.submissions, func(event dispatch.Event) error {
+			r.handleDispatch(current, event)
+			return nil
+		}, r.config.TurnTimeout)
+		current.done <- err
+		r.mu.Lock()
+		stillActive := r.surfaces[id] == current
+		r.mu.Unlock()
+		if err != nil && stillActive {
+			r.cancel()
+		}
+	}()
+	return current, nil
+}
+
+func (r *Runtime) handleDispatch(current *surface, event dispatch.Event) {
+	r.mu.Lock()
+	turn := current.turns[event.InputID]
+	if turn == nil {
+		r.mu.Unlock()
 		return
 	}
 	if event.Type == "agent.output.delta" {
-		appendBounded(current, event.Delta)
-		a.mu.Unlock()
-		return
-	}
-	status := terminalStatus(event)
-	if status == "" {
-		a.mu.Unlock()
-		return
-	}
-	job := delivery{inputID: event.InputID, token: current.token, content: current.output.String(), status: status, truncated: current.truncated}
-	current.token.release()
-	delete(a.turns, event.InputID)
-	a.mu.Unlock()
-	a.dispatch(job)
-}
-
-func (a *Adapter) Close() {
-	a.Stop()
-	a.workers.Wait()
-}
-
-func (a *Adapter) Stop() {
-	a.stop.Do(func() {
-		close(a.stopped)
-		a.mu.Lock()
-		for _, current := range a.turns {
-			if current.token != nil {
-				current.token.release()
-			}
+		appendBounded(turn, event.ItemID, event.Delta)
+		showTyping := visibleReplyDecided(combinedOutput(turn))
+		r.mu.Unlock()
+		if showTyping {
+			_ = r.session.ChannelTyping(turn.channelID)
 		}
-		a.turns = map[string]*turn{}
-		a.mu.Unlock()
-	})
-}
-
-func (a *Adapter) handle(response http.ResponseWriter, request *http.Request) {
-	requestPath := a.config.Path
-	if requestPath == "" {
-		requestPath = DefaultPath
-	}
-	if request.URL.Path != requestPath {
-		http.NotFound(response, request)
 		return
 	}
-	if request.Method != http.MethodPost {
-		response.Header().Set("Allow", http.MethodPost)
-		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+	if !terminalDispatchEvent(event.Type) {
+		r.mu.Unlock()
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(response, request.Body, maxRequestBytes))
-	if err != nil {
-		http.Error(response, "invalid request", http.StatusBadRequest)
+	delete(current.turns, event.InputID)
+	if current.pending > 0 {
+		current.pending--
+	}
+	content := strings.TrimSpace(combinedOutput(turn))
+	parts := outputParts(turn)
+	truncated := turn.truncated
+	r.mu.Unlock()
+	if content == NoReply {
+		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn suppressed input_id=%s class=no_reply\n", event.InputID)
 		return
 	}
-	signedAt, verified := a.verify(request.Header, body)
-	if !verified {
-		http.Error(response, "invalid signature", http.StatusUnauthorized)
-		return
+	if content == "" {
+		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn empty input_id=%s class=%s\n", event.InputID, event.Type)
+		content = discordTerminalMessage(event.Type)
+		parts = []string{content}
 	}
-	var incoming interaction
-	if err := json.Unmarshal(body, &incoming); err != nil || !validSnowflake(incoming.ID) {
-		http.Error(response, "invalid interaction", http.StatusBadRequest)
-		return
-	}
-	if incoming.ApplicationID != a.config.ApplicationID {
-		http.Error(response, "forbidden", http.StatusForbidden)
-		return
-	}
-	if incoming.Type == 1 {
-		_ = writeJSON(response, http.StatusOK, map[string]any{"type": 1})
-		return
-	}
-	if incoming.Type != 2 {
-		http.Error(response, "unsupported interaction", http.StatusBadRequest)
-		return
-	}
-	userID := incoming.Member.User.ID
-	if userID == "" {
-		userID = incoming.User.ID
-	}
-	if userID != a.config.AllowedUserID {
-		http.Error(response, "forbidden", http.StatusForbidden)
-		return
-	}
-	message, ok := commandMessage(incoming)
-	if !ok || !validToken(incoming.Token) {
-		http.Error(response, "invalid command", http.StatusBadRequest)
-		return
-	}
-	entry := &tokenEntry{token: incoming.Token, expiresAt: signedAt.Add(tokenLifetime), done: make(chan struct{})}
-	a.mu.Lock()
-	current := a.turns[incoming.ID]
-	overloaded := current == nil && len(a.turns) >= maxPendingTurns
-	if overloaded {
-		a.mu.Unlock()
-	} else {
-		if current == nil {
-			current = &turn{}
-			a.turns[incoming.ID] = current
-		}
-		if current.token != nil {
-			current.token.release()
-		}
-		current.token = entry
-		a.mu.Unlock()
-	}
-	if overloaded {
-		entry.release()
-		_ = writeJSON(response, http.StatusOK, immediateMessage(rejectionText("queue_full")))
-		return
-	}
-
-	if err := writeJSON(response, http.StatusOK, map[string]any{"type": 5, "data": map[string]any{"allowed_mentions": allowedMentions()}}); err != nil {
-		a.discard(incoming.ID, entry)
-		return
-	}
-	if err := http.NewResponseController(response).Flush(); err != nil {
-		a.discard(incoming.ID, entry)
-		return
-	}
-	a.workers.Add(2)
-	go func() {
-		defer a.workers.Done()
-		a.expireAfter(incoming.ID, entry, signedAt.Add(a.config.ExpiryAfter).Sub(a.config.Now()))
-	}()
-	go func() {
-		defer a.workers.Done()
-		a.submit(incoming.ID, message, entry)
-	}()
-}
-
-func (a *Adapter) verify(header http.Header, body []byte) (time.Time, bool) {
-	timestamp := header.Get("X-Signature-Timestamp")
-	signature, err := hex.DecodeString(header.Get("X-Signature-Ed25519"))
-	if err != nil || len(signature) != ed25519.SignatureSize {
-		return time.Time{}, false
-	}
-	seconds, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil {
-		return time.Time{}, false
-	}
-	signedAt := time.Unix(seconds, 0)
-	delta := a.config.Now().Sub(signedAt)
-	if delta < -maxClockSkew || delta > maxClockSkew {
-		return time.Time{}, false
-	}
-	message := make([]byte, 0, len(timestamp)+len(body))
-	message = append(message, timestamp...)
-	message = append(message, body...)
-	return signedAt, ed25519.Verify(a.config.PublicKey, message, signature)
-}
-
-func (a *Adapter) submit(inputID, message string, entry *tokenEntry) {
-	reply := make(chan gateway.SubmissionResult, 1)
-	select {
-	case a.submissions <- gateway.Submission{InputID: inputID, Text: message, Reply: reply}:
-	case <-entry.done:
-		return
-	case <-a.stopped:
-		return
-	}
-	var result gateway.SubmissionResult
-	select {
-	case result = <-reply:
-	case <-entry.done:
-		return
-	case <-a.stopped:
-		return
-	}
-	if result.Status != "queued" && result.Status != "active" && !result.Duplicate {
-		a.finish(inputID, entry, delivery{content: rejectionText(result.Status), status: "rejected"})
-		return
-	}
-	if result.Duplicate && terminalOutcome(result.Status) {
-		a.finish(inputID, entry, delivery{status: result.Status})
-	}
-}
-
-func (a *Adapter) expireAfter(inputID string, entry *tokenEntry, delay time.Duration) {
-	if delay < 0 {
-		delay = 0
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		if job, ok := a.detach(inputID, entry, delivery{content: "Discord response window expired; the agent may still be running.", status: "expired"}); ok {
-			a.record(job, a.send(job))
-		}
-	case <-entry.done:
-	case <-a.stopped:
-	}
-}
-
-func (a *Adapter) finish(inputID string, entry *tokenEntry, job delivery) {
-	if job, ok := a.detach(inputID, entry, job); ok {
-		a.dispatch(job)
-	}
-}
-
-func (a *Adapter) detach(inputID string, entry *tokenEntry, job delivery) (delivery, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if current := a.turns[inputID]; current != nil && current.token == entry {
-		job.inputID = inputID
-		job.token = entry
-		if job.content == "" {
-			job.content = current.output.String()
-			job.truncated = current.truncated
-		}
-		delete(a.turns, inputID)
-		entry.release()
-		return job, true
-	}
-	return delivery{}, false
-}
-
-func (a *Adapter) discard(inputID string, entry *tokenEntry) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if current := a.turns[inputID]; current != nil && current.token == entry {
-		delete(a.turns, inputID)
-		entry.release()
-	}
-}
-
-func (a *Adapter) dispatch(job delivery) {
-	select {
-	case <-a.stopped:
-		return
-	default:
-	}
-	select {
-	case a.slots <- struct{}{}:
-	default:
-		a.record(job, "saturated")
-		return
-	}
-	a.workers.Add(1)
-	go func() {
-		defer a.workers.Done()
-		defer func() { <-a.slots }()
-		a.record(job, a.send(job))
-	}()
-}
-
-func (a *Adapter) record(job delivery, outcome string) {
-	a.auditMu.Lock()
-	defer a.auditMu.Unlock()
-	_, _ = fmt.Fprintf(a.config.Audit, "channel=discord input=%s status=%s delivery=%s\n", job.inputID, job.status, outcome)
-}
-
-func (a *Adapter) send(job delivery) string {
-	chunks := responseChunks(job.content, job.status, job.truncated)
-	for index, content := range chunks {
-		if !a.config.Now().Before(job.token.expiresAt) {
-			return "expired"
-		}
-		method := http.MethodPost
-		endpoint := a.apiBase + "/webhooks/" + url.PathEscape(a.config.ApplicationID) + "/" + url.PathEscape(job.token.token)
+	chunks := responseMessages(parts, truncated)
+	for index, chunk := range chunks {
+		message := &discordgo.MessageSend{Content: chunk, AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}}
 		if index == 0 {
-			method = http.MethodPatch
-			endpoint += "/messages/@original"
+			failIfMissing := false
+			message.Reference = &discordgo.MessageReference{MessageID: turn.messageID, ChannelID: turn.channelID, FailIfNotExists: &failIfMissing}
 		}
-		payload, _ := json.Marshal(map[string]any{"content": content, "allowed_mentions": allowedMentions()})
-		request, err := http.NewRequest(method, endpoint, bytes.NewReader(payload))
-		if err != nil {
-			return "failed"
-		}
-		request.Header.Set("Content-Type", "application/json")
-		response, err := a.client.Do(request)
-		if err != nil {
-			return "uncertain"
-		}
-		body, tooLarge := readBounded(response.Body)
-		_ = response.Body.Close()
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			if response.StatusCode == http.StatusTooManyRequests {
-				return "rate_limited"
-			}
-			return "failed"
-		}
-		if tooLarge || body == nil {
-			return "uncertain"
-		}
-		var message struct {
-			ID string `json:"id"`
-		}
-		if json.Unmarshal(body, &message) != nil || !validSnowflake(message.ID) {
-			return "uncertain"
+		if _, err := r.session.ChannelMessageSendComplex(turn.channelID, message); err != nil {
+			_, _ = fmt.Fprintf(r.config.Audit, "Discord delivery failed input_id=%s class=uncertain\n", event.InputID)
+			return
 		}
 	}
-	return "completed"
 }
 
-func Run(ctx context.Context, p *project.Project, driver harness.Driver, conversation string, config Config) error {
-	if p.DiscordChannel == nil {
-		return errors.New("agent project does not define channels/discord.md")
+func discordTerminalMessage(eventType string) string {
+	switch eventType {
+	case "turn.failed", "driver.process_failed":
+		return "I hit an error while handling that. Please try again."
+	case "turn.cancelled":
+		return "That request was cancelled."
+	case "turn.uncertain":
+		return "I lost track of that response during recovery. Please try again."
+	default:
+		return "I couldn't produce a response. Please try again."
 	}
-	if err := gateway.ValidateConversation(conversation); err != nil {
-		return err
+}
+
+func terminalDispatchEvent(eventType string) bool {
+	switch eventType {
+	case "turn.completed", "turn.failed", "turn.cancelled", "turn.uncertain", "driver.process_failed":
+		return true
+	default:
+		return false
 	}
-	if config.Listen == "" {
-		config.Listen = DefaultListen
+}
+
+func visibleReplyDecided(output string) bool {
+	candidate := strings.TrimLeftFunc(output, unicode.IsSpace)
+	return candidate != "" && !strings.HasPrefix(NoReply, candidate)
+}
+
+func (r *Runtime) resetSurface(id string) error {
+	r.mu.Lock()
+	current := r.surfaces[id]
+	if current != nil && current.pending != 0 {
+		r.mu.Unlock()
+		return errors.New("busy")
 	}
-	if config.Path == "" {
-		config.Path = DefaultPath
+	if current != nil {
+		delete(r.surfaces, id)
+		close(current.submissions)
 	}
-	submissions := make(chan gateway.Submission, 32)
-	adapter, err := New(config, submissions)
+	r.mu.Unlock()
+	if current != nil {
+		if err := <-current.done; err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	}
+	state, err := session.Load(r.project.WorkspaceRoot)
 	if err != nil {
 		return err
 	}
-	listener, err := net.Listen("tcp", config.Listen)
+	state.Reset(r.project.AgentID, r.driver.Name(), conversationID(r.config.Runtime.ApplicationID, id), r.project.SourceFingerprint)
+	return session.Save(r.project.WorkspaceRoot, state)
+}
+
+func (r *Runtime) drop(current *surface, inputID string) {
+	r.mu.Lock()
+	delete(current.turns, inputID)
+	if current.pending > 0 {
+		current.pending--
+	}
+	r.mu.Unlock()
+}
+
+func (r *Runtime) registerCommands(applicationID string) error {
+	commands := []*discordgo.ApplicationCommand{{Name: "new", Description: "Start a fresh hctl conversation"}, {Name: "status", Description: "Show hctl runtime status"}}
+	if _, err := r.session.ApplicationCommandBulkOverwrite(applicationID, "", commands); err != nil {
+		return errors.New("cannot reconcile Discord slash commands")
+	}
+	return nil
+}
+
+func (r *Runtime) respond(interaction *discordgo.Interaction, content string) {
+	_ = r.session.InteractionRespond(interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral, AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}}})
+}
+
+func applicationLock(applicationID string) (*flock.Flock, error) {
+	cache, err := os.UserCacheDir()
 	if err != nil {
-		adapter.Close()
-		return fmt.Errorf("cannot start Discord loopback listener at %s; choose an unused loopback port: %w", config.Listen, err)
+		return nil, errors.New("cannot resolve runtime lock directory")
 	}
-	_, _ = fmt.Fprintf(adapter.config.Diagnostics, "Discord channel ready at http://%s%s\n", listener.Addr().String(), config.Path)
-	server := &http.Server{
-		Handler:           adapter.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       5 * time.Second,
-		WriteTimeout:      5 * time.Second,
-		IdleTimeout:       30 * time.Second,
+	directory := filepath.Join(cache, "hctl", "locks")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return nil, errors.New("cannot create runtime lock directory")
 	}
-	child, cancel := context.WithCancel(ctx)
-	defer cancel()
-	gatewayDone := make(chan error, 1)
-	go func() {
-		gatewayDone <- gateway.RunSubmissions(child, p, driver, conversation, submissions, func(event gateway.Event) error {
-			adapter.HandleEvent(event)
-			return nil
-		})
-	}()
-	serverDone := make(chan error, 1)
-	go func() { serverDone <- server.Serve(listener) }()
-
-	var result error
-	gatewayFinished := false
-	select {
-	case result = <-gatewayDone:
-		gatewayFinished = true
-	case err := <-serverDone:
-		if !errors.Is(err, http.ErrServerClosed) {
-			result = errors.New("discord listener failed")
-		}
-	case <-ctx.Done():
-		result = ctx.Err()
-	}
-	cancel()
-	shutdown, stop := context.WithTimeout(context.Background(), 2*time.Second)
-	_ = server.Shutdown(shutdown)
-	stop()
-	adapter.Stop()
-	if !gatewayFinished {
-		<-gatewayDone
-	}
-	adapter.Close()
-	return result
+	return flock.New(filepath.Join(directory, "discord-"+applicationID+".lock")), nil
 }
 
-func commandMessage(incoming interaction) (string, bool) {
-	if len(incoming.Data.Options) != 1 {
-		return "", false
-	}
-	option := incoming.Data.Options[0]
-	if option.Name != "message" || option.Type != 3 {
-		return "", false
-	}
-	var message string
-	if json.Unmarshal(option.Value, &message) != nil || message == "" || strings.TrimSpace(message) == "" || !utf8.ValidString(message) || len([]byte(message)) > maxMessageBytes {
-		return "", false
-	}
-	return message, true
+func conversationID(applicationID, channelID string) string {
+	digest := sha256.Sum256([]byte(applicationID + ":" + channelID))
+	return "discord-" + hex.EncodeToString(digest[:12])
 }
 
-func validSnowflake(value string) bool {
-	if len(value) == 0 || len(value) > 20 {
-		return false
-	}
-	number, err := strconv.ParseUint(value, 10, 64)
-	return err == nil && number != 0
-}
-
-func validToken(value string) bool {
-	if len(value) == 0 || len(value) > maxTokenBytes || !utf8.ValidString(value) {
-		return false
-	}
-	for _, character := range value {
-		if character < 0x21 || character > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
-func validateAPIBase(value string) (*url.URL, error) {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, errors.New("discord API endpoint is invalid")
-	}
-	if parsed.Scheme != "https" {
-		host, _, splitErr := net.SplitHostPort(parsed.Host)
-		if splitErr != nil {
-			host = parsed.Host
-		}
-		ip := net.ParseIP(host)
-		if parsed.Scheme != "http" || ip == nil || !ip.IsLoopback() {
-			return nil, errors.New("discord API endpoint must use HTTPS")
-		}
-	}
-	return parsed, nil
-}
-
-func terminalStatus(event gateway.Event) string {
-	if strings.HasPrefix(event.Type, "turn.") {
-		status := strings.TrimPrefix(event.Type, "turn.")
-		if terminalOutcome(status) {
-			return status
-		}
-	}
-	if event.Type == "driver.process_failed" && event.InputID != "" {
-		return "failed"
-	}
-	return ""
-}
-
-func terminalOutcome(status string) bool {
-	return status == "completed" || status == "failed" || status == "uncertain"
-}
-
-func appendBounded(current *turn, value string) {
-	if current.truncated || value == "" {
+func appendBounded(turn *pendingTurn, itemID, value string) {
+	if turn.truncated || value == "" {
 		return
 	}
-	remaining := maxOutputRunes - current.runes
+	if itemID == "" {
+		itemID = "default"
+	}
+	if turn.byItem == nil {
+		turn.byItem = map[string]*bufferedOutput{}
+	}
+	output := turn.byItem[itemID]
+	if output == nil {
+		output = &bufferedOutput{itemID: itemID}
+		turn.byItem[itemID] = output
+		turn.outputs = append(turn.outputs, output)
+	}
+	remaining := maxOutputRunes - turn.runes
 	for index := range value {
 		if remaining == 0 {
-			current.output.WriteString(value[:index])
-			current.truncated = true
+			output.text.WriteString(value[:index])
+			turn.truncated = true
 			return
 		}
 		remaining--
-		current.runes++
+		turn.runes++
 	}
-	current.output.WriteString(value)
+	output.text.WriteString(value)
 }
 
-func responseChunks(content, status string, truncated bool) []string {
-	if content == "" {
-		switch status {
-		case "completed":
-			content = "Agent turn completed."
-		case "uncertain":
-			content = "Agent turn outcome is uncertain and was not retried."
-		default:
-			content = "Agent turn failed."
-		}
-	} else if status == "failed" || status == "uncertain" {
-		content += "\n\nAgent turn " + status + "."
+func combinedOutput(turn *pendingTurn) string {
+	values := make([]string, 0, len(turn.outputs))
+	for _, output := range turn.outputs {
+		values = append(values, output.text.String())
 	}
+	return strings.Join(values, "\n\n")
+}
+
+func outputParts(turn *pendingTurn) []string {
+	values := make([]string, 0, len(turn.outputs))
+	for _, output := range turn.outputs {
+		if value := strings.TrimSpace(output.text.String()); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func responseMessages(parts []string, truncated bool) []string {
+	messages := make([]string, 0, maxChunks)
+	for partIndex, part := range parts {
+		chunks := responseChunks(part, false)
+		for _, chunk := range chunks {
+			if len(messages) == maxChunks {
+				truncated = true
+				break
+			}
+			messages = append(messages, chunk)
+		}
+		if len(messages) == maxChunks {
+			if partIndex != len(parts)-1 {
+				truncated = true
+			}
+			break
+		}
+	}
+	if truncated && len(messages) > 0 {
+		const marker = "\n\n[output truncated]"
+		last := []rune(messages[len(messages)-1])
+		limit := 2000 - len([]rune(marker))
+		if len(last) > limit {
+			last = last[:limit]
+		}
+		messages[len(messages)-1] = string(last) + marker
+	}
+	return messages
+}
+
+func responseChunks(content string, truncated bool) []string {
 	if truncated {
 		content += "\n\n[output truncated]"
 	}
 	runes := []rune(content)
 	chunks := make([]string, 0, maxChunks)
 	for len(runes) > 0 && len(chunks) < maxChunks {
-		count := min(len(runes), maxChunkRunes)
+		count := min(len(runes), 2000)
 		chunks = append(chunks, string(runes[:count]))
 		runes = runes[count:]
 	}
 	return chunks
-}
-
-func allowedMentions() map[string]any { return map[string]any{"parse": []string{}} }
-
-func immediateMessage(content string) map[string]any {
-	return map[string]any{"type": 4, "data": map[string]any{"content": content, "flags": 64, "allowed_mentions": allowedMentions()}}
-}
-
-func rejectionText(status string) string {
-	if status == "queue_full" {
-		return "Agent queue is full. Try again later."
-	}
-	return "Agent command was rejected."
-}
-
-func writeJSON(response http.ResponseWriter, status int, value any) error {
-	response.Header().Set("Content-Type", "application/json")
-	response.WriteHeader(status)
-	return json.NewEncoder(response).Encode(value)
-}
-
-func readBounded(reader io.Reader) ([]byte, bool) {
-	data, err := io.ReadAll(io.LimitReader(reader, maxResponseBytes+1))
-	if err != nil {
-		return nil, false
-	}
-	return data, len(data) > maxResponseBytes
 }

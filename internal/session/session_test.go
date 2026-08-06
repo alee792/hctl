@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,82 @@ import (
 
 	"hctl/internal/rootfs"
 )
+
+func TestLoadMigratesLegacyStatePath(t *testing.T) {
+	root := t.TempDir()
+	writeStateAt(t, root, legacyStatePath, "reviewer@legacy", 0o600)
+
+	state, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.GetOrCreate("reviewer@legacy", "claude", "local", "source-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, legacyStatePath)); !os.IsNotExist(err) {
+		t.Fatalf("legacy state was not removed: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(root, statePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("migrated state permissions = %o", got)
+	}
+}
+
+func TestLoadPrefersDispatchState(t *testing.T) {
+	root := t.TempDir()
+	writeStateAt(t, root, legacyStatePath, "reviewer@legacy", 0o644)
+	writeStateAt(t, root, statePath, "reviewer@dispatch", 0o600)
+
+	state, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.GetOrCreate("reviewer@dispatch", "claude", "local", "source-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, legacyStatePath)); err != nil {
+		t.Fatalf("preferred dispatch state unexpectedly mutated legacy state: %v", err)
+	}
+}
+
+func TestLoadRejectsBroadLegacyStatePermissions(t *testing.T) {
+	root := t.TempDir()
+	writeStateAt(t, root, legacyStatePath, "reviewer@legacy", 0o644)
+
+	if _, err := Load(root); err == nil || !strings.Contains(err.Error(), "owner-only") {
+		t.Fatalf("broad legacy state permissions were not rejected: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, statePath)); !os.IsNotExist(err) {
+		t.Fatalf("invalid legacy state created dispatch state: %v", err)
+	}
+}
+
+func writeStateAt(t *testing.T, root, path, agentID string, mode os.FileMode) {
+	t.Helper()
+	conversation := &Conversation{
+		ID:                "local",
+		AgentID:           agentID,
+		Harness:           "claude",
+		SourceFingerprint: "source-1",
+		Outcomes:          map[string]string{},
+	}
+	state := State{
+		SchemaVersion: 2,
+		Conversations: map[string]*Conversation{
+			conversationKey(agentID, "claude", "local", "source-1"): conversation,
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rootfs.WriteAtomic(root, path, append(data, '\n'), mode); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestLoadMigratesLegacyManifestFingerprint(t *testing.T) {
 	root := t.TempDir()
@@ -28,7 +105,7 @@ func TestLoadMigratesLegacyManifestFingerprint(t *testing.T) {
   }
 }
 `
-	if err := os.WriteFile(filepath.Join(root, statePath), []byte(legacy), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, legacyStatePath), []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	state, err := Load(root)

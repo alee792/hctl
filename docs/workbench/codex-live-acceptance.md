@@ -60,7 +60,7 @@ After the portable `code-review` skill was applied, a fresh native
 `codex exec --sandbox read-only` session loaded it, ran its Standards and Spec
 axes in isolated subagents, and completed with separate zero-finding reports.
 
-The same review initially became `turn.uncertain` through `hctl gateway`. A raw
+The same review initially became `turn.uncertain` through `hctl run`. A raw
 App Server trace showed that Codex publishes each child's `turn/completed` on
 the parent stream with the child's thread and turn IDs. Hctl was treating the
 first non-parent completion as an ambiguous parent result and closing the
@@ -69,7 +69,7 @@ still-running parent.
 The Codex driver now ignores output and terminal events whose runtime IDs do
 not match the active parent, without exposing child transcript content. A
 credential-free regression test sends child output and completion before the
-parent, and a live gateway rerun completed both review axes and emitted the
+parent, and a live turn dispatcher rerun completed both review axes and emitted the
 parent's final report followed by `turn.completed`.
 
 ## Unrelated host noise

@@ -156,14 +156,14 @@ func TestLoadDiscoversDiscordChannelForBothHarnesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "channels", "discord.md")
-	write(t, path, "Receive signed Discord commands.\n")
+	write(t, path, "---\nmode: ambient\n---\n\nParticipate in hctl work.\n")
 
 	for _, harness := range []string{"claude", "codex"} {
 		loaded, err := Load(root, harness)
 		if err != nil {
 			t.Fatalf("%s: %v", harness, err)
 		}
-		if loaded.DiscordChannel == nil || loaded.DiscordChannel.Description != "Receive signed Discord commands." || loaded.DiscordChannel.Path != "channels/discord.md" {
+		if loaded.DiscordChannel == nil || loaded.DiscordChannel.Mode != "ambient" || string(loaded.DiscordChannel.Policy) != "Participate in hctl work.\n" || loaded.DiscordChannel.Path != "channels/discord.md" {
 			t.Fatalf("%s Discord channel = %#v", harness, loaded.DiscordChannel)
 		}
 		if loaded.SourceFingerprint == baseline.SourceFingerprint {
@@ -172,7 +172,7 @@ func TestLoadDiscoversDiscordChannelForBothHarnesses(t *testing.T) {
 	}
 
 	first, _ := Load(root, "claude")
-	write(t, path, "Receive Discord commands carefully.\n")
+	write(t, path, "---\nmode: ambient\n---\n\nParticipate carefully in Discord work.\n")
 	second, err := Load(root, "claude")
 	if err != nil {
 		t.Fatal(err)
@@ -188,8 +188,8 @@ func TestLoadRejectsInvalidChannels(t *testing.T) {
 		content []byte
 		want    string
 	}{
-		"empty Discord description":     {"channels/discord.md", nil, "must contain 1-1024"},
-		"oversized Discord description": {"channels/discord.md", bytes.Repeat([]byte("a"), 1025), "must contain 1-1024"},
+		"empty Discord policy":          {"channels/discord.md", []byte("---\nmode: ambient\n---\n"), "must contain 1-1024"},
+		"oversized Discord policy":      {"channels/discord.md", append([]byte("---\nmode: ambient\n---\n"), bytes.Repeat([]byte("a"), 1025)...), "must contain 1-1024"},
 		"non-UTF-8 Discord description": {"channels/discord.md", []byte{0xff}, "valid UTF-8"},
 		"unsupported file":              {"channels/slack.md", []byte("Slack.\n"), "supports discord.md only"},
 		"unsupported directory":         {"channels/discord/channel.md", []byte("Discord.\n"), "supports discord.md only"},

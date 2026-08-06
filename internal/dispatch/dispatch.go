@@ -1,4 +1,4 @@
-package gateway
+package dispatch
 
 import (
 	"bufio"
@@ -10,6 +10,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"hctl/internal/harness"
@@ -57,6 +58,7 @@ type Event struct {
 	InputID       string `json:"input_id,omitempty"`
 	SessionID     string `json:"session_id,omitempty"`
 	TurnID        string `json:"turn_id,omitempty"`
+	ItemID        string `json:"item_id,omitempty"`
 	Delta         string `json:"delta,omitempty"`
 	Bytes         int    `json:"bytes,omitempty"`
 	Status        string `json:"status,omitempty"`
@@ -93,25 +95,34 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 // owns the input transport and must close submissions when it stops accepting
 // new input.
 func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error) error {
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0)
+}
+
+// RunSubmissionsWithTurnTimeout drives a long-lived channel conversation while
+// bounding each native harness turn independently.
+func RunSubmissionsWithTurnTimeout(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, timeout time.Duration) error {
+	if timeout <= 0 {
+		return errors.New("turn timeout must be positive")
+	}
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout)
 }
 
 // RunTask drives bounded task input while opening a fresh native harness
-// session for every accepted input. Durable gateway outcomes still deduplicate
+// session for every accepted input. Durable dispatch outcomes still deduplicate
 // retries within the supplied conversation.
 func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submission Submission, emit func(Event) error) error {
 	submissions := make(chan Submission, 1)
 	submissions <- submission
 	close(submissions)
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0)
 }
 
-func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool) error {
+func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout time.Duration) error {
 	if !conversationName.MatchString(conversationID) {
 		return errors.New("conversation must use only letters, digits, dot, underscore, and dash")
 	}
 	if emit == nil {
-		return errors.New("gateway event receiver is required")
+		return errors.New("dispatch event receiver is required")
 	}
 	state, err := session.Load(p.WorkspaceRoot)
 	if err != nil {
@@ -127,7 +138,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			return err
 		}
 		for _, id := range uncertain {
-			sink.emit(Event{Type: "turn.uncertain", InputID: id, SessionID: conversation.SessionID, TurnID: id, Status: "gateway_restarted"})
+			sink.emit(Event{Type: "turn.uncertain", InputID: id, SessionID: conversation.SessionID, TurnID: id, Status: "dispatcher_restarted"})
 		}
 	}
 
@@ -145,7 +156,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 
 	for {
 		if sink.err != nil {
-			return errors.New("cannot write gateway events")
+			return errors.New("cannot write dispatch events")
 		}
 		if active == nil && len(conversation.Queue) > 0 {
 			if process == nil {
@@ -175,7 +186,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 				return err
 			}
 			active = &next
-			go runTurn(ctx, process, next, turns)
+			go runTurn(ctx, process, next, turns, turnTimeout)
 		}
 		if !inputOpen && active == nil && len(conversation.Queue) == 0 {
 			if process != nil {
@@ -320,7 +331,7 @@ func readInput(input io.Reader, results chan<- Submission) {
 		results <- value
 	}
 	if scanner.Err() != nil {
-		results <- Submission{err: errors.New("gateway input exceeded the bounded JSONL line size")}
+		results <- Submission{err: errors.New("run input exceeded the bounded JSONL line size")}
 	}
 }
 
@@ -340,7 +351,12 @@ func validateInput(value Submission) string {
 	return ""
 }
 
-func runTurn(ctx context.Context, process harness.Session, input session.Input, messages chan<- turnMessage) {
+func runTurn(ctx context.Context, process harness.Session, input session.Input, messages chan<- turnMessage, timeout time.Duration) {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	emit := func(event harness.Event) {
 		copy := event
 		messages <- turnMessage{event: &copy}
@@ -350,7 +366,7 @@ func runTurn(ctx context.Context, process harness.Session, input session.Input, 
 }
 
 func fromHarness(event harness.Event, inputID string) Event {
-	return Event{Type: event.Type, InputID: inputID, SessionID: event.SessionID, TurnID: event.TurnID, Delta: event.Delta, Status: event.Status}
+	return Event{Type: event.Type, InputID: inputID, SessionID: event.SessionID, TurnID: event.TurnID, ItemID: event.ItemID, Delta: event.Delta, Status: event.Status}
 }
 
 func ValidateConversation(value string) error {

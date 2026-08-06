@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"hctl/internal/rootfs"
+	"hctl/internal/secureenv"
 )
 
 //go:embed host/typescript.ts
@@ -231,19 +232,13 @@ func runNativeEnvironment(ctx context.Context, directory, label string, environm
 }
 
 func environmentWith(key, value string) []string {
-	prefix := key + "="
-	environment := make([]string, 0, len(os.Environ())+1)
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, prefix) {
-			environment = append(environment, entry)
-		}
-	}
-	return append(environment, prefix+value)
+	return secureenv.With(key, value)
 }
 
 func runNativeOutput(ctx context.Context, directory, label, executable string, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, executable, arguments...)
 	command.Dir = directory
+	command.Env = secureenv.Child()
 	output := &boundedBuffer{remaining: 64 << 10}
 	command.Stdout = output
 	command.Stderr = output

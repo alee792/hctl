@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"hctl/internal/harness"
+	"hctl/internal/secureenv"
 )
 
 type Driver struct{ executable string }
@@ -24,7 +25,9 @@ func (d *Driver) Executable() string { return d.executable }
 func (d *Driver) Verify(ctx context.Context) error {
 	versionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(versionCtx, d.executable, "--version").Output()
+	command := exec.CommandContext(versionCtx, d.executable, "--version")
+	command.Env = secureenv.Child()
+	output, err := command.Output()
 	if err != nil || len(output) > 4096 || !regexp.MustCompile(`\d+\.\d+\.\d+`).Match(output) {
 		return errors.New("codex executable did not provide a compatible semantic version")
 	}
@@ -40,7 +43,7 @@ func (d *Driver) Open(ctx context.Context, root, resumeID string) (harness.Sessi
 		return nil, err
 	}
 	client := &client{encoder: json.NewEncoder(process.Input()), process: process}
-	result, _, err := client.request(1, "initialize", map[string]any{"clientInfo": map[string]any{"name": "hctl", "title": "hctl gateway", "version": "0.1.0-dev"}})
+	result, _, err := client.request(1, "initialize", map[string]any{"clientInfo": map[string]any{"name": "hctl", "title": "hctl run", "version": "0.1.0-dev"}})
 	if err != nil || len(result) == 0 {
 		process.Abort()
 		return nil, errors.New("codex initialize handshake failed")
@@ -227,7 +230,7 @@ func decodeRPC(line []byte) (rpcEnvelope, error) {
 
 func handleEvent(message rpcEnvelope, sessionID, turnID string, emit func(harness.Event), terminal string) string {
 	if len(message.ID) != 0 {
-		emit(harness.Event{Type: "human_input.required", SessionID: sessionID, TurnID: turnID, Status: "declined_by_gateway"})
+		emit(harness.Event{Type: "human_input.required", SessionID: sessionID, TurnID: turnID, Status: "declined_by_dispatcher"})
 		return terminal
 	}
 	switch message.Method {
@@ -235,9 +238,10 @@ func handleEvent(message rpcEnvelope, sessionID, turnID string, emit func(harnes
 		var params struct {
 			Delta  string `json:"delta"`
 			TurnID string `json:"turnId"`
+			ItemID string `json:"itemId"`
 		}
 		if json.Unmarshal(message.Params, &params) == nil && params.Delta != "" && (params.TurnID == "" || params.TurnID == turnID) {
-			emit(harness.Event{Type: "agent.output.delta", SessionID: sessionID, TurnID: turnID, Delta: params.Delta})
+			emit(harness.Event{Type: "agent.output.delta", SessionID: sessionID, TurnID: turnID, ItemID: params.ItemID, Delta: params.Delta})
 		}
 	case "turn/completed":
 		var params struct {

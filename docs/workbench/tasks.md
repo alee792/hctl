@@ -17,7 +17,48 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-No task is ready without further direction.
+### HCTL-008 — Add harness-specific authored files
+
+**Outcome:** Let an agent project carry native Claude-only or Codex-only files
+under an obvious `harnesses/` convention and apply them to the corresponding
+native project directory. Preserve native file contents, keep source portable,
+and reuse the existing apply ownership record so stale cleanup and modified
+workspace files remain safe.
+
+**Boundaries:** Do not overwrite existing workspace files, allow source to
+escape the selected harness directory, or let pass-through files replace
+hctl-generated instructions, skills, subagents, or MCP setup. Do not interpret
+or promise enforcement of native settings. Select the smallest useful native
+surface from current official Claude and Codex project-file documentation and
+record unsupported or reserved paths clearly.
+
+**Acceptance:** A credential-free test applies one Claude-only and one
+Codex-only regular file into separate fresh workspaces, proves each is absent
+from the other harness, detects workspace collisions before mutation, and
+proves modified managed files are not silently overwritten or removed. Update
+the authored-project documentation and run `./scripts/check.sh`.
+
+## Ordered after Ready
+
+Do not start these concurrently. Shape each item using evidence from the
+completed predecessor.
+
+1. **HCTL-009 — Richer subagents.** Decide and implement the next native,
+   portable child-specific behavior beyond the current instructions-only,
+   parent-inherited slice.
+2. **HCTL-010 — GitHub connection.** Inspect Eve's then-current connection
+   filesystem convention and interface, then implement the smallest useful
+   hctl connection consistent with ADR 0009. No live credential or GitHub
+   action is authorized by this queue entry.
+3. **HCTL-011 — Discord channel.** Inspect Eve's then-current channel
+   filesystem convention and interface, then connect Discord to hctl's
+   session-aware gateway with authenticated, deduplicated input and bounded
+   outbound delivery. No live bot, webhook, listener, or Discord action is
+   authorized by this queue entry.
+4. **HCTL-012 — Schedules and sandbox/runtime conventions.** Reassess these
+   after a real connection and channel expose the runtime and deployment needs;
+   do not treat them as one implementation project unless the evidence supports
+   that shape.
 
 ## Completed
 
@@ -156,7 +197,6 @@ platform project; open one bounded task for the demonstrated need.
 
 ## Not queued
 
-Channels, Slack/webhooks, schedules, hosted SDKs, image deployment,
-root-as-agent shorthand, stronger sandboxing, and product naming remain in the
-product horizon. Their presence in design notes is not authorization for the
-maintainer to start them.
+Slack/webhooks, hosted SDKs, image deployment, root-as-agent shorthand, and
+product naming remain outside the ordered queue. Their presence in design
+notes is not authorization for the maintainer to start them.

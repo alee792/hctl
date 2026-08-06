@@ -121,6 +121,16 @@ a generated custom subagent, and session resume in a fresh external workspace.
 
 These are later product promises, not MVP implementation work:
 
+- Advance the remaining filesystem conventions in this order: harness-specific
+  authored files, richer subagents, a GitHub connection, a Discord channel,
+  then schedules and sandbox/runtime conventions. Each item must remain a
+  bounded product slice; completing the sequence is not permission to add live
+  credentials, contact GitHub or Discord, publish, deploy, or replace native
+  harness behavior.
+- Before defining the GitHub connection or Discord channel contract, inspect
+  Eve's then-current filesystem convention and interface. Reuse its plain
+  author-facing concepts where they fit hctl's native-harness boundary; record
+  deliberate differences rather than copying an incompatible runtime model.
 - Future channel adapters feed the same session-aware gateway exercised by
   local input. Network adapters verify their source before acceptance.
 - An external conversation maps to one native-harness session. Accepted input
@@ -156,8 +166,9 @@ installation; it deliberately leaves a relocatable package command out until a
 concrete need demonstrates one.
 
 Product naming, the concrete secretless-broker backend, proposal review UX,
-and specific vendor channel adapters are also intentionally unresolved. Do not
-infer answers from the current prototype.
+and the exact GitHub and Discord authoring interfaces are also intentionally
+unresolved. Do not infer answers from the current prototype or define those
+interfaces before their ordered work item reaches the frontier.
 
 ## Current design frontier
 
@@ -167,9 +178,10 @@ exercised through generated Claude and Codex configurations. The Codex native
 journey has live evidence, and the `darwin-arm64` clean-machine release archive
 journey is credential-free tested. Equivalent Claude acceptance remains. The
 credential-broker execution boundary is settled in ADR 0009; backend selection
-waits for a concrete secret-bearing managed tool. The next product decision is
-another vision item. Do not implement proposal capture, channels, image
-deployment, or broker code merely to exercise future seams.
+waits for the GitHub connection slice or another concrete secret-bearing
+managed tool. Harness-specific authored files are the next product slice; the
+remaining ordered conventions stay behind it. Do not implement proposal
+capture, image deployment, or broker code merely to exercise future seams.
 
 The [maintainer task list](tasks.md) turns that frontier into a prioritized,
 permission-aware queue. It is the source for agent assignments; this section

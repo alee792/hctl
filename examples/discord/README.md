@@ -71,9 +71,11 @@ Discord's signed timestamp, hctl replaces the loading response with an expiry
 notice and releases the in-memory response token; this does not interrupt the
 harness.
 
-At most 32 completed responses are delivered concurrently. If that separate
+At most 32 ordinary terminal deliveries run concurrently. If that separate
 limit is saturated, hctl drops the detached response state without retrying and
-records `delivery=saturated` in its content-free audit.
+records `delivery=saturated` in its content-free audit. The Discord user gets
+no terminal update for that response; its prior loading state is not recovered
+by the pending-turn expiry path.
 
 Gateway input and session state remain durable, but the interaction token does
 not. After a process restart, Discord can receive a known terminal status only

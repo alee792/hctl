@@ -40,14 +40,14 @@ turn, and buffered output without interrupting the harness. HCTL-012 must
 separately decide runtime-turn timeout behavior. Expiry updates bypass the
 ordinary output queue, and state is released before outbound delivery. Requests
 time out, do not follow redirects, bound response bodies, and are never retried.
-Transport and
-malformed-success failures are ambiguous and audited as uncertain; explicit
-rate limits and non-success responses are classified without retaining
-upstream bodies.
-At most 32 ordinary terminal deliveries run concurrently; saturation releases
-the detached token and output without an outbound attempt or retry and emits
-only a safe classified audit. Expiry uses its existing bounded timer worker and
-bypasses that ordinary-delivery limit.
+Transport and malformed-success failures are ambiguous and audited as
+uncertain; explicit rate limits and non-success responses are classified
+without retaining upstream bodies.
+
+At most 32 ordinary terminal deliveries run concurrently; saturation is a
+classified no-retry delivery failure that releases the detached token and
+output without an outbound attempt and emits only a safe audit. Expiry uses its
+existing bounded timer worker and bypasses that ordinary-delivery limit.
 
 ## Why this does not select the credential broker
 

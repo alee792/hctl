@@ -135,14 +135,15 @@ immediately flush a deferred response, then submit to the durable gateway
 asynchronously; local admission overflow returns an immediate private busy
 response instead. Later gateway rejection edits a deferred response with
 stable text. The default conversation is scoped to the configured application
-and user; `--conversation` explicitly
-overrides it. Hctl uses at most six bounded response messages and replaces a
-still-loading response after 14 minutes without claiming to interrupt the
-harness. The listener is plain loopback HTTP; hctl does not register the
-command, expose a public endpoint, or terminate TLS. The short-lived
-interaction token remains
-in adapter memory and is not written to agent source, generated setup, gateway
-state, or audit output.
+and user; `--conversation` explicitly overrides it. Hctl uses at most six
+bounded response messages and replaces a
+still-loading pending response after 14 minutes without claiming to interrupt
+the harness. If the separate ordinary-delivery limit was already saturated,
+hctl has released that response state and can only emit a safe operator audit;
+Discord receives no terminal update. The listener is plain loopback HTTP; hctl
+does not register the command, expose a public endpoint, or terminate TLS. The
+short-lived interaction token remains in adapter memory and is not written to
+agent source, generated setup, gateway state, or audit output.
 
 ## Product boundary
 

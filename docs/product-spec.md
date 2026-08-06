@@ -245,10 +245,12 @@ runtime-turn timeout implied by this limit.
 
 Completed, failed, and recovered-uncertain outcomes have bounded fallback text.
 At most 32 ordinary terminal deliveries run concurrently. If that delivery
-limit is full, hctl releases the detached token and output, performs no outbound
-request or retry, and records only the classified `delivery=saturated` audit;
-the deadline-sensitive expiry path uses its already bounded pending-turn worker
-instead of this ordinary-delivery limit. Delivery has a five-second timeout,
+limit is full, hctl releases the detached token and output, classifies the
+delivery as a no-retry `delivery=saturated` failure, and performs no outbound
+request. Discord receives no terminal update and the detached response is no
+longer eligible for pending-turn expiry. The deadline-sensitive expiry path
+uses its already bounded pending-turn worker instead of this ordinary-delivery
+limit. Delivery has a five-second timeout,
 follows no redirect, reads at most 64 KiB of response, and never retries. A
 transport failure or invalid successful response is recorded as uncertain; an
 explicit rate limit or other non-success response is classified as rate-limited

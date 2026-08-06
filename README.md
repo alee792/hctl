@@ -30,6 +30,14 @@ my-agent/
   subagents/
     researcher/
       instructions.md
+  harnesses/
+    claude/
+      .claude/
+        settings.json
+    codex/
+      .codex/
+        rules/
+          default.rules
 ```
 
 ```md
@@ -48,7 +56,13 @@ there is no registration file to update. TypeScript, Python, and Go tool
 functions under `tools/` are exposed through the same managed MCP server.
 Immediate subagents inherit their parent's generated skills and tools through
 the native harness. Apply preserves recognized target-specific metadata and
-warns when the selected harness does not document honoring it. See the
+warns when the selected harness does not document honoring it. Native files
+that are intentionally not portable can be mirrored under
+`harnesses/claude/.claude/` or `harnesses/codex/.codex/`; only the selected
+harness receives them. Hctl copies those files literally and owns their
+workspace copies, but does not merge, validate, or promise that the harness
+honors their contents. Generated skills, subagents, and MCP configuration stay
+reserved for hctl. Do not put credentials in authored harness files. See the
 [minimal example](examples/minimal) and the
 [mixed-language example](spikes/polyglot-tools/fixture).
 

@@ -8,7 +8,7 @@ files, CLI guidance, or product documentation.
 
 | Term | Meaning |
 | --- | --- |
-| Agent project | The portable authored filesystem source for one agent: instructions, skills, tools, subagents, and native dependency files. It is not coupled to the repository that stores it or the workspace where it is used. |
+| Agent project | The portable authored filesystem source for one agent: instructions, skills, tools, subagents, harness-specific files, and native dependency files. It is not coupled to the repository that stores it or the workspace where it is used. |
 | Agent source | The selected agent-project directory from which hctl discovers and validates authored files. |
 | Workspace | The independently selected directory where the harness operates. Generated harness files, hctl state, caches, and authored tool processes belong here. It defaults to the agent source for a standalone agent. |
 | Instructions | Always-on authored guidance applied to the native harness. |
@@ -24,6 +24,7 @@ files, CLI guidance, or product documentation.
 | Subagent | A specialized native harness agent delegated work by a parent. In the MVP it supplies only instructions and inherits the parent's setup; it is not an independently applied agent project. |
 | Schedule | A recurring trigger for headless agent work. |
 | Harness | The native agent product hctl prepares and extends, initially Claude Code or Codex. The harness owns the model loop and interactive UX. |
+| Harness-specific file | A nonportable native project file authored beneath `harnesses/claude/.claude/` or `harnesses/codex/.codex/` and copied literally only for that selected harness. Hctl owns the workspace copy but does not interpret or enforce its contents. |
 | Apply | Validate an agent project and prepare the native harness files and local tool runtime needed to use it in a chosen workspace. |
 | Harness setup | The generated instructions, skills, and MCP configuration that make an agent project usable in one native harness. Individual files are called generated harness files. |
 | Apply record | Generated hctl bookkeeping used to detect a stale or edited harness setup. It is not authored configuration or a tool inventory. |

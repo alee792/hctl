@@ -76,6 +76,14 @@ my-agent/
   subagents/
     researcher/
       instructions.md
+  harnesses/
+    claude/
+      .claude/
+        settings.json
+    codex/
+      .codex/
+        rules/
+          default.rules
 ```
 
 The directory name supplies the agent name, normalized to lowercase words with
@@ -124,6 +132,31 @@ silently ignored. Subagent and tool names may not collide. Portable subagent
 names use hyphens; generated Codex agent identifiers use underscores because
 that harness requires them.
 
+The optional `harnesses/` directory carries intentionally nonportable native
+project files. `harnesses/claude/` may contain a literal `.claude/` tree and
+`harnesses/codex/` may contain a literal `.codex/` tree. Apply reads only the
+selected harness tree and mirrors its files at the same workspace-relative
+paths. This supports native surfaces such as Claude's documented project
+`.claude/settings.json` and Codex's documented project
+`.codex/rules/*.rules` files without inventing an hctl schema. See the
+[Claude settings documentation](https://code.claude.com/docs/en/settings) and
+[Codex rules documentation](https://developers.openai.com/codex/rules).
+
+Harness-specific files are bounded regular files beneath real directories;
+paths must be normalized UTF-8 and symlinks are rejected. Contents are copied
+byte-for-byte, executable intent is preserved, and the selected files join the
+source fingerprint and apply ownership record. Hctl does not parse, merge, or
+validate native semantics, and does not promise that a particular harness
+version honors a copied file. Authors must not place credentials in these
+files; hctl does not claim reliable secret detection.
+
+Hctl-owned native destinations remain reserved. Claude authors cannot replace
+`.claude/skills/` or `.claude/agents/`; Codex authors cannot replace
+`.codex/config.toml` or `.codex/agents/`. Portable instructions, skills,
+subagents, and managed MCP setup continue to use their existing conventions.
+Case-folded aliases of these paths are also rejected before mutation so agent
+source remains safe to apply to common case-insensitive workspaces.
+
 Visible `tools/*.ts` and `tools/*.py` files each declare one tool. A visible
 `tools/NAME/tool.go` directory declares one Go tool. Filenames supply tool
 names, with underscores exposed as hyphens. TypeScript definitions export a
@@ -163,8 +196,9 @@ hctl apply ~/agents/reviewer --workspace ~/Code/example --harness claude
 cd ~/Code/example && claude
 ```
 
-The agent project supplies instructions, skills, tools, subagents, and native
-dependency files. The workspace supplies harness-visible working files and is
+The agent project supplies instructions, skills, tools, subagents,
+harness-specific files, and native dependency files. The workspace supplies
+harness-visible working files and is
 the working directory for the harness and authored tools. Generated harness
 files, apply records, gateway state, and runtime caches belong to the
 workspace. Source discovery and dependency preparation remain rooted in the
@@ -181,8 +215,10 @@ Codex project configuration remains subject to Codex's native repository-trust
 flow. Apply does not edit the user's global Codex configuration or silently
 trust a project on their behalf.
 
-Apply refuses to overwrite hand-authored native files or generated files that
-were modified after the previous apply. Reapplying identical source is
+Apply refuses to overwrite hand-authored native files or any hctl-owned file
+that was modified after the previous apply. Removing or changing a
+harness-specific source file uses the same modified-file protection and stale
+cleanup as generated portable setup. Reapplying identical source is
 deterministic.
 
 ## Harness contract
@@ -354,6 +390,9 @@ The MVP is complete when credential-free tests prove:
     both native project skill locations, including executable intent, while
     recognized unsupported vendor metadata remains intact and produces a
     path-, field-, and harness-specific warning.
+13. Harness-specific regular files round-trip only into their selected native
+    project directory, join stale-source detection, and use the same collision,
+    ownership, modified-file, and cleanup protections as generated setup.
 
 ## Explicit non-goals
 

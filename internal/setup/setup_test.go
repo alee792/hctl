@@ -204,6 +204,150 @@ Use echo.
 	})
 }
 
+func TestApplyMirrorsHarnessSpecificFilesWithOwnership(t *testing.T) {
+	source := testAgent(t)
+	claudeContent := "{\"permissions\":{\"deny\":[\"Read(./secrets/**)\"]}}\n"
+	codexContent := "prefix_rule(pattern = [\"git\", \"status\"], decision = \"allow\")\n"
+	write(t, filepath.Join(source, "harnesses", "claude", ".claude", "settings.json"), claudeContent)
+	claudeHook := filepath.Join(source, "harnesses", "claude", ".claude", "hooks", "check.sh")
+	write(t, claudeHook, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(claudeHook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(source, "harnesses", "codex", ".codex", "rules", "default.rules"), codexContent)
+
+	claudeWorkspace := t.TempDir()
+	claude, err := project.Load(source, "claude", claudeWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(claude, "/opt/hctl/bin/hctl"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(claudeWorkspace, ".claude", "settings.json")); got != claudeContent {
+		t.Fatalf("Claude settings changed during apply: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(claudeWorkspace, ".codex", "rules", "default.rules")); !os.IsNotExist(err) {
+		t.Fatal("Codex-only file was applied to Claude workspace")
+	}
+	if info, err := os.Stat(filepath.Join(claudeWorkspace, ".claude", "hooks", "check.sh")); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("Claude hook mode = %v, %v", info, err)
+	}
+
+	codexWorkspace := t.TempDir()
+	codex, err := project.Load(source, "codex", codexWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(codex, "/opt/hctl/bin/hctl"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(codexWorkspace, ".codex", "rules", "default.rules")); got != codexContent {
+		t.Fatalf("Codex rules changed during apply: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(codexWorkspace, ".claude", "settings.json")); !os.IsNotExist(err) {
+		t.Fatal("Claude-only file was applied to Codex workspace")
+	}
+}
+
+func TestApplyProtectsHarnessSpecificCollisionsAndEdits(t *testing.T) {
+	t.Run("collision is preflighted", func(t *testing.T) {
+		source := testAgent(t)
+		write(t, filepath.Join(source, "harnesses", "claude", ".claude", "settings.json"), "{}\n")
+		workspace := t.TempDir()
+		write(t, filepath.Join(workspace, ".claude", "settings.json"), "hand authored\n")
+		p, err := project.Load(source, "claude", workspace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Apply(p, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "without hctl ownership") {
+			t.Fatalf("unowned harness file collision was not rejected: %v", err)
+		}
+		for _, path := range []string{"CLAUDE.md", ".mcp.json"} {
+			if _, err := os.Stat(filepath.Join(workspace, path)); !os.IsNotExist(err) {
+				t.Fatalf("%s was written before collision failure", path)
+			}
+		}
+	})
+
+	t.Run("modified owned file is not overwritten or removed", func(t *testing.T) {
+		source := testAgent(t)
+		sourceFile := filepath.Join(source, "harnesses", "claude", ".claude", "settings.json")
+		write(t, sourceFile, "{}\n")
+		workspace := t.TempDir()
+		first, err := project.Load(source, "claude", workspace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Apply(first, "/opt/hctl/bin/hctl"); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(workspace, ".claude", "settings.json")
+		write(t, target, "workspace edit\n")
+		write(t, sourceFile, "{\"changed\":true}\n")
+		changed, err := project.Load(source, "claude", workspace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Apply(changed, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "was changed") {
+			t.Fatalf("modified owned file was overwritten: %v", err)
+		}
+		if got := read(t, target); got != "workspace edit\n" {
+			t.Fatalf("workspace edit was overwritten: %q", got)
+		}
+		if err := os.Remove(sourceFile); err != nil {
+			t.Fatal(err)
+		}
+		removed, err := project.Load(source, "claude", workspace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Apply(removed, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "was changed") {
+			t.Fatalf("modified owned file was removed: %v", err)
+		}
+		if got := read(t, target); got != "workspace edit\n" {
+			t.Fatalf("workspace edit was removed: %q", got)
+		}
+	})
+
+	t.Run("unchanged obsolete file is removed", func(t *testing.T) {
+		source := testAgent(t)
+		sourceFile := filepath.Join(source, "harnesses", "codex", ".codex", "rules", "default.rules")
+		write(t, sourceFile, "prefix_rule(pattern = [\"git\", \"status\"], decision = \"allow\")\n")
+		workspace := t.TempDir()
+		first, err := project.Load(source, "codex", workspace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Apply(first, "/opt/hctl/bin/hctl"); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(workspace, ".codex", "rules", "default.rules")
+		if err := os.Remove(sourceFile); err != nil {
+			t.Fatal(err)
+		}
+		removed, err := project.Load(source, "codex", workspace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if removed.SourceFingerprint == first.SourceFingerprint {
+			t.Fatal("removed harness file did not change source fingerprint")
+		}
+		if _, err := Apply(removed, "/opt/hctl/bin/hctl"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(target); !os.IsNotExist(err) {
+			t.Fatalf("obsolete harness file remains: %v", err)
+		}
+		if err := Verify(first); err == nil || !strings.Contains(err.Error(), "stale") {
+			t.Fatalf("old harness source unexpectedly verified: %v", err)
+		}
+		if err := Verify(removed); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestMaintainerCodeReviewSkillProjectsWithProvenance(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {

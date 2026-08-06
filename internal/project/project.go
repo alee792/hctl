@@ -21,12 +21,14 @@ import (
 )
 
 const (
-	GeneratorVersion  = "hctl/0.6.0-dev"
+	GeneratorVersion  = "hctl/0.7.0-dev"
 	maxSourceBytes    = 128 << 10
 	maxSkills         = 8
 	maxSkillFiles     = 128
 	maxSkillFileBytes = 1 << 20
 	maxSkillBytes     = 8 << 20
+	maxHarnessFiles   = 128
+	maxHarnessBytes   = 8 << 20
 	maxSubagents      = 8
 	echoMaxInputBytes = 1024
 )
@@ -45,10 +47,10 @@ type Skill struct {
 	AllowedTools        string
 	AllowedToolsPresent bool
 	ClaudeFields        []string
-	Files               []SkillFile
+	Files               []File
 }
 
-type SkillFile struct {
+type File struct {
 	Path       string
 	Content    []byte
 	Executable bool
@@ -79,6 +81,7 @@ type Project struct {
 	Instructions      []byte
 	Skills            []Skill
 	Subagents         []Subagent
+	HarnessFiles      []File
 	Tools             tool.Inventory
 	SourceFingerprint string
 	MaxToolInput      int
@@ -128,6 +131,10 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
+	harnessFiles, err := loadHarnessFiles(sourceRoot, harness)
+	if err != nil {
+		return nil, err
+	}
 	toolNames := map[string]bool{"echo": true}
 	for _, source := range tools.Sources {
 		toolNames[source.Name] = true
@@ -150,6 +157,13 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 	}
 	for _, subagent := range subagents {
 		sources = append(sources, SourceRecord{Path: subagent.Path, SHA256: rootfs.SHA256(subagent.Source)})
+	}
+	for _, file := range harnessFiles {
+		sources = append(sources, SourceRecord{
+			Path:       "harnesses/" + harness + "/" + file.Path,
+			SHA256:     rootfs.SHA256(file.Content),
+			Executable: file.Executable,
+		})
 	}
 	for _, file := range tools.Files {
 		sources = append(sources, SourceRecord{Path: file.Path, SHA256: file.SHA256})
@@ -177,10 +191,123 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 		Instructions:      instructions,
 		Skills:            skills,
 		Subagents:         subagents,
+		HarnessFiles:      harnessFiles,
 		Tools:             tools,
 		SourceFingerprint: fingerprint,
 		MaxToolInput:      echoMaxInputBytes,
 	}, nil
+}
+
+func loadHarnessFiles(root, harness string) ([]File, error) {
+	harnessesDirectory := filepath.Join(root, "harnesses")
+	info, err := os.Lstat(harnessesDirectory)
+	if errors.Is(err, os.ErrNotExist) {
+		return []File{}, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("harnesses must be a real directory")
+	}
+
+	selectedDirectory := filepath.Join(harnessesDirectory, harness)
+	info, err = os.Lstat(selectedDirectory)
+	if errors.Is(err, os.ErrNotExist) {
+		return []File{}, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("harnesses/%s must be a real directory", harness)
+	}
+
+	nativeDirectoryName := "." + harness
+	entries, err := os.ReadDir(selectedDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read harnesses/%s", harness)
+	}
+	for _, entry := range entries {
+		if entry.Name() != nativeDirectoryName {
+			return nil, fmt.Errorf("harnesses/%s supports %s only; found %q", harness, nativeDirectoryName, entry.Name())
+		}
+	}
+	if len(entries) == 0 {
+		return []File{}, nil
+	}
+
+	nativeDirectory := filepath.Join(selectedDirectory, nativeDirectoryName)
+	info, err = os.Lstat(nativeDirectory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("harnesses/%s/%s must be a real directory", harness, nativeDirectoryName)
+	}
+
+	files := []File{}
+	total := 0
+	err = filepath.WalkDir(nativeDirectory, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("cannot read harnesses/%s/%s", harness, nativeDirectoryName)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return errors.New("cannot inspect harness-specific file")
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("harnesses/%s/%s must not contain symlinks", harness, nativeDirectoryName)
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("harness-specific entries must be regular files or real directories")
+		}
+		if len(files) == maxHarnessFiles {
+			return fmt.Errorf("harnesses/%s may contain at most %d files", harness, maxHarnessFiles)
+		}
+		relative, err := filepath.Rel(selectedDirectory, path)
+		if err != nil {
+			return errors.New("cannot describe harness-specific file path")
+		}
+		relative = filepath.ToSlash(relative)
+		if !utf8.ValidString(relative) {
+			return errors.New("harness-specific file paths must be valid UTF-8")
+		}
+		if _, err := rootfs.CleanRelative(relative); err != nil {
+			return fmt.Errorf("harness-specific file %q has an invalid path", relative)
+		}
+		if reservedHarnessPath(harness, relative) {
+			return fmt.Errorf("harness-specific file %q is reserved for hctl", relative)
+		}
+		sourcePath := "harnesses/" + harness + "/" + relative
+		content, err := rootfs.ReadSource(root, sourcePath, maxSkillFileBytes)
+		if err != nil {
+			return err
+		}
+		total += len(content)
+		if total > maxHarnessBytes {
+			return fmt.Errorf("harnesses/%s files exceed %d bytes", harness, maxHarnessBytes)
+		}
+		files = append(files, File{Path: relative, Content: content, Executable: info.Mode().Perm()&0o111 != 0})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
+}
+
+// IsHarnessFilePath reports whether path is an author-owned native project file.
+func IsHarnessFilePath(harness, path string) bool {
+	if harness != "claude" && harness != "codex" || !strings.HasPrefix(path, "."+harness+"/") {
+		return false
+	}
+	_, err := rootfs.CleanRelative(path)
+	return err == nil && !reservedHarnessPath(harness, path)
+}
+
+func reservedHarnessPath(harness, path string) bool {
+	path = strings.ToLower(path)
+	if harness == "claude" {
+		return path == ".claude/skills" || strings.HasPrefix(path, ".claude/skills/") ||
+			path == ".claude/agents" || strings.HasPrefix(path, ".claude/agents/")
+	}
+	return path == ".codex/config.toml" || path == ".codex/agents" || strings.HasPrefix(path, ".codex/agents/")
 }
 
 func parseInstructions(content []byte) (string, []byte, error) {
@@ -339,9 +466,9 @@ func loadSkills(root string) ([]Skill, error) {
 	return skills, nil
 }
 
-func loadSkillFiles(root, name string) ([]SkillFile, error) {
+func loadSkillFiles(root, name string) ([]File, error) {
 	directory := filepath.Join(root, "skills", name)
-	files := []SkillFile{}
+	files := []File{}
 	total := 0
 	err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -388,7 +515,7 @@ func loadSkillFiles(root, name string) ([]SkillFile, error) {
 		if total > maxSkillBytes {
 			return fmt.Errorf("resources exceed %d bytes", maxSkillBytes)
 		}
-		files = append(files, SkillFile{Path: relative, Content: content, Executable: info.Mode().Perm()&0o111 != 0})
+		files = append(files, File{Path: relative, Content: content, Executable: info.Mode().Perm()&0o111 != 0})
 		return nil
 	})
 	if err != nil {

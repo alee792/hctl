@@ -245,6 +245,12 @@ func filesFor(p *project.Project, executable string) (generatedSetup, error) {
 			files[fmt.Sprintf(".codex/agents/%s.toml", subagent.Name)] = generatedFile{Content: []byte("name = " + strconv.Quote(codexName) + "\ndescription = " + strconv.Quote(subagent.Description) + "\ndeveloper_instructions = " + strconv.Quote(strings.TrimSpace(string(subagent.Instructions))) + "\n"), Mode: 0o644}
 		}
 	}
+	for _, file := range p.HarnessFiles {
+		if _, reserved := files[file.Path]; reserved {
+			return generatedSetup{}, fmt.Errorf("harness-specific file %s conflicts with hctl setup", file.Path)
+		}
+		files[file.Path] = generatedFile{Content: file.Content, Mode: generatedMode(file.Executable)}
+	}
 	return generatedSetup{Files: files, Diagnostics: diagnostics}, nil
 }
 
@@ -334,12 +340,12 @@ func allowedPath(harness, path string) bool {
 		if path == "CLAUDE.md" || path == ".mcp.json" {
 			return true
 		}
-		return generatedSkillPath(path, ".claude/skills/") || generatedSubagentPath(path, ".claude/agents/", ".md")
+		return generatedSkillPath(path, ".claude/skills/") || generatedSubagentPath(path, ".claude/agents/", ".md") || project.IsHarnessFilePath(harness, path)
 	}
 	if path == "AGENTS.md" || path == ".codex/config.toml" {
 		return true
 	}
-	return generatedSkillPath(path, ".agents/skills/") || generatedSubagentPath(path, ".codex/agents/", ".toml")
+	return generatedSkillPath(path, ".agents/skills/") || generatedSubagentPath(path, ".codex/agents/", ".toml") || project.IsHarnessFilePath(harness, path)
 }
 
 func allowedOwnedPath(harness, path string, legacy bool) bool {

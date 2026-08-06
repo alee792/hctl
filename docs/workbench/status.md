@@ -24,7 +24,8 @@ The repository contains a small Go CLI, with one maintained YAML dependency,
 that:
 
 - applies portable agent instructions, open Agent Skills directories with
-  bundled resources, and immediate instructions-only subagents to an
+  bundled resources, immediate instructions-only subagents, and selected
+  harness-specific native files to an
   independently selected workspace as native Claude Code and Codex files
   without overwriting hand-authored files;
 - keeps one apply record, migrates legacy projection records, and removes the
@@ -116,14 +117,18 @@ a generated custom subagent, and session resume in a fresh external workspace.
   metadata and regular-file resources survive both native project harness
   setups. Recognized vendor metadata is copied unchanged to either target and
   warns when that harness does not document honoring it.
+- Intentionally nonportable native files use a literal
+  `harnesses/claude/.claude/` or `harnesses/codex/.codex/` tree. Only the
+  selected tree is copied, its files share the existing source-fingerprint and
+  apply-ownership protections, and hctl neither merges nor interprets them.
 
 ## Retained product horizon
 
 These are later product promises, not MVP implementation work:
 
-- Advance the remaining filesystem conventions in this order: harness-specific
-  authored files, richer subagents, a GitHub connection, a Discord channel,
-  then schedules and sandbox/runtime conventions. Each item must remain a
+- Advance the remaining filesystem conventions in this order: richer
+  subagents, a GitHub connection, a Discord channel, then schedules and
+  sandbox/runtime conventions. Each item must remain a
   bounded product slice; completing the sequence is not permission to add live
   credentials, contact GitHub or Discord, publish, deploy, or replace native
   harness behavior.
@@ -173,15 +178,16 @@ interfaces before their ordered work item reaches the frontier.
 ## Current design frontier
 
 Portable source, independent workspaces, authored tools, native inherited
-subagents, and the Agent Skills compatibility contract are implemented and
-exercised through generated Claude and Codex configurations. The Codex native
-journey has live evidence, and the `darwin-arm64` clean-machine release archive
-journey is credential-free tested. Equivalent Claude acceptance remains. The
-credential-broker execution boundary is settled in ADR 0009; backend selection
-waits for the GitHub connection slice or another concrete secret-bearing
-managed tool. Harness-specific authored files are the next product slice; the
-remaining ordered conventions stay behind it. Do not implement proposal
-capture, image deployment, or broker code merely to exercise future seams.
+subagents, Agent Skills compatibility, and harness-specific authored files are
+implemented and exercised through generated Claude and Codex configurations.
+The Codex native journey has live evidence, and the `darwin-arm64`
+clean-machine release archive journey is credential-free tested. Equivalent
+Claude acceptance remains. The credential-broker execution boundary is settled
+in ADR 0009; backend selection waits for the GitHub connection slice or another
+concrete secret-bearing managed tool. Richer subagents are the next product
+slice; the remaining ordered conventions stay behind it. Do not implement
+proposal capture, image deployment, or broker code merely to exercise future
+seams.
 
 The [maintainer task list](tasks.md) turns that frontier into a prioritized,
 permission-aware queue. It is the source for agent assignments; this section

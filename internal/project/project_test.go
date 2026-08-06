@@ -119,6 +119,98 @@ func TestLoadDiscoversInstructionsOnlySubagents(t *testing.T) {
 	}
 }
 
+func TestLoadDiscoversOnlySelectedHarnessFiles(t *testing.T) {
+	root := agent(t, "portable")
+	claudeSettings := filepath.Join(root, "harnesses", "claude", ".claude", "settings.json")
+	claudeHook := filepath.Join(root, "harnesses", "claude", ".claude", "hooks", "check.sh")
+	codexRules := filepath.Join(root, "harnesses", "codex", ".codex", "rules", "default.rules")
+	write(t, claudeSettings, "{\"permissions\":{}}\n")
+	writeBytes(t, claudeHook, []byte("#!/bin/sh\n"), 0o755)
+	write(t, codexRules, "prefix_rule(pattern = [\"git\", \"status\"], decision = \"allow\")\n")
+
+	claude, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claude.HarnessFiles) != 2 || claude.HarnessFiles[0].Path != ".claude/hooks/check.sh" || !claude.HarnessFiles[0].Executable || claude.HarnessFiles[1].Path != ".claude/settings.json" {
+		t.Fatalf("Claude harness files = %#v", claude.HarnessFiles)
+	}
+	if len(codex.HarnessFiles) != 1 || codex.HarnessFiles[0].Path != ".codex/rules/default.rules" {
+		t.Fatalf("Codex harness files = %#v", codex.HarnessFiles)
+	}
+
+	write(t, claudeSettings, "{\"permissions\":{\"allow\":[]}}\n")
+	changedClaude, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedCodex, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedClaude.SourceFingerprint == claude.SourceFingerprint {
+		t.Fatal("selected harness file change did not change source fingerprint")
+	}
+	if unchangedCodex.SourceFingerprint != codex.SourceFingerprint {
+		t.Fatal("Claude-only file changed Codex source fingerprint")
+	}
+}
+
+func TestLoadRejectsUnsafeHarnessFiles(t *testing.T) {
+	tests := map[string]struct {
+		harness string
+		path    string
+		want    string
+	}{
+		"wrong native directory": {"claude", "harnesses/claude/.codex/rules/default.rules", "supports .claude only"},
+		"Claude skills reserved": {"claude", "harnesses/claude/.claude/skills/custom.md", "reserved for hctl"},
+		"Claude skills alias":    {"claude", "harnesses/claude/.claude/Skills/custom.md", "reserved for hctl"},
+		"Claude agents reserved": {"claude", "harnesses/claude/.claude/agents/custom.md", "reserved for hctl"},
+		"Codex config reserved":  {"codex", "harnesses/codex/.codex/config.toml", "reserved for hctl"},
+		"Codex config alias":     {"codex", "harnesses/codex/.codex/CONFIG.toml", "reserved for hctl"},
+		"Codex agents reserved":  {"codex", "harnesses/codex/.codex/agents/custom.toml", "reserved for hctl"},
+		"Codex agents alias":     {"codex", "harnesses/codex/.codex/Agents/custom.toml", "reserved for hctl"},
+		"nonportable path":       {"claude", "harnesses/claude/.claude/bad\\name", "invalid path"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := agent(t, "portable")
+			write(t, filepath.Join(root, filepath.FromSlash(test.path)), "content\n")
+			if _, err := Load(root, test.harness); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unsafe harness file was not rejected with %q: %v", test.want, err)
+			}
+		})
+	}
+
+	t.Run("symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		outside := filepath.Join(t.TempDir(), "outside.json")
+		write(t, outside, "{}\n")
+		path := filepath.Join(root, "harnesses", "claude", ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "symlinks") {
+			t.Fatalf("harness file symlink was not rejected: %v", err)
+		}
+	})
+
+	t.Run("oversized", func(t *testing.T) {
+		root := agent(t, "portable")
+		writeBytes(t, filepath.Join(root, "harnesses", "claude", ".claude", "large.bin"), make([]byte, maxSkillFileBytes+1), 0o644)
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("oversized harness file was not rejected: %v", err)
+		}
+	})
+}
+
 func TestLoadParsesAgentSkillsAndResources(t *testing.T) {
 	root := agent(t, "portable")
 	skillRoot := filepath.Join(root, "skills", "echo")

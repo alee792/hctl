@@ -181,8 +181,11 @@ internal write-access result that hctl withholds from Discord. For a Git
 workspace, hctl creates a private branch-backed worktree for that conversation,
 resumes the same native session with workspace-write access, and continues the
 request once. Later messages and restarts reuse that isolated checkout while
-other conversations remain read-only. Interactive, JSONL, and scheduled use
-retain their existing native policy.
+other conversations remain read-only. Guild and DM mutations may run
+concurrently: each keeps its own worktree, queue, native session, and response
+surface under the shared capacity limits, and an ordinary failure in one does
+not stop the other. Interactive, JSONL, and scheduled use retain their existing
+native policy.
 
 ## Product boundary
 

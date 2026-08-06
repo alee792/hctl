@@ -25,8 +25,9 @@ const (
 )
 
 var (
-	conversationName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	inputName        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$`)
+	conversationName         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	inputName                = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$`)
+	errDispatchEventDelivery = errors.New("cannot write dispatch events")
 )
 
 type Submission struct {
@@ -213,7 +214,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 dispatchLoop:
 	for {
 		if sink.err != nil {
-			return errors.New("cannot write dispatch events")
+			return fmt.Errorf("%w: %v", errDispatchEventDelivery, sink.err)
 		}
 		snapshot, err := store.snapshot(ref)
 		if err != nil {

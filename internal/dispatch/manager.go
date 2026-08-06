@@ -295,6 +295,12 @@ func (m *Manager) Submit(ctx context.Context, conversation string, submission Su
 	select {
 	case worker.submissions <- submission:
 		worker.submitMu.Unlock()
+	case <-worker.done:
+		worker.submitMu.Unlock()
+		if err := m.finishAdmission(worker); err != nil {
+			return SubmissionResult{}, err
+		}
+		return SubmissionResult{}, m.workerError(worker)
 	case <-ctx.Done():
 		worker.submitMu.Unlock()
 		if err := m.finishAdmission(worker); err != nil {
@@ -321,6 +327,11 @@ func (m *Manager) Submit(ctx context.Context, conversation string, submission Su
 			return SubmissionResult{}, err
 		}
 		return result, nil
+	case <-worker.done:
+		if err := m.finishAdmission(worker); err != nil {
+			return SubmissionResult{}, err
+		}
+		return SubmissionResult{}, m.workerError(worker)
 	case <-ctx.Done():
 		m.finishAdmissionAsync(worker, reply)
 		return SubmissionResult{}, ctx.Err()
@@ -563,6 +574,12 @@ func (m *Manager) run(worker *managedConversation) {
 			policy = harness.PolicyWorkspaceWrite
 		}
 	}
+	if err != nil && snapshot.firstID != "" {
+		event := Event{SchemaVersion: 1, Sequence: 1, Type: "driver.process_failed", Harness: m.driver.Name(), Conversation: worker.conversation, InputID: snapshot.firstID, SessionID: snapshot.sessionID, Status: "workspace_failure"}
+		if emitErr := m.emit(worker.conversation, event); emitErr != nil {
+			err = errors.Join(errDispatchEventDelivery, emitErr)
+		}
+	}
 	if err == nil {
 		err = runSubmissions(m.ctx, p, m.driver, worker.conversation, worker.submissions, func(event Event) error {
 			m.mu.Lock()
@@ -579,9 +596,12 @@ func (m *Manager) run(worker *managedConversation) {
 	m.capacity.unregister(worker.conversation)
 	m.mu.Lock()
 	worker.err = err
-	close(worker.done)
 	closing := worker.closing || m.closed || errors.Is(err, context.Canceled)
-	if err != nil && !closing && m.err == nil {
+	if m.workers[worker.conversation] == worker {
+		delete(m.workers, worker.conversation)
+	}
+	close(worker.done)
+	if err != nil && !closing && errors.Is(err, errDispatchEventDelivery) && m.err == nil {
 		m.err = err
 		m.closed = true
 		m.capacity.shutdown()
@@ -589,6 +609,21 @@ func (m *Manager) run(worker *managedConversation) {
 		m.doneOnce.Do(func() { close(m.done) })
 	}
 	m.mu.Unlock()
+}
+
+func (m *Manager) workerError(worker *managedConversation) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if worker.err != nil {
+		return worker.err
+	}
+	if m.err != nil {
+		return m.err
+	}
+	if m.closed {
+		return ErrManagerClosed
+	}
+	return ErrConversationBusy
 }
 
 func (m *Manager) newWorkerLocked(conversation string) (*managedConversation, error) {

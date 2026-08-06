@@ -31,8 +31,9 @@ type TurnResult struct {
 type ExecutionPolicy string
 
 const (
-	PolicyDefault  ExecutionPolicy = "default"
-	PolicyReadOnly ExecutionPolicy = "read-only"
+	PolicyDefault        ExecutionPolicy = "default"
+	PolicyReadOnly       ExecutionPolicy = "read-only"
+	PolicyWorkspaceWrite ExecutionPolicy = "workspace-write"
 )
 
 type OpenRequest struct {

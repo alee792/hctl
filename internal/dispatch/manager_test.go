@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"hctl/internal/harness"
+	"hctl/internal/project"
 	"hctl/internal/session"
+	"hctl/internal/worktree"
 )
 
 func TestManagerOwnsIndependentConversationLifecycles(t *testing.T) {
@@ -322,7 +324,7 @@ func TestManagerHibernatesAndResumesIdleHarnesses(t *testing.T) {
 			manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
 				events <- managedEvent{conversation: conversation, event: event}
 				return nil
-			}, clock.NewTimer)
+			}, clock.NewTimer, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -368,11 +370,148 @@ func TestManagerHibernatesAndResumesIdleHarnesses(t *testing.T) {
 	}
 }
 
+func TestManagerElevatesOnceAndReusesDurableWritableWorkspace(t *testing.T) {
+	p := testProject(t)
+	elevatedRoot := t.TempDir()
+	provider := &fakeWorkspaceProvider{project: projectAtWorkspace(p, elevatedRoot), assignment: worktree.Assignment{Root: elevatedRoot, Branch: "hctl/test/conversation"}}
+	driver := newManagerDriver()
+	clock := newFakeIdleClock()
+	events := make(chan managedEvent, 64)
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	}, clock.NewTimer, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-1", Text: "change it"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "message-1")
+	driver.release("message-1")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "message-1"})
+	result, err := manager.Elevate(context.Background(), "discord-guild", Submission{InputID: "message-1:write", Text: "continue"})
+	if err != nil || result.Status != "queued" {
+		t.Fatalf("elevation = %+v, %v", result, err)
+	}
+	atomicState, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	atomicConversation := findConversation(atomicState, "discord-guild")
+	if atomicConversation == nil || atomicConversation.WorkspaceRoot != elevatedRoot || len(atomicConversation.Queue) != 1 || atomicConversation.Queue[0].ID != "message-1:write" {
+		t.Fatalf("workspace and continuation were not persisted together: %#v", atomicConversation)
+	}
+	driver.waitStarted(t, "message-1:write")
+	if provider.provisions != 1 {
+		t.Fatalf("workspace provisions = %d", provider.provisions)
+	}
+	if got := driver.openRoots(); !reflect.DeepEqual(got, []string{p.WorkspaceRoot, elevatedRoot}) {
+		t.Fatalf("opened roots = %v", got)
+	}
+	if got := driver.executionPolicies(); !reflect.DeepEqual(got, []harness.ExecutionPolicy{harness.PolicyReadOnly, harness.PolicyWorkspaceWrite}) {
+		t.Fatalf("execution policies = %v", got)
+	}
+	if got := driver.resumeIDs(); !reflect.DeepEqual(got, []string{"", "session-1"}) {
+		t.Fatalf("resume IDs = %v", got)
+	}
+	driver.release("message-1:write")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "message-1:write"})
+	if _, err := manager.Submit(context.Background(), "discord-dm", Submission{InputID: "message-other", Text: "inspect"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "message-other")
+	if got := driver.openRoots(); !reflect.DeepEqual(got, []string{p.WorkspaceRoot, elevatedRoot, p.WorkspaceRoot}) {
+		t.Fatalf("roots after unrelated conversation = %v", got)
+	}
+	if got := driver.executionPolicies(); !reflect.DeepEqual(got, []harness.ExecutionPolicy{harness.PolicyReadOnly, harness.PolicyWorkspaceWrite, harness.PolicyReadOnly}) {
+		t.Fatalf("policies after unrelated conversation = %v", got)
+	}
+	driver.release("message-other")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-dm": "message-other"})
+	manager.Close()
+
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := findConversation(state, "discord-guild")
+	if conversation == nil || conversation.WorkspaceRoot != elevatedRoot || conversation.WorktreeBranch != provider.assignment.Branch {
+		t.Fatalf("durable writable assignment = %#v", conversation)
+	}
+
+	restartedDriver := newManagerDriver()
+	restartedEvents := make(chan managedEvent, 16)
+	restarted, err := newManager(context.Background(), p, restartedDriver, time.Minute, time.Hour, func(conversation string, event Event) error {
+		restartedEvents <- managedEvent{conversation: conversation, event: event}
+		return nil
+	}, newFakeIdleClock().NewTimer, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restarted.Close)
+	if _, err := restarted.Submit(context.Background(), "discord-guild", Submission{InputID: "message-2", Text: "next"}); err != nil {
+		t.Fatal(err)
+	}
+	restartedDriver.waitStarted(t, "message-2")
+	if got := restartedDriver.openRoots(); !reflect.DeepEqual(got, []string{elevatedRoot}) {
+		t.Fatalf("restart roots = %v", got)
+	}
+	if got := restartedDriver.executionPolicies(); !reflect.DeepEqual(got, []harness.ExecutionPolicy{harness.PolicyWorkspaceWrite}) {
+		t.Fatalf("restart policies = %v", got)
+	}
+	restartedDriver.release("message-2")
+	waitManagedEvents(t, restartedEvents, "turn.completed", map[string]string{"discord-guild": "message-2"})
+}
+
+func TestManagerElevationFailurePreservesReadOnlyConversation(t *testing.T) {
+	p := testProject(t)
+	provider := &fakeWorkspaceProvider{provisionErr: errors.New("cannot prepare isolated workspace")}
+	driver := newManagerDriver()
+	events := make(chan managedEvent, 32)
+	manager, err := NewManagerWithWorkspace(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	}, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	if _, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-1", Text: "change it"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "message-1")
+	driver.release("message-1")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "message-1"})
+	if _, err := manager.Elevate(context.Background(), "discord-guild", Submission{InputID: "message-1:write", Text: "continue"}); !errors.Is(err, provider.provisionErr) {
+		t.Fatalf("elevation failure = %v", err)
+	}
+
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := findConversation(state, "discord-guild")
+	if conversation == nil || conversation.WorkspaceRoot != "" || conversation.WorktreeBranch != "" || conversation.Outcomes["message-1"] != "completed" {
+		t.Fatalf("state after failed elevation = %#v", conversation)
+	}
+	if _, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-2", Text: "inspect instead"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "message-2")
+	if got := driver.executionPolicies(); !reflect.DeepEqual(got, []harness.ExecutionPolicy{harness.PolicyReadOnly, harness.PolicyReadOnly}) {
+		t.Fatalf("policies after failed elevation = %v", got)
+	}
+	driver.release("message-2")
+}
+
 func TestManagerDoesNotHibernateActiveOrQueuedWork(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	clock := newFakeIdleClock()
-	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(string, Event) error { return nil }, clock.NewTimer)
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(string, Event) error { return nil }, clock.NewTimer, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +540,7 @@ func TestManagerClassifiesHibernateCloseFailureWithoutLosingConversation(t *test
 	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	}, clock.NewTimer)
+	}, clock.NewTimer, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +612,7 @@ func TestManagerBoundsBlockedHibernateClose(t *testing.T) {
 	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	}, clock.NewTimer)
+	}, clock.NewTimer, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,6 +840,7 @@ type managerDriver struct {
 	closed    int
 	resumed   []string
 	policies  []harness.ExecutionPolicy
+	roots     []string
 	openErr   error
 	closeErr  error
 	closeWait chan struct{}
@@ -728,6 +868,7 @@ func (d *managerDriver) Open(_ context.Context, request harness.OpenRequest) (ha
 	d.next++
 	d.resumed = append(d.resumed, request.ResumeID)
 	d.policies = append(d.policies, request.Policy)
+	d.roots = append(d.roots, request.Root)
 	if d.openErr != nil {
 		return nil, d.openErr
 	}
@@ -790,6 +931,45 @@ func (d *managerDriver) executionPolicies() []harness.ExecutionPolicy {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]harness.ExecutionPolicy(nil), d.policies...)
+}
+
+func (d *managerDriver) openRoots() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.roots...)
+}
+
+type fakeWorkspaceProvider struct {
+	project      *project.Project
+	assignment   worktree.Assignment
+	provisionErr error
+	provisions   int
+	resolves     int
+	removed      int
+}
+
+func (p *fakeWorkspaceProvider) Provision(context.Context, string) (*project.Project, worktree.Assignment, error) {
+	p.provisions++
+	if p.provisionErr != nil {
+		return nil, worktree.Assignment{}, p.provisionErr
+	}
+	return p.project, p.assignment, nil
+}
+
+func (p *fakeWorkspaceProvider) Resolve(_ context.Context, _ string, assignment worktree.Assignment) (*project.Project, error) {
+	p.resolves++
+	if assignment != p.assignment {
+		return nil, errors.New("unexpected assignment")
+	}
+	return p.project, nil
+}
+
+func (p *fakeWorkspaceProvider) Remove(context.Context, worktree.Assignment) { p.removed++ }
+
+func projectAtWorkspace(base *project.Project, root string) *project.Project {
+	copy := *base
+	copy.WorkspaceRoot = root
+	return &copy
 }
 
 func (d *managerDriver) blockProcessClose() {

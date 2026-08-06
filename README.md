@@ -173,8 +173,12 @@ default while retaining its native conversation; use `--idle-timeout` to choose
 a different interval up to 24 hours. The next message resumes that conversation.
 Channel-managed Claude and Codex sessions run read-only in the shared checkout.
 When a request genuinely requires a workspace change, the agent returns an
-internal write-access result that hctl withholds from Discord; interactive,
-JSONL, and scheduled use retain their existing native policy.
+internal write-access result that hctl withholds from Discord. For a Git
+workspace, hctl creates a private branch-backed worktree for that conversation,
+resumes the same native session with workspace-write access, and continues the
+request once. Later messages and restarts reuse that isolated checkout while
+other conversations remain read-only. Interactive, JSONL, and scheduled use
+retain their existing native policy.
 
 ## Product boundary
 

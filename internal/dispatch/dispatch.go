@@ -357,8 +357,9 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			if err != nil {
 				return err
 			}
-			sink.emit(Event{Type: "turn." + message.result.Status, InputID: active.ID, SessionID: terminalSessionID, TurnID: message.result.TurnID})
+			completedID := active.ID
 			active = nil
+			sink.emit(Event{Type: "turn." + message.result.Status, InputID: completedID, SessionID: terminalSessionID, TurnID: message.result.TurnID})
 			if freshSessions {
 				if err := process.Close(); err != nil {
 					return err

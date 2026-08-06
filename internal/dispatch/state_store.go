@@ -29,6 +29,8 @@ type conversationSnapshot struct {
 	firstID   string
 	active    bool
 	exists    bool
+	workspace string
+	branch    string
 }
 
 func openConversationStore(root string) (*conversationStore, error) {
@@ -65,12 +67,47 @@ func (s *conversationStore) snapshot(ref conversationRef) (conversationSnapshot,
 	if conversation == nil {
 		return conversationSnapshot{}, nil
 	}
-	snapshot := conversationSnapshot{sessionID: conversation.SessionID, queueLen: len(conversation.Queue), exists: true}
+	snapshot := conversationSnapshot{sessionID: conversation.SessionID, queueLen: len(conversation.Queue), exists: true, workspace: conversation.WorkspaceRoot, branch: conversation.WorktreeBranch}
 	if len(conversation.Queue) > 0 {
 		snapshot.firstID = conversation.Queue[0].ID
 		snapshot.active = conversation.Queue[0].Status == "active"
 	}
 	return snapshot, nil
+}
+
+func (s *conversationStore) assignWorkspaceAndAccept(ref conversationRef, workspace, branch, inputID, text string) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, err := s.conversation(ref)
+	if err != nil {
+		return "", false, err
+	}
+	if conversation.WorkspaceRoot != "" && (conversation.WorkspaceRoot != workspace || conversation.WorktreeBranch != branch) {
+		return "", false, errors.New("conversation already belongs to a different writable workspace")
+	}
+	priorWorkspace, priorBranch := conversation.WorkspaceRoot, conversation.WorktreeBranch
+	priorQueue := append([]session.Input(nil), conversation.Queue...)
+	priorOutcomes := make(map[string]string, len(conversation.Outcomes))
+	for id, outcome := range conversation.Outcomes {
+		priorOutcomes[id] = outcome
+	}
+	priorOrder := append([]string(nil), conversation.OutcomeOrder...)
+	rollback := func() {
+		conversation.WorkspaceRoot, conversation.WorktreeBranch = priorWorkspace, priorBranch
+		conversation.Queue, conversation.Outcomes, conversation.OutcomeOrder = priorQueue, priorOutcomes, priorOrder
+	}
+	conversation.WorkspaceRoot = workspace
+	conversation.WorktreeBranch = branch
+	status, duplicate, err := conversation.Accept(inputID, text)
+	if err != nil {
+		rollback()
+		return "", false, err
+	}
+	if err := session.Save(s.root, s.state); err != nil {
+		rollback()
+		return "", false, err
+	}
+	return status, duplicate, nil
 }
 
 func (s *conversationStore) lookup(ref conversationRef) (*session.Conversation, error) {
@@ -163,10 +200,15 @@ func (s *conversationStore) complete(ref conversationRef, inputID, outcome, resu
 func (s *conversationStore) reset(ref conversationRef) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := s.conversation(ref); err != nil {
+	conversation, err := s.conversation(ref)
+	if err != nil {
 		return err
 	}
-	s.state.Reset(ref.agentID, ref.harness, ref.id, ref.fingerprint)
+	if conversation.WorkspaceRoot != "" {
+		conversation.ResetLifecycle()
+	} else {
+		s.state.Reset(ref.agentID, ref.harness, ref.id, ref.fingerprint)
+	}
 	return session.Save(s.root, s.state)
 }
 

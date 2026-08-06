@@ -34,7 +34,11 @@ while IFS= read -r line; do
       printf '{"id":%s,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.1"}}\n' "$id"
       ;;
     *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
-      printf '{"id":%s,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"},"sandbox":{"type":"readOnly","networkAccess":false},"approvalPolicy":"never"}}\n' "$id"
+      case "$line" in
+        *'"sandbox":"workspace-write"'*) sandbox=workspaceWrite ;;
+        *) sandbox=readOnly ;;
+      esac
+      printf '{"id":%s,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"},"sandbox":{"type":"%s","networkAccess":false},"approvalPolicy":"never"}}\n' "$id" "$sandbox"
       ;;
     *'"method":"turn/start"'*)
       turn=$((turn + 1))
@@ -98,10 +102,17 @@ done
 	if err := readOnly.Close(); err != nil {
 		t.Fatal(err)
 	}
+	writable, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyWorkspaceWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	log := readFile(t, logPath)
 	methods, texts := wire(t, log)
-	wantMethods := []string{"initialize", "initialized", "thread/start", "turn/start", "initialize", "initialized", "thread/resume", "turn/start", "initialize", "initialized", "thread/start"}
+	wantMethods := []string{"initialize", "initialized", "thread/start", "turn/start", "initialize", "initialized", "thread/resume", "turn/start", "initialize", "initialized", "thread/start", "initialize", "initialized", "thread/start"}
 	if !reflect.DeepEqual(methods, wantMethods) {
 		t.Fatalf("methods = %v, want %v", methods, wantMethods)
 	}
@@ -110,6 +121,9 @@ done
 	}
 	if !strings.Contains(log, `"approvalPolicy":"never"`) || !strings.Contains(log, `"sandbox":"read-only"`) || !strings.Contains(log, "POLICY\tread-only") {
 		t.Fatalf("read-only policy missing:\n%s", log)
+	}
+	if !strings.Contains(log, `"sandbox":"workspace-write"`) || !strings.Contains(log, "POLICY\tworkspace-write") {
+		t.Fatalf("workspace-write policy missing:\n%s", log)
 	}
 	if _, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.ExecutionPolicy("unsupported")}); err == nil {
 		t.Fatal("unsupported Codex execution policy was accepted")
@@ -131,6 +145,12 @@ func TestReadOnlyPolicyRequiresEffectiveServerConfirmation(t *testing.T) {
 	}
 	if err := validateEffectivePolicy(harness.PolicyReadOnly, "readOnly", "never"); err != nil {
 		t.Fatal(err)
+	}
+	if err := validateEffectivePolicy(harness.PolicyWorkspaceWrite, "workspaceWrite", "never"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateEffectivePolicy(harness.PolicyWorkspaceWrite, "readOnly", "never"); err == nil {
+		t.Fatal("workspace-write policy accepted a read-only response")
 	}
 }
 

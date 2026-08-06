@@ -128,6 +128,34 @@ func TestGeneratedInstructionsContainDiscordParticipationPolicy(t *testing.T) {
 	}
 }
 
+func TestWritableChannelInstructionsDoNotRequestElevationAgain(t *testing.T) {
+	root := testAgent(t)
+	if err := os.MkdirAll(filepath.Join(root, "channels"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "channels", "discord.md"), []byte("---\nmode: ambient\n---\n\nParticipate only in review work.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, harness := range []string{"claude", "codex"} {
+		p, err := project.Load(root, harness)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generated, err := filesForPolicy(p, "/opt/hctl/bin/hctl", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := "CLAUDE.md"
+		if harness == "codex" {
+			path = "AGENTS.md"
+		}
+		content := string(generated.Files[path].Content)
+		if !strings.Contains(content, "already has workspace-write access") || strings.Contains(content, "HCTL_REQUEST_WRITE_ACCESS") || strings.Contains(content, "enforced read-only") {
+			t.Fatalf("%s writable instructions are contradictory: %q", harness, content)
+		}
+	}
+}
+
 func TestSubagentEffortNativeOutput(t *testing.T) {
 	for _, effort := range []string{"", "low", "medium", "high"} {
 		label := effort

@@ -354,7 +354,11 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 	if err != nil {
 		return err
 	}
-	runtime, err := discord.New(p, driver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, Audit: stderr})
+	hctlExecutable, err := resolvedSelf(self)
+	if err != nil {
+		return err
+	}
+	runtime, err := discord.New(p, driver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, Audit: stderr, Executable: hctlExecutable})
 	if err != nil {
 		return err
 	}

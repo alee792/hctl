@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"hctl/internal/rootfs"
 )
@@ -33,6 +35,8 @@ type Conversation struct {
 	SourceFingerprint         string            `json:"source_fingerprint,omitempty"`
 	LegacyManifestFingerprint string            `json:"manifest_fingerprint,omitempty"`
 	SessionID                 string            `json:"session_id,omitempty"`
+	WorkspaceRoot             string            `json:"workspace_root,omitempty"`
+	WorktreeBranch            string            `json:"worktree_branch,omitempty"`
 	Queue                     []Input           `json:"queue"`
 	Outcomes                  map[string]string `json:"outcomes"`
 	OutcomeOrder              []string          `json:"outcome_order"`
@@ -110,6 +114,9 @@ func decode(data []byte, mode os.FileMode) (*State, error) {
 		if conversation.SourceFingerprint == "" {
 			return nil, errors.New("dispatch conversation source fingerprint is missing")
 		}
+		if (conversation.WorkspaceRoot == "") != (conversation.WorktreeBranch == "") || (conversation.WorkspaceRoot != "" && (!filepath.IsAbs(conversation.WorkspaceRoot) || filepath.Clean(conversation.WorkspaceRoot) != conversation.WorkspaceRoot || len(conversation.WorkspaceRoot) > 4096 || len(conversation.WorktreeBranch) > 255 || strings.ContainsAny(conversation.WorktreeBranch, "\x00\r\n"))) {
+			return nil, errors.New("dispatch conversation worktree assignment is invalid")
+		}
 		if conversation.Outcomes == nil {
 			conversation.Outcomes = map[string]string{}
 		}
@@ -177,6 +184,15 @@ func (s *State) GetOrCreate(agentID, harness, id, fingerprint string) (*Conversa
 // fresh native harness session. Callers must stop its dispatcher first.
 func (s *State) Reset(agentID, harness, id, fingerprint string) {
 	delete(s.Conversations, conversationKey(agentID, harness, id, fingerprint))
+}
+
+// ResetLifecycle starts a fresh native session without discarding an isolated
+// workspace already assigned to the external conversation.
+func (c *Conversation) ResetLifecycle() {
+	c.SessionID = ""
+	c.Queue = nil
+	c.Outcomes = map[string]string{}
+	c.OutcomeOrder = nil
 }
 
 func conversationKey(agentID, harness, id, fingerprint string) string {

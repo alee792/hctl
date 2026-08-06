@@ -22,6 +22,7 @@ import (
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
 	"hctl/internal/project"
+	"hctl/internal/worktree"
 )
 
 const (
@@ -46,6 +47,7 @@ type Config struct {
 	TurnTimeout time.Duration
 	IdleTimeout time.Duration
 	Audit       io.Writer
+	Executable  string
 }
 
 type pendingTurn struct {
@@ -70,6 +72,7 @@ type surface struct {
 
 type conversationManager interface {
 	Submit(context.Context, string, dispatch.Submission) (dispatch.SubmissionResult, error)
+	Elevate(context.Context, string, dispatch.Submission) (dispatch.SubmissionResult, error)
 	Status(string) dispatch.ConversationStatus
 	Reset(string) error
 	Done() <-chan struct{}
@@ -85,6 +88,7 @@ type Runtime struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	manager conversationManager
+	deliver func(string, *discordgo.MessageSend) error
 
 	mu             sync.Mutex
 	surfaces       map[string]*surface
@@ -190,10 +194,21 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 		project: p, driver: driver, config: config, session: s, ctx: ctx, cancel: cancel,
 		surfaces: map[string]*surface{}, byConversation: map[string]*surface{},
 	}
-	manager, err := dispatch.NewManagerWithIdleTimeout(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, func(conversation string, event dispatch.Event) error {
+	runtime.deliver = func(channelID string, message *discordgo.MessageSend) error {
+		_, err := s.ChannelMessageSendComplex(channelID, message)
+		return err
+	}
+	emit := func(conversation string, event dispatch.Event) error {
 		runtime.handleDispatch(conversation, event)
 		return nil
-	})
+	}
+	workspaceManager, _ := worktree.New(ctx, p, config.Executable)
+	var manager *dispatch.Manager
+	if workspaceManager != nil {
+		manager, err = dispatch.NewManagerWithWorkspace(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, emit, workspaceManager)
+	} else {
+		manager, err = dispatch.NewManagerWithIdleTimeout(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, emit)
+	}
 	if err != nil {
 		cancel()
 		return nil, err
@@ -391,24 +406,37 @@ func (r *Runtime) handleDispatch(conversation string, event dispatch.Event) {
 		r.mu.Unlock()
 		return
 	}
-	delete(current.turns, event.InputID)
 	content := strings.TrimSpace(combinedOutput(turn))
 	parts := outputParts(turn)
 	truncated := turn.truncated
+	if event.Type == "turn.completed" && suppressedControl(content) == RequestWriteAccess && !strings.HasSuffix(event.InputID, ":write") {
+		delete(current.turns, event.InputID)
+		continuationID := event.InputID + ":write"
+		current.turns[continuationID] = &pendingTurn{channelID: turn.channelID, messageID: turn.messageID}
+		r.mu.Unlock()
+		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn suppressed input_id=%s class=write_access_requested\n", event.InputID)
+		go r.continueWritable(current, continuationID)
+		return
+	}
+	delete(current.turns, event.InputID)
 	r.mu.Unlock()
 	if suppressedControl(content) == NoReply {
 		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn suppressed input_id=%s class=no_reply\n", event.InputID)
 		return
 	}
 	if suppressedControl(content) == RequestWriteAccess {
-		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn suppressed input_id=%s class=write_access_requested\n", event.InputID)
-		return
+		content = "I couldn't continue that request with write access."
+		parts = []string{content}
 	}
 	if content == "" {
 		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn empty input_id=%s class=%s\n", event.InputID, event.Type)
 		content = discordTerminalMessage(event.Type)
 		parts = []string{content}
 	}
+	r.sendTurn(event.InputID, turn, parts, truncated)
+}
+
+func (r *Runtime) sendTurn(inputID string, turn *pendingTurn, parts []string, truncated bool) {
 	chunks := responseMessages(parts, truncated)
 	for index, chunk := range chunks {
 		message := &discordgo.MessageSend{Content: chunk, AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}}
@@ -416,10 +444,29 @@ func (r *Runtime) handleDispatch(conversation string, event dispatch.Event) {
 			failIfMissing := false
 			message.Reference = &discordgo.MessageReference{MessageID: turn.messageID, ChannelID: turn.channelID, FailIfNotExists: &failIfMissing}
 		}
-		if _, err := r.session.ChannelMessageSendComplex(turn.channelID, message); err != nil {
-			_, _ = fmt.Fprintf(r.config.Audit, "Discord delivery failed input_id=%s class=uncertain\n", event.InputID)
+		if err := r.deliver(turn.channelID, message); err != nil {
+			_, _ = fmt.Fprintf(r.config.Audit, "Discord delivery failed input_id=%s class=uncertain\n", inputID)
 			return
 		}
+	}
+}
+
+func (r *Runtime) continueWritable(current *surface, inputID string) {
+	result, err := r.manager.Elevate(r.ctx, current.conversation, dispatch.Submission{InputID: inputID, Text: channelconfig.WriteContinuationPrompt})
+	if err == nil && (result.Status == "queued" || result.Status == "active") {
+		return
+	}
+	if err == nil && result.Status == "completed" {
+		r.drop(current, inputID)
+		return
+	}
+	r.mu.Lock()
+	turn := current.turns[inputID]
+	delete(current.turns, inputID)
+	r.mu.Unlock()
+	_, _ = fmt.Fprintf(r.config.Audit, "Discord elevation failed input_id=%s class=workspace_failure\n", inputID)
+	if turn != nil {
+		r.sendTurn(inputID, turn, []string{"I couldn't safely create a writable workspace for that request."}, false)
 	}
 }
 

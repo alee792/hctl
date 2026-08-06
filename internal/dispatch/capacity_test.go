@@ -194,6 +194,40 @@ func TestCapacityCoordinatorShutdownStopsWaitingAdmission(t *testing.T) {
 	}
 }
 
+func TestCapacityCoordinatorHandsOffQueuedResidentWhenWaiterArrivesBetweenTurns(t *testing.T) {
+	capacity, err := newCapacityCoordinator(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hibernateOne := make(chan struct{}, 1)
+	if err := capacity.register("one", hibernateOne); err != nil {
+		t.Fatal(err)
+	}
+	if err := capacity.register("two", make(chan struct{}, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := capacity.acquireTurn(context.Background(), "one", true); err != nil {
+		t.Fatal(err)
+	}
+	capacity.releaseTurn("one", true)
+	twoGranted := make(chan error, 1)
+	go func() { twoGranted <- capacity.acquireTurn(context.Background(), "two", true) }()
+	select {
+	case <-hibernateOne:
+	case <-time.After(time.Second):
+		t.Fatal("queued resident was not selected for between-turn handoff")
+	}
+	if err := capacity.acquireTurn(context.Background(), "one", false); !errors.Is(err, errCapacityHibernation) {
+		t.Fatalf("queued resident reacquire = %v", err)
+	}
+	capacity.releaseResident("one")
+	if err := <-twoGranted; err != nil {
+		t.Fatal(err)
+	}
+	capacity.releaseTurn("two", false)
+	capacity.releaseResident("two")
+}
+
 func waitCapacityGrant(t *testing.T, granted <-chan string) string {
 	t.Helper()
 	select {

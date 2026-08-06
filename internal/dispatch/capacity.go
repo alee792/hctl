@@ -6,6 +6,8 @@ import (
 	"sync"
 )
 
+var errCapacityHibernation = errors.New("resident session must hibernate for capacity")
+
 const (
 	DefaultMaxResidentSessions = 4
 	DefaultMaxActiveTurns      = 2
@@ -87,6 +89,10 @@ func (c *capacityCoordinator) acquireTurn(ctx context.Context, conversation stri
 		c.mu.Unlock()
 		return errors.New("managed conversation is not registered for capacity")
 	}
+	if state.hibernating && !needsResident {
+		c.mu.Unlock()
+		return errCapacityHibernation
+	}
 	if state.active || c.waitingLocked(conversation) || (!needsResident && !state.resident) {
 		c.mu.Unlock()
 		return errors.New("managed conversation capacity state is inconsistent")
@@ -151,10 +157,8 @@ func (c *capacityCoordinator) releaseTurn(conversation string, queued bool) bool
 	state.active = false
 	state.queued = queued
 	c.active--
-	if !queued {
-		c.sequence++
-		state.idleSince = c.sequence
-	}
+	c.sequence++
+	state.idleSince = c.sequence
 	if queued && c.waitingForResidentLocked() {
 		state.hibernating = true
 		return true
@@ -195,6 +199,9 @@ func (c *capacityCoordinator) scheduleLocked() {
 		}
 		if waiter.needsResident && !state.resident && c.resident >= c.residentLimit {
 			victim := c.oldestIdleLocked(waiter.conversation)
+			if victim == nil {
+				victim = c.oldestQueuedResidentLocked(waiter.conversation)
+			}
 			if victim != nil && !victim.hibernating {
 				victim.hibernating = true
 				select {
@@ -215,6 +222,19 @@ func (c *capacityCoordinator) scheduleLocked() {
 		c.waiters = c.waiters[1:]
 		waiter.grant <- struct{}{}
 	}
+}
+
+func (c *capacityCoordinator) oldestQueuedResidentLocked(exclude string) *capacityState {
+	var selected *capacityState
+	for conversation, state := range c.states {
+		if conversation == exclude || !state.resident || state.active || !state.queued || state.hibernating || c.waitingLocked(conversation) {
+			continue
+		}
+		if selected == nil || state.idleSince < selected.idleSince {
+			selected = state
+		}
+	}
+	return selected
 }
 
 func (c *capacityCoordinator) oldestIdleLocked(exclude string) *capacityState {

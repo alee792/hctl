@@ -210,6 +210,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	}()
 	defer abort()
 
+dispatchLoop:
 	for {
 		if sink.err != nil {
 			return errors.New("cannot write dispatch events")
@@ -227,6 +228,19 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			needsResident := process == nil
 			if capacity != nil {
 				if err := capacity.acquireTurn(ctx, conversationID, needsResident); err != nil {
+					if errors.Is(err, errCapacityHibernation) && process != nil {
+						if closeErr := closeHarness(process, harnessCloseTimeout, timers); closeErr != nil {
+							sink.emit(Event{Type: "driver.process_failed", SessionID: snapshot.sessionID, Status: "hibernate_failure"})
+							return closeErr
+						}
+						process = nil
+						if residentHeld {
+							capacity.releaseResident(conversationID)
+							residentHeld = false
+						}
+						sink.emit(Event{Type: "driver.process_hibernated", SessionID: snapshot.sessionID, Status: "capacity_fairness"})
+						continue dispatchLoop
+					}
 					return err
 				}
 				turnHeld = true
@@ -316,9 +330,6 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			if err != nil {
 				return err
 			}
-			if snapshot.queueLen != 0 {
-				continue
-			}
 			if err := closeHarness(process, harnessCloseTimeout, timers); err != nil {
 				sink.emit(Event{Type: "driver.process_failed", SessionID: snapshot.sessionID, Status: "hibernate_failure"})
 				return err
@@ -337,8 +348,9 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			if err != nil {
 				return err
 			}
+			hibernationStatus := "capacity_pressure"
 			if snapshot.queueLen != 0 {
-				continue
+				hibernationStatus = "capacity_fairness"
 			}
 			if err := closeHarness(process, harnessCloseTimeout, timers); err != nil {
 				sink.emit(Event{Type: "driver.process_failed", SessionID: snapshot.sessionID, Status: "hibernate_failure"})
@@ -349,7 +361,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 				capacity.releaseResident(conversationID)
 				residentHeld = false
 			}
-			sink.emit(Event{Type: "driver.process_hibernated", SessionID: snapshot.sessionID, Status: "capacity_pressure"})
+			sink.emit(Event{Type: "driver.process_hibernated", SessionID: snapshot.sessionID, Status: hibernationStatus})
 		case result, ok := <-submissions:
 			if !ok {
 				inputOpen = false

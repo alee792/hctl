@@ -19,6 +19,7 @@ import (
 	"hctl/internal/harness/codex"
 	"hctl/internal/mcp"
 	"hctl/internal/project"
+	"hctl/internal/schedule"
 	"hctl/internal/setup"
 	"hctl/internal/tool"
 )
@@ -29,6 +30,7 @@ Commands:
   apply AGENT --harness <claude|codex>    Prepare tools and native files
   gateway AGENT --harness <claude|codex>  Run a headless JSONL gateway
   channel discord AGENT [options]         Run signed Discord Interactions
+  schedule trigger AGENT NAME [options]   Run one scheduled occurrence
 
 Run "hctl <command> --help" for command details.
 `
@@ -45,11 +47,85 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 		return runGateway(args[1:], input, output, stderr)
 	case "channel":
 		return runChannel(args[1:], output, stderr)
+	case "schedule":
+		return runSchedule(args[1:], output, stderr)
 	case "mcp":
 		return runMCP(args[1:], input, output, stderr)
 	default:
-		return fmt.Errorf("unknown command %q; expected apply, gateway, or channel", args[0])
+		return fmt.Errorf("unknown command %q; expected apply, gateway, channel, or schedule", args[0])
 	}
+}
+
+func runSchedule(args []string, output, stderr io.Writer) error {
+	const usage = "Usage: hctl schedule trigger AGENT NAME [--workspace DIR] --harness <claude|codex> --input-id ID [--command PATH] [--timeout DURATION]\n"
+	if len(args) > 0 && isHelp(args[len(args)-1]) {
+		_, err := io.WriteString(output, usage)
+		return err
+	}
+	if len(args) < 3 || args[0] != "trigger" {
+		return errors.New("usage: hctl schedule trigger AGENT NAME --harness <claude|codex> --input-id ID")
+	}
+	fs := flag.NewFlagSet("schedule trigger", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	harnessName := fs.String("harness", "", "target harness")
+	workspace := fs.String("workspace", "", "target workspace (defaults to AGENT)")
+	inputID := fs.String("input-id", "", "stable id for this occurrence")
+	command := fs.String("command", "", "harness executable override")
+	timeout := fs.Duration("timeout", 2*time.Minute, "bounded trigger process lifetime")
+	if err := fs.Parse(args[3:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("unexpected schedule arguments")
+	}
+	if *timeout <= 0 || *timeout > 30*time.Minute {
+		return errors.New("--timeout must be greater than zero and at most 30m")
+	}
+	if err := gateway.ValidateInputID(*inputID); err != nil {
+		return err
+	}
+	p, err := project.Load(args[1], *harnessName, *workspace)
+	if err != nil {
+		return err
+	}
+	if err := setup.Verify(p); err != nil {
+		return err
+	}
+	driver, err := newDriver(*harnessName, *command)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	if err := driver.Verify(ctx); err != nil {
+		return err
+	}
+	result, triggerErr := schedule.Trigger(ctx, p, driver, args[2], *inputID)
+	if result.Status != "" {
+		if _, err := fmt.Fprintf(output, "schedule=%s input_id=%s status=%s duplicate=%t", result.Name, result.InputID, result.Status, result.Duplicate); err != nil {
+			return err
+		}
+		if result.SessionID != "" {
+			if _, err := fmt.Fprintf(output, " session_id=%s", result.SessionID); err != nil {
+				return err
+			}
+		}
+		if result.TurnID != "" {
+			if _, err := fmt.Fprintf(output, " turn_id=%s", result.TurnID); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(output); err != nil {
+			return err
+		}
+	}
+	if triggerErr != nil {
+		return triggerErr
+	}
+	if result.Status != "completed" {
+		return fmt.Errorf("schedule trigger ended with status %s", result.Status)
+	}
+	return nil
 }
 
 func runChannel(args []string, output, stderr io.Writer) error {

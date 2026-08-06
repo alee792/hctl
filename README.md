@@ -34,6 +34,9 @@ my-agent/
     github.md
   channels/
     discord.md
+  schedules/
+    billing/
+      sweep.md
   harnesses/
     claude/
       .claude/
@@ -90,6 +93,32 @@ MCP proxying are not part of this first connection. See the
 [minimal example](examples/minimal), [public GitHub example](examples/github),
 [Discord source example](examples/discord), and the
 [mixed-language example](spikes/polyglot-tools/fixture).
+
+A root agent may also define Markdown task schedules. The relative path is the
+schedule name, frontmatter contains one five-field `cron` string, and the body
+is the prompt:
+
+```md
+---
+cron: "0 9 * * 1-5"
+---
+
+Sweep stale billing work.
+```
+
+Apply validates and fingerprints schedules but starts no clock. Trigger one
+occurrence explicitly with a stable caller-owned ID:
+
+```sh
+hctl schedule trigger ~/agents/reviewer billing/sweep \
+  --workspace ~/Code/example --harness codex \
+  --input-id billing-sweep-2026-08-06
+```
+
+Each accepted occurrence starts a fresh native-harness session. Retrying the
+same input ID is deduplicated through the durable gateway. The command reports
+lifecycle status and discards model text; it does not register a cron job,
+install a daemon, replay missed work, or deliver output to a channel.
 
 ## Current journey
 

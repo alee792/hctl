@@ -17,30 +17,8 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### HCTL-012 — Add portable schedule source and one-shot dispatch
-
-**Settled shape:** Follow Eve's Markdown convention at
-`schedules/NESTED/NAME.md`: strict frontmatter contains only one five-field
-`cron` string and the non-empty Markdown body is the scheduled prompt. The
-relative path supplies the schedule name. Apply validates and fingerprints
-root-agent schedules but starts no clock or model. `hctl schedule trigger`
-runs one named occurrence through the existing native harness and durable
-gateway using an operator-supplied stable input ID; it reports bounded lifecycle
-status, discards model text, and performs no registration, daemon installation,
-missed-run replay, channel delivery, network request, credential use, or live
-model call in credential-free tests. TypeScript handlers, subagent schedules,
-and Eve's hosted auth/delivery runtime remain unsupported.
-
-**Decision:** Every occurrence opens a fresh native-harness task session,
-matching Eve. Repeated jobs do not silently accumulate model context, source
-changes need no context migration, and retry/uncertain semantics stay tied to
-one occurrence. A stable input ID deduplicates that occurrence without turning
-the schedule itself into a resumed conversation.
-
-**Context:** Eve's current
-[`schedules` contract](https://github.com/vercel/eve/blob/84c3dfc1ff91e075444eee7c6d8e2ef55b2aaebe/docs/schedules.mdx),
-the [product specification](../product-spec.md), and current gateway/session
-state.
+No implementation item is ready. HCTL-014 must be shaped from HCTL-012's
+observed gateway behavior before coding starts.
 
 ## Ordered next
 
@@ -59,6 +37,30 @@ completed predecessor.
    systemd, crontab, or a hosted scheduler.
 
 ## Completed
+
+### HCTL-012 — Add portable schedule source and one-shot dispatch
+
+**Outcome:** Nested `schedules/NESTED/NAME.md` files define path-named root
+tasks with strict one-field cron frontmatter and a non-empty Markdown prompt.
+Apply validates, bounds, sorts, and fingerprints them without starting a clock
+or model. `hctl schedule trigger` sends one caller-identified occurrence
+through the durable gateway, opens a fresh native-harness session for each
+accepted occurrence, clears terminal continuation state, reports bounded
+lifecycle metadata, and discards model text. Repeating the same stable input ID
+returns the retained gateway outcome without another harness turn.
+
+**Evidence:** Project tests cover nested discovery for Claude and Codex,
+fingerprint changes, source/path/frontmatter/body bounds, unsupported files,
+and symlinks. Gateway and schedule tests prove fresh sessions, bounded shared
+deduplication state, prompt submission, duplicate suppression, unknown-name
+failure, and terminal session cleanup. A literal CLI test applies a scheduled
+agent to an external workspace, invokes a fake Claude stream twice with two
+occurrence IDs, proves a duplicate starts no process, verifies neither accepted
+occurrence resumes a prior session, and proves model output is absent from CLI
+status. No clock, registration, daemon, missed-run replay, channel delivery,
+credential, network request, or live model call is present. See
+[ADR 0013](../adr/0013-run-schedules-as-fresh-gateway-tasks.md).
+`./scripts/check.sh` passes.
 
 ### HCTL-011 — Add a signed Discord Interactions channel
 

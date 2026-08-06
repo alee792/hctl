@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -119,6 +120,43 @@ func TestGatewayRunsHarnessAndStateInSelectedWorkspace(t *testing.T) {
 	}
 }
 
+func TestTaskInputsUseFreshSessionsAndDeduplicate(t *testing.T) {
+	p := testProject(t)
+	driver := &taskDriver{}
+	var events []Event
+	emit := func(event Event) error {
+		events = append(events, event)
+		return nil
+	}
+
+	for _, inputID := range []string{"occurrence-1", "occurrence-2"} {
+		if err := RunTask(context.Background(), p, driver, "schedule-daily", Submission{InputID: inputID, Text: "Run the task."}, emit); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RunTask(context.Background(), p, driver, "schedule-daily", Submission{InputID: "occurrence-2", Text: "Run the task."}, emit); err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(driver.resumed, []string{"", ""}) {
+		t.Fatalf("task session resume ids = %v", driver.resumed)
+	}
+	if !reflect.DeepEqual(driver.inputs, []string{"occurrence-1", "occurrence-2"}) {
+		t.Fatalf("task inputs = %v", driver.inputs)
+	}
+	if eventIndex(events, "input.duplicate", "occurrence-2") < 0 {
+		t.Fatalf("duplicate task input was not reported: %#v", events)
+	}
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := findConversation(state, "schedule-daily")
+	if conversation == nil || conversation.SessionID != "" || len(conversation.Outcomes) != 2 {
+		t.Fatalf("task conversation state = %#v", conversation)
+	}
+}
+
 type fakeDriver struct {
 	started    chan string
 	release    chan struct{}
@@ -157,6 +195,35 @@ func (s *fakeSession) RunTurn(_ context.Context, input harness.Input, emit func(
 }
 func (s *fakeSession) Close() error { return nil }
 func (s *fakeSession) Abort()       {}
+
+type taskDriver struct {
+	resumed []string
+	inputs  []string
+}
+
+func (d *taskDriver) Name() string                 { return "claude" }
+func (d *taskDriver) Executable() string           { return "/fake/claude" }
+func (d *taskDriver) Verify(context.Context) error { return nil }
+func (d *taskDriver) Open(_ context.Context, _ string, sessionID string) (harness.Session, error) {
+	d.resumed = append(d.resumed, sessionID)
+	return &taskSession{driver: d, sessionID: fmt.Sprintf("task-session-%d", len(d.resumed))}, nil
+}
+
+type taskSession struct {
+	driver    *taskDriver
+	sessionID string
+}
+
+func (s *taskSession) InitialEvents() []harness.Event {
+	return []harness.Event{{Type: "session.started", SessionID: s.sessionID}}
+}
+func (s *taskSession) RunTurn(_ context.Context, input harness.Input, emit func(harness.Event)) (harness.TurnResult, error) {
+	s.driver.inputs = append(s.driver.inputs, input.ID)
+	emit(harness.Event{Type: "agent.output.delta", SessionID: s.sessionID, TurnID: input.ID, Delta: "discard me"})
+	return harness.TurnResult{SessionID: s.sessionID, TurnID: input.ID, Status: "completed"}, nil
+}
+func (s *taskSession) Close() error { return nil }
+func (s *taskSession) Abort()       {}
 
 type lineOutput struct {
 	mu     sync.Mutex

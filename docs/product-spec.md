@@ -80,6 +80,9 @@ my-agent/
     github.md
   channels/
     discord.md
+  schedules/
+    billing/
+      sweep.md
   harnesses/
     claude/
       .claude/
@@ -265,6 +268,38 @@ harness responsible for the turn. It does not add a Discord Gateway bot,
 incoming webhook, bot token, OAuth, proactive sending, ordinary message or
 mention ingestion, command registration, tunnel, TLS termination, public
 listener, deployment, component, modal, typing, or interruption support.
+
+The optional root `schedules/` directory contains nested Markdown task files.
+The path beneath `schedules/`, without `.md`, is the schedule name; every path
+segment uses lowercase letters, numbers, and hyphens. At most 32 schedules are
+discovered. Each file is bounded UTF-8 Markdown whose strict YAML frontmatter
+contains exactly one string field named `cron`. The value is at most 256
+printable ASCII characters in canonical five-field form, and the non-empty
+body is the task prompt. Apply validates these files and includes their original
+bytes in the source fingerprint, but starts no clock, harness process, network
+request, or external registration.
+
+```sh
+hctl schedule trigger AGENT NAME --workspace WORKSPACE \
+  --harness claude --input-id OCCURRENCE_ID
+```
+
+One-shot dispatch requires the selected setup to be current and the operator to
+supply a stable gateway input ID. A conversation derived from the schedule name
+keeps bounded durable deduplication outcomes, while every accepted input opens
+a fresh native-harness task session without a resume ID. Terminal task state
+clears the stored native session ID; active work recovered after restart keeps
+the gateway's existing uncertain semantics and is never silently retried.
+Completed duplicate input returns the prior status without opening a harness.
+
+The command writes one bounded lifecycle line containing the schedule, input
+ID, status, duplicate flag, and runtime IDs when available. It never emits
+model text. A non-completed outcome returns a command error after the status is
+reported. This task mode performs no channel delivery, registration, daemon
+installation, missed-run replay, overlap handling, credential use, or live
+model call during credential-free tests. TypeScript schedule handlers,
+subagent schedules, and Eve's hosted auth and delivery runtime are unsupported.
+A foreground UTC clock and durable per-turn deadlines are separate follow-ups.
 
 Visible `tools/*.ts` and `tools/*.py` files each declare one tool. A visible
 `tools/NAME/tool.go` directory declares one Go tool. Filenames supply tool
@@ -510,6 +545,10 @@ The MVP is complete when credential-free tests prove:
     asynchronously accepted or rejected by the durable gateway. Accepted input
     is deduplicated and delivered through bounded responses for both harnesses
     without persisting its token or exposing a non-loopback listener.
+15. Nested Markdown schedules validate and fingerprint identically for both
+    harnesses, and a one-shot trigger deduplicates stable occurrence IDs while
+    opening a fresh native session for each accepted occurrence and discarding
+    model text.
 
 ## Explicit non-goals
 
@@ -517,8 +556,8 @@ The MVP is complete when credential-free tests prove:
 - Channels other than signed Discord Interactions, generic webhooks, and
   proactive vendor delivery
 - Claude Agent SDK or hosted OpenAI agent runtimes
-- Scheduling, workflows, independently configured nested subagents, or
-  deployment orchestration
+- Automatic schedule clocks, workflows, independently configured nested
+  subagents, or deployment orchestration
 - Building or deploying packaged agent images
 - Governance claims over native harness tools
 - Credential storage, enrollment, or backend selection before a

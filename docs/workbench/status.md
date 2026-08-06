@@ -38,6 +38,9 @@ that:
   same managed MCP server without contacting GitHub during apply;
 - discovers a bounded `channels/discord.md` description and runs one signed,
   loopback Discord Interactions adapter over the existing durable gateway;
+- discovers nested Markdown schedules, validates and fingerprints their
+  five-field cron metadata, and explicitly triggers fresh-session task
+  occurrences through the durable gateway without emitting model text;
 - drives local Claude Code and Codex processes headlessly through fake-tested
   bidirectional protocols;
 - maps conversations to resumable harness sessions, queues input FIFO,
@@ -145,15 +148,21 @@ a generated custom subagent, and session resume in a fresh external workspace.
   and expires still-pending in-memory tokens after 14 minutes without
   interrupting the harness; bot credentials and Gateway behavior remain
   deferred.
+- Root-agent Markdown schedules follow Eve's nested `schedules/` convention:
+  strict frontmatter contains one structural five-field cron string and the
+  body is the task prompt. Apply starts no clock. `hctl schedule trigger`
+  accepts a caller-owned occurrence ID, reuses bounded gateway deduplication,
+  opens a fresh native session for each accepted occurrence, reports lifecycle
+  status, and discards model text.
 
 ## Retained product horizon
 
 These are later product promises, not MVP implementation work:
 
-- Advance schedules as separate bounded slices: portable Markdown source and
-  one-shot dispatch, per-turn gateway deadlines, then a foreground local clock.
-  Completing that sequence is not permission to add live credentials, contact
-  GitHub or Discord, publish, deploy, or replace native harness behavior.
+- Advance the remaining schedule runtime as separate bounded slices: per-turn
+  gateway deadlines, then a foreground local clock. Completing that sequence
+  is not permission to add live credentials, contact GitHub or Discord,
+  publish, deploy, or replace native harness behavior.
 - Future channel adapters feed the same session-aware gateway exercised by
   local input. Network adapters verify their source before acceptance.
 - An external conversation maps to one native-harness session. Accepted input
@@ -203,10 +212,10 @@ clean-machine release archive journey is credential-free tested. Equivalent
 Claude acceptance remains. The credential-broker execution boundary is settled
 in ADR 0009; its backend and credential-owner decision remain deferred because
 the first GitHub slice is anonymous. HCTL-010 and HCTL-011 are complete.
-HCTL-012's schedule source and one-shot dispatch are shaped and Ready. Each
-occurrence uses a fresh native-harness task session, while its stable input ID
-deduplicates retries of that occurrence. Per-turn gateway deadlines and a
-foreground local clock are separate follow-ups.
+HCTL-012's schedule source and one-shot dispatch are complete. Each occurrence
+uses a fresh native-harness task session, while its stable input ID deduplicates
+retries of that occurrence. Per-turn gateway deadlines and a foreground local
+clock are separate follow-ups.
 Portable sandbox and image/runtime authoring are deferred: the native harnesses
 do not expose equivalent sandbox contracts, native lockfiles already cover
 authored-tool runtimes, and hctl does not own deployment. Do not implement

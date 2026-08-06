@@ -93,6 +93,20 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 // owns the input transport and must close submissions when it stops accepting
 // new input.
 func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error) error {
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false)
+}
+
+// RunTask drives bounded task input while opening a fresh native harness
+// session for every accepted input. Durable gateway outcomes still deduplicate
+// retries within the supplied conversation.
+func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submission Submission, emit func(Event) error) error {
+	submissions := make(chan Submission, 1)
+	submissions <- submission
+	close(submissions)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true)
+}
+
+func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool) error {
 	if !conversationName.MatchString(conversationID) {
 		return errors.New("conversation must use only letters, digits, dot, underscore, and dash")
 	}
@@ -135,6 +149,9 @@ func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 		}
 		if active == nil && len(conversation.Queue) > 0 {
 			if process == nil {
+				if freshSessions {
+					conversation.SessionID = ""
+				}
 				process, err = driver.Open(ctx, p.WorkspaceRoot, conversation.SessionID)
 				if err != nil {
 					sink.emit(Event{Type: "driver.process_failed", InputID: conversation.Queue[0].ID, SessionID: conversation.SessionID, Status: "startup_failure"})
@@ -240,17 +257,28 @@ func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 				sink.emit(Event{Type: "driver.process_failed", InputID: active.ID, SessionID: conversation.SessionID, Status: "process_failure"})
 				return message.err
 			}
+			terminalSessionID := conversation.SessionID
 			if message.result.SessionID != "" {
+				terminalSessionID = message.result.SessionID
 				conversation.SessionID = message.result.SessionID
 			}
 			if err := conversation.Complete(active.ID, message.result.Status); err != nil {
 				return err
 			}
+			if freshSessions {
+				conversation.SessionID = ""
+			}
 			if err := session.Save(p.WorkspaceRoot, state); err != nil {
 				return err
 			}
-			sink.emit(Event{Type: "turn." + message.result.Status, InputID: active.ID, SessionID: conversation.SessionID, TurnID: message.result.TurnID})
+			sink.emit(Event{Type: "turn." + message.result.Status, InputID: active.ID, SessionID: terminalSessionID, TurnID: message.result.TurnID})
 			active = nil
+			if freshSessions {
+				if err := process.Close(); err != nil {
+					return err
+				}
+				process = nil
+			}
 		}
 	}
 }
@@ -328,6 +356,13 @@ func fromHarness(event harness.Event, inputID string) Event {
 func ValidateConversation(value string) error {
 	if !conversationName.MatchString(value) {
 		return fmt.Errorf("invalid conversation %q", value)
+	}
+	return nil
+}
+
+func ValidateInputID(value string) error {
+	if !inputName.MatchString(value) {
+		return fmt.Errorf("invalid input id %q", value)
 	}
 	return nil
 }

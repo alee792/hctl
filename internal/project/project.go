@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	GeneratorVersion   = "hctl/0.8.0-dev"
+	GeneratorVersion   = "hctl/0.9.0-dev"
 	maxSourceBytes     = 128 << 10
 	maxSkills          = 8
 	maxSkillFiles      = 128
@@ -31,6 +31,8 @@ const (
 	maxHarnessBytes    = 8 << 20
 	maxConnectionBytes = 8 << 10
 	maxChannelBytes    = 8 << 10
+	maxSchedules       = 32
+	maxSchedulePrompt  = 32 << 10
 	maxSubagents       = 8
 	echoMaxInputBytes  = 1024
 )
@@ -79,6 +81,14 @@ type DiscordChannel struct {
 	Source      []byte
 }
 
+type Schedule struct {
+	Name   string
+	Cron   string
+	Prompt []byte
+	Path   string
+	Source []byte
+}
+
 type SourceRecord struct {
 	Path       string `json:"path"`
 	SHA256     string `json:"sha256"`
@@ -99,6 +109,7 @@ type Project struct {
 	HarnessFiles      []File
 	GitHubConnection  *GitHubConnection
 	DiscordChannel    *DiscordChannel
+	Schedules         []Schedule
 	Tools             tool.Inventory
 	SourceFingerprint string
 	MaxToolInput      int
@@ -160,6 +171,10 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
+	schedules, err := loadSchedules(sourceRoot)
+	if err != nil {
+		return nil, err
+	}
 	toolNames := map[string]bool{"echo": true}
 	for _, source := range tools.Sources {
 		toolNames[source.Name] = true
@@ -196,6 +211,9 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 	if discordChannel != nil {
 		sources = append(sources, SourceRecord{Path: discordChannel.Path, SHA256: rootfs.SHA256(discordChannel.Source)})
 	}
+	for _, schedule := range schedules {
+		sources = append(sources, SourceRecord{Path: schedule.Path, SHA256: rootfs.SHA256(schedule.Source)})
+	}
 	for _, file := range tools.Files {
 		sources = append(sources, SourceRecord{Path: file.Path, SHA256: file.SHA256})
 	}
@@ -225,10 +243,145 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 		HarnessFiles:      harnessFiles,
 		GitHubConnection:  githubConnection,
 		DiscordChannel:    discordChannel,
+		Schedules:         schedules,
 		Tools:             tools,
 		SourceFingerprint: fingerprint,
 		MaxToolInput:      echoMaxInputBytes,
 	}, nil
+}
+
+func loadSchedules(root string) ([]Schedule, error) {
+	directory := filepath.Join(root, "schedules")
+	info, err := os.Lstat(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return []Schedule{}, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("schedules must be a real directory")
+	}
+
+	result := []Schedule{}
+	err = filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return errors.New("cannot read schedules directory")
+		}
+		if path == directory {
+			return nil
+		}
+		if strings.HasPrefix(entry.Name(), ".") {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		entryInfo, err := os.Lstat(path)
+		if err != nil {
+			return errors.New("cannot inspect schedule source")
+		}
+		if entryInfo.Mode()&os.ModeSymlink != 0 {
+			return errors.New("schedules must not contain symlinks")
+		}
+		if entryInfo.IsDir() {
+			return nil
+		}
+		if !entryInfo.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".md" {
+			return fmt.Errorf("schedules supports Markdown files only; found %q", entry.Name())
+		}
+		if len(result) == maxSchedules {
+			return fmt.Errorf("agent may contain at most %d schedules", maxSchedules)
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return errors.New("cannot describe schedule path")
+		}
+		relative = filepath.ToSlash(relative)
+		if !utf8.ValidString(relative) {
+			return errors.New("schedule paths must be valid UTF-8")
+		}
+		if _, err := rootfs.CleanRelative(relative); err != nil {
+			return fmt.Errorf("schedule %q has an invalid path", relative)
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(relative, "schedules/"), ".md")
+		if len(name) > 128 {
+			return fmt.Errorf("schedule name %q exceeds 128 characters", name)
+		}
+		for _, part := range strings.Split(name, "/") {
+			if !portableName.MatchString(part) {
+				return fmt.Errorf("schedule path %q must use lowercase letters, numbers, and hyphens", relative)
+			}
+		}
+		source, err := rootfs.ReadSource(root, relative, maxSourceBytes)
+		if err != nil {
+			return fmt.Errorf("schedule %q: %w", name, err)
+		}
+		cron, prompt, err := parseSchedule(source)
+		if err != nil {
+			return fmt.Errorf("schedule %q: %w", name, err)
+		}
+		result = append(result, Schedule{Name: name, Cron: cron, Prompt: prompt, Path: relative, Source: source})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
+}
+
+func parseSchedule(content []byte) (string, []byte, error) {
+	if !utf8.Valid(content) {
+		return "", nil, errors.New("file must be valid UTF-8")
+	}
+	lines := bytes.Split(content, []byte("\n"))
+	if len(lines) == 0 || string(bytes.TrimSuffix(lines[0], []byte("\r"))) != "---" {
+		return "", nil, errors.New("file must start with YAML frontmatter")
+	}
+	closing := -1
+	for index := 1; index < len(lines); index++ {
+		if string(bytes.TrimSuffix(lines[index], []byte("\r"))) == "---" {
+			closing = index
+			break
+		}
+	}
+	if closing < 0 {
+		return "", nil, errors.New("frontmatter is not closed")
+	}
+	var document yaml.Node
+	decoder := yaml.NewDecoder(bytes.NewReader(bytes.Join(lines[1:closing], []byte("\n"))))
+	if err := decoder.Decode(&document); err != nil {
+		return "", nil, errors.New("frontmatter must be valid YAML")
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return "", nil, errors.New("frontmatter must contain one YAML document")
+	}
+	if err := validateYAMLTree(&document); err != nil {
+		return "", nil, fmt.Errorf("frontmatter: %w", err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode || len(document.Content[0].Content) != 2 || document.Content[0].Content[0].Value != "cron" {
+		return "", nil, errors.New("frontmatter supports one cron field only")
+	}
+	cron, err := yamlString(document.Content[0].Content[1], "cron")
+	if err != nil {
+		return "", nil, err
+	}
+	fields := strings.Fields(cron)
+	if len(cron) > 256 || len(fields) != 5 || cron != strings.Join(fields, " ") {
+		return "", nil, errors.New("frontmatter cron must be a bounded five-field string")
+	}
+	for _, character := range cron {
+		if character < 0x20 || character > 0x7e {
+			return "", nil, errors.New("frontmatter cron must contain printable ASCII")
+		}
+	}
+	prompt := strings.TrimSpace(string(bytes.Join(lines[closing+1:], []byte("\n"))))
+	if prompt == "" {
+		return "", nil, errors.New("markdown body must be non-empty")
+	}
+	if len([]byte(prompt))+1 > maxSchedulePrompt {
+		return "", nil, fmt.Errorf("markdown body exceeds %d bytes", maxSchedulePrompt)
+	}
+	return cron, []byte(prompt + "\n"), nil
 }
 
 func loadDiscordChannel(root string) (*DiscordChannel, error) {

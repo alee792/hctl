@@ -233,6 +233,83 @@ func TestLoadRejectsInvalidChannels(t *testing.T) {
 	})
 }
 
+func TestLoadDiscoversNestedSchedulesForBothHarnesses(t *testing.T) {
+	root := agent(t, "portable")
+	baseline, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "schedules", "billing", "sweep.md")
+	write(t, path, "---\ncron: \"0 9 * * 1-5\"\n---\n\nSweep stale billing work.\n")
+
+	for _, harness := range []string{"claude", "codex"} {
+		loaded, err := Load(root, harness)
+		if err != nil {
+			t.Fatalf("%s: %v", harness, err)
+		}
+		if len(loaded.Schedules) != 1 || loaded.Schedules[0].Name != "billing/sweep" || loaded.Schedules[0].Cron != "0 9 * * 1-5" || string(loaded.Schedules[0].Prompt) != "Sweep stale billing work.\n" {
+			t.Fatalf("%s schedules = %#v", harness, loaded.Schedules)
+		}
+		if loaded.SourceFingerprint == baseline.SourceFingerprint {
+			t.Fatalf("%s schedule did not join the source fingerprint", harness)
+		}
+	}
+
+	first, _ := Load(root, "claude")
+	write(t, path, "---\ncron: \"0 10 * * 1-5\"\n---\n\nSweep stale billing work.\n")
+	second, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SourceFingerprint == second.SourceFingerprint {
+		t.Fatal("schedule change did not change source fingerprint")
+	}
+}
+
+func TestLoadRejectsInvalidSchedules(t *testing.T) {
+	tests := map[string]struct {
+		path    string
+		content []byte
+		want    string
+	}{
+		"non-Markdown schedule": {"schedules/task.ts", []byte("export default {}\n"), "Markdown files only"},
+		"invalid path":          {"schedules/Daily.md", []byte("---\ncron: '* * * * *'\n---\nRun.\n"), "lowercase letters"},
+		"missing frontmatter":   {"schedules/task.md", []byte("Run.\n"), "YAML frontmatter"},
+		"unknown field":         {"schedules/task.md", []byte("---\ncron: '* * * * *'\ntimezone: UTC\n---\nRun.\n"), "one cron field only"},
+		"duplicate cron":        {"schedules/task.md", []byte("---\ncron: '* * * * *'\ncron: '0 * * * *'\n---\nRun.\n"), "duplicated"},
+		"non-string cron":       {"schedules/task.md", []byte("---\ncron: 5\n---\nRun.\n"), "must be a string"},
+		"wrong field count":     {"schedules/task.md", []byte("---\ncron: '* * * *'\n---\nRun.\n"), "five-field"},
+		"empty prompt":          {"schedules/task.md", []byte("---\ncron: '* * * * *'\n---\n"), "body must be non-empty"},
+		"oversized prompt":      {"schedules/task.md", append([]byte("---\ncron: '* * * * *'\n---\n"), bytes.Repeat([]byte("a"), (32<<10)+1)...), "body exceeds"},
+		"non-UTF-8":             {"schedules/task.md", []byte{0xff}, "valid UTF-8"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := agent(t, "portable")
+			writeBytes(t, filepath.Join(root, filepath.FromSlash(test.path)), test.content, 0o644)
+			if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("invalid schedule was not rejected with %q: %v", test.want, err)
+			}
+		})
+	}
+
+	t.Run("schedule symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		outside := filepath.Join(t.TempDir(), "task.md")
+		write(t, outside, "---\ncron: '* * * * *'\n---\nRun.\n")
+		path := filepath.Join(root, "schedules", "task.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "symlinks") {
+			t.Fatalf("schedule symlink was not rejected: %v", err)
+		}
+	})
+}
+
 func TestLoadAllowsInstructionsWithoutSkills(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "Simple Helper")
 	if err := os.Mkdir(root, 0o755); err != nil {

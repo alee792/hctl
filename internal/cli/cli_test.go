@@ -94,6 +94,74 @@ func TestApplyRejectsUnsupportedConnectionBeforeWorkspaceMutation(t *testing.T) 
 	}
 }
 
+func TestScheduleTriggerRunsFreshTaskAndDeduplicates(t *testing.T) {
+	source := t.TempDir()
+	workspace := t.TempDir()
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "schedules", "billing", "sweep.md"), "---\ncron: '0 9 * * 1-5'\n---\n\nSweep stale billing work.\n", 0o644)
+	logPath := filepath.Join(t.TempDir(), "claude.log")
+	t.Setenv("FAKE_LOG", logPath)
+	command := filepath.Join(t.TempDir(), "claude")
+	writeCLIFile(t, command, `#!/bin/sh
+if [ "${1-}" = "--version" ]; then
+  echo "2.1.221 (Claude Code)"
+  exit 0
+fi
+printf 'RUN\nARGS' >> "$FAKE_LOG"
+for arg in "$@"; do printf '\t%s' "$arg" >> "$FAKE_LOG"; done
+printf '\n' >> "$FAKE_LOG"
+IFS= read -r line || exit 1
+printf 'IN\t%s\n' "$line" >> "$FAKE_LOG"
+session_id="session-$$"
+printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session_id"
+printf '{"type":"stream_event","session_id":"%s","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"SECRET MODEL OUTPUT"}}}\n' "$session_id"
+printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"SECRET MODEL OUTPUT"}\n' "$session_id"
+`, 0o755)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"apply", source, "--workspace", workspace, "--harness", "claude", "--command", command}, strings.NewReader(""), &output, &stderr, self); err != nil {
+		t.Fatal(err)
+	}
+
+	trigger := func(inputID string) string {
+		t.Helper()
+		output.Reset()
+		stderr.Reset()
+		err := Run([]string{"schedule", "trigger", source, "billing/sweep", "--workspace", workspace, "--harness", "claude", "--input-id", inputID, "--command", command}, strings.NewReader(""), &output, &stderr, self)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(output.String(), "SECRET MODEL OUTPUT") {
+			t.Fatalf("schedule output exposed model text: %q", output.String())
+		}
+		return output.String()
+	}
+
+	if got := trigger("occurrence-1"); !strings.Contains(got, "status=completed duplicate=false") {
+		t.Fatalf("first trigger output = %q", got)
+	}
+	if got := trigger("occurrence-1"); !strings.Contains(got, "status=completed duplicate=true") {
+		t.Fatalf("duplicate trigger output = %q", got)
+	}
+	if got := trigger("occurrence-2"); !strings.Contains(got, "status=completed duplicate=false") {
+		t.Fatalf("second trigger output = %q", got)
+	}
+
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(log), "RUN\n") != 2 || strings.Contains(string(log), "--resume") {
+		t.Fatalf("schedule harness runs were not fresh and deduplicated:\n%s", log)
+	}
+	if strings.Count(string(log), "Sweep stale billing work") != 2 {
+		t.Fatalf("schedule prompt was not submitted twice:\n%s", log)
+	}
+}
+
 func writeCLIFile(t *testing.T, path, content string, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

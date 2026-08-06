@@ -22,7 +22,7 @@ files, CLI guidance, or product documentation.
 | Connection | Filesystem-authored access to an external service through managed tools. The first concrete form is a bounded description at `connections/github.md`, which registers anonymous public GitHub access; a future secret-bearing connection must use the secretless operation broker without exposing credential values to the session. |
 | Sandbox | An execution boundary that restricts code access to host resources. Process validation and timeouts alone are not a sandbox. |
 | Subagent | A specialized native harness agent delegated work by a parent. In the MVP it supplies only instructions and inherits the parent's setup; it is not an independently applied agent project. |
-| Schedule | A recurring trigger for headless agent work. |
+| Schedule | A root-agent Markdown task under `schedules/` whose path is its name, whose frontmatter contains a cron cadence, and whose body is the prompt. Apply validates it without starting a clock; one-shot dispatch opens a fresh native-harness session and discards model text. |
 | Harness | The native agent product hctl prepares and extends, initially Claude Code or Codex. The harness owns the model loop and interactive UX. |
 | Harness-specific file | A nonportable native project file authored beneath `harnesses/claude/.claude/` or `harnesses/codex/.codex/` and copied literally only for that selected harness. Hctl owns the workspace copy but does not interpret or enforce its contents. |
 | Apply | Validate an agent project and prepare the native harness files and local tool runtime needed to use it in a chosen workspace. |

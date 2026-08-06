@@ -78,6 +78,8 @@ my-agent/
       instructions.md
   connections/
     github.md
+  channels/
+    discord.md
   harnesses/
     claude/
       .claude/
@@ -193,6 +195,46 @@ dynamic MCP proxying, approval UX, and credential-broker code are deferred. Any
 secret-bearing extension must first satisfy
 [ADR 0009](adr/0009-use-a-local-secretless-operation-broker.md).
 
+The optional `channels/discord.md` file contains a 1-1024 character UTF-8
+Markdown description. Its conventional path registers the built-in `discord`
+channel; any other entry under `channels/` fails before workspace mutation.
+The file contains no application identity, user identity, public key, token,
+listener address, or vendor configuration and joins the source fingerprint for
+both harnesses. Apply performs no network request and generates no extra native
+harness file for the channel.
+
+`hctl channel discord` requires the selected project to have been applied and
+accepts one application ID, Ed25519 public key, allowed user ID, harness, and
+conversation at runtime. It binds a numeric loopback address, serves one clean
+Interactions path, and accepts Discord PING plus application commands with
+exactly one string option named `message`. It verifies the signature over the
+timestamp and raw body, rejects timestamps outside five minutes, validates the
+interaction and application IDs, and authorizes the configured user before
+submitting only the interaction ID and message text to the typed gateway seam.
+The interaction ID is the durable input ID, so the existing FIFO queue,
+deduplication, session mapping, and uncertain-recovery behavior remain
+authoritative.
+
+Accepted commands receive Discord's deferred acknowledgement after durable
+gateway acceptance and before turn completion. The adapter retains the
+short-lived interaction token only in process memory, aggregates bounded text
+deltas, and updates the fixed original-response endpoint. Further 2,000-rune
+chunks use at most seven fixed followup requests; every payload disables
+mentions. Completed, failed, and recovered-uncertain outcomes have bounded
+fallback text. Delivery has a five-second timeout, follows no redirect, reads
+at most 64 KiB of response, and never retries. A transport failure or invalid
+successful response is recorded as uncertain; an explicit rate limit or other
+non-success response is classified as rate-limited or failed without its
+response body. Audit contains only channel, input ID, and classified delivery
+outcome.
+
+This slice follows Eve's `channels/`, path-derived identity, normalized input,
+continuation, deferred-response, and followup concepts while leaving the native
+harness responsible for the turn. It does not add a Discord Gateway bot,
+incoming webhook, bot token, OAuth, proactive sending, ordinary message or
+mention ingestion, command registration, tunnel, TLS termination, public
+listener, deployment, component, modal, typing, or interruption support.
+
 Visible `tools/*.ts` and `tools/*.py` files each declare one tool. A visible
 `tools/NAME/tool.go` directory declares one Go tool. Filenames supply tool
 names, with underscores exposed as hyphens. TypeScript definitions export a
@@ -289,8 +331,11 @@ A repeated input ID is deduplicated within its conversation. After a restart,
 an input that was active but lacks a proven terminal result becomes uncertain;
 it is not silently retried.
 
-The local stdin adapter exercises the future channel seam. Slack, webhooks,
-OAuth, network listeners, and vendor delivery are outside the MVP.
+The local stdin adapter and signed Discord Interactions adapter share the same
+typed submission and event seam. The JSONL gateway remains the reference for
+durable state and event semantics. Other vendor channels, generic webhooks,
+OAuth, proactive delivery, and public listener management remain outside the
+MVP.
 
 ## Managed tool boundary
 
@@ -430,11 +475,15 @@ The MVP is complete when credential-free tests prove:
 13. Harness-specific regular files round-trip only into their selected native
     project directory, join stale-source detection, and use the same collision,
     ownership, modified-file, and cleanup protections as generated setup.
+14. A signed Discord interaction is authorized, durably accepted, deduplicated,
+    and delivered through bounded responses for both harnesses without
+    persisting its token or exposing a non-loopback listener.
 
 ## Explicit non-goals
 
 - A model loop, context manager, or cross-harness chat UI
-- Vendor channels or webhook delivery
+- Channels other than signed Discord Interactions, generic webhooks, and
+  proactive vendor delivery
 - Claude Agent SDK or hosted OpenAI agent runtimes
 - Scheduling, workflows, independently configured nested subagents, or
   deployment orchestration

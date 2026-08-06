@@ -17,6 +17,20 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
+None. Shape HCTL-012 before moving it here.
+
+## Ordered next
+
+Do not start these concurrently. Shape each item using evidence from the
+completed predecessor.
+
+1. **HCTL-012 — Schedules and sandbox/runtime conventions.** Reassess these
+   after a real connection and channel expose the runtime and deployment needs;
+   do not treat them as one implementation project unless the evidence supports
+   that shape.
+
+## Completed
+
 ### HCTL-011 — Add a signed Discord Interactions channel
 
 **Outcome:** A bounded UTF-8 description at `channels/discord.md` registers one
@@ -48,7 +62,7 @@ Discord response endpoints. The new ADR must record why that inbound
 continuation capability does not select ADR 0009's future reusable-credential
 backend; a bot token would.
 
-**Acceptance:** Credential-free tests with generated Ed25519 keys, fake
+**Evidence:** Credential-free tests with generated Ed25519 keys, fake
 harnesses, and fake Discord HTTP cover discovery/fingerprinting and invalid
 channel source for both harnesses; setup verification; safe listener/path and
 runtime identity validation; PING; valid deferred command; bad/missing/stale
@@ -66,21 +80,10 @@ and no live Discord request, credential, registration, or exposed listener.
 Discord's official
 [`Interactions` contract](https://docs.discord.com/developers/interactions/receiving-and-responding),
 [product specification](../product-spec.md), and
-[ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md). Add ADR
-0012 and update README, product specification, glossary, status, task list, and
-a minimal credential-free example.
-
-## Ordered next
-
-Do not start these concurrently. Shape each item using evidence from the
-completed predecessor.
-
-1. **HCTL-012 — Schedules and sandbox/runtime conventions.** Reassess these
-   after a real connection and channel expose the runtime and deployment needs;
-   do not treat them as one implementation project unless the evidence supports
-   that shape.
-
-## Completed
+[ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md), and
+[ADR 0012](../adr/0012-use-signed-discord-http-interactions.md). The README,
+product specification, glossary, status, task list, and credential-free example
+record the implemented contract.
 
 ### HCTL-010 — Add an anonymous public GitHub connection
 

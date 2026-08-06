@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"hctl/internal/channel/discord"
 	"hctl/internal/connection/github"
 	"hctl/internal/gateway"
 	"hctl/internal/harness"
@@ -27,6 +28,7 @@ const help = `Usage: hctl <command> [arguments]
 Commands:
   apply AGENT --harness <claude|codex>    Prepare tools and native files
   gateway AGENT --harness <claude|codex>  Run a headless JSONL gateway
+  channel discord AGENT [options]         Run signed Discord Interactions
 
 Run "hctl <command> --help" for command details.
 `
@@ -41,11 +43,72 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 		return runApply(args[1:], output, stderr, self)
 	case "gateway":
 		return runGateway(args[1:], input, output, stderr)
+	case "channel":
+		return runChannel(args[1:], output, stderr)
 	case "mcp":
 		return runMCP(args[1:], input, output, stderr)
 	default:
-		return fmt.Errorf("unknown command %q; expected apply or gateway", args[0])
+		return fmt.Errorf("unknown command %q; expected apply, gateway, or channel", args[0])
 	}
+}
+
+func runChannel(args []string, output, stderr io.Writer) error {
+	if len(args) > 0 && isHelp(args[len(args)-1]) {
+		_, err := io.WriteString(output, "Usage: hctl channel discord AGENT [--workspace DIR] --harness <claude|codex> --application-id ID --public-key HEX --allowed-user ID [--conversation ID] [--listen 127.0.0.1:PORT] [--command PATH]\n")
+		return err
+	}
+	if len(args) < 2 || args[0] != "discord" {
+		return errors.New("usage: hctl channel discord AGENT --harness <claude|codex> --application-id ID --public-key HEX --allowed-user ID")
+	}
+	fs := flag.NewFlagSet("channel discord", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	harnessName := fs.String("harness", "", "target harness")
+	workspace := fs.String("workspace", "", "target workspace (defaults to AGENT)")
+	conversation := fs.String("conversation", "discord", "stable Discord conversation id")
+	command := fs.String("command", "", "harness executable override")
+	applicationID := fs.String("application-id", "", "Discord application ID")
+	publicKeyValue := fs.String("public-key", "", "Discord Ed25519 public key")
+	allowedUser := fs.String("allowed-user", "", "only Discord user allowed to submit commands")
+	listen := fs.String("listen", discord.DefaultListen, "loopback listen address")
+	if err := fs.Parse(args[2:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("unexpected channel arguments")
+	}
+	publicKey, err := discord.ParsePublicKey(*publicKeyValue)
+	if err != nil {
+		return err
+	}
+	config := discord.Config{ApplicationID: *applicationID, AllowedUserID: *allowedUser, PublicKey: publicKey, Listen: *listen, Path: discord.DefaultPath}
+	if err := discord.ValidateRuntime(config); err != nil {
+		return err
+	}
+	if err := gateway.ValidateConversation(*conversation); err != nil {
+		return err
+	}
+	p, err := project.Load(args[1], *harnessName, *workspace)
+	if err != nil {
+		return err
+	}
+	if p.DiscordChannel == nil {
+		return errors.New("agent project does not define channels/discord.md")
+	}
+	if err := setup.Verify(p); err != nil {
+		return err
+	}
+	driver, err := newDriver(*harnessName, *command)
+	if err != nil {
+		return err
+	}
+	if err := driver.Verify(context.Background()); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(output, "starting Discord channel on http://%s%s for one %s conversation; expose it only through your own TLS endpoint\n", *listen, discord.DefaultPath, driver.Name()); err != nil {
+		return err
+	}
+	config.Audit = stderr
+	return discord.Run(context.Background(), p, driver, *conversation, config)
 }
 
 func runMCP(args []string, input io.Reader, output, stderr io.Writer) error {

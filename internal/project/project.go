@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	GeneratorVersion   = "hctl/0.7.0-dev"
+	GeneratorVersion   = "hctl/0.8.0-dev"
 	maxSourceBytes     = 128 << 10
 	maxSkills          = 8
 	maxSkillFiles      = 128
@@ -30,6 +30,7 @@ const (
 	maxHarnessFiles    = 128
 	maxHarnessBytes    = 8 << 20
 	maxConnectionBytes = 8 << 10
+	maxChannelBytes    = 8 << 10
 	maxSubagents       = 8
 	echoMaxInputBytes  = 1024
 )
@@ -72,6 +73,12 @@ type GitHubConnection struct {
 	Source      []byte
 }
 
+type DiscordChannel struct {
+	Description string
+	Path        string
+	Source      []byte
+}
+
 type SourceRecord struct {
 	Path       string `json:"path"`
 	SHA256     string `json:"sha256"`
@@ -91,6 +98,7 @@ type Project struct {
 	Subagents         []Subagent
 	HarnessFiles      []File
 	GitHubConnection  *GitHubConnection
+	DiscordChannel    *DiscordChannel
 	Tools             tool.Inventory
 	SourceFingerprint string
 	MaxToolInput      int
@@ -148,6 +156,10 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
+	discordChannel, err := loadDiscordChannel(sourceRoot)
+	if err != nil {
+		return nil, err
+	}
 	toolNames := map[string]bool{"echo": true}
 	for _, source := range tools.Sources {
 		toolNames[source.Name] = true
@@ -181,6 +193,9 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 	if githubConnection != nil {
 		sources = append(sources, SourceRecord{Path: githubConnection.Path, SHA256: rootfs.SHA256(githubConnection.Source)})
 	}
+	if discordChannel != nil {
+		sources = append(sources, SourceRecord{Path: discordChannel.Path, SHA256: rootfs.SHA256(discordChannel.Source)})
+	}
 	for _, file := range tools.Files {
 		sources = append(sources, SourceRecord{Path: file.Path, SHA256: file.SHA256})
 	}
@@ -209,10 +224,47 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 		Subagents:         subagents,
 		HarnessFiles:      harnessFiles,
 		GitHubConnection:  githubConnection,
+		DiscordChannel:    discordChannel,
 		Tools:             tools,
 		SourceFingerprint: fingerprint,
 		MaxToolInput:      echoMaxInputBytes,
 	}, nil
+}
+
+func loadDiscordChannel(root string) (*DiscordChannel, error) {
+	directory := filepath.Join(root, "channels")
+	info, err := os.Lstat(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("channels must be a real directory")
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, errors.New("cannot read channels directory")
+	}
+	for _, entry := range entries {
+		if entry.Name() != "discord.md" {
+			return nil, fmt.Errorf("channels supports discord.md only; found %q", entry.Name())
+		}
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	path := "channels/discord.md"
+	source, err := rootfs.ReadSource(root, path, maxChannelBytes)
+	if err != nil {
+		return nil, fmt.Errorf("discord channel: %w", err)
+	}
+	if !utf8.Valid(source) {
+		return nil, errors.New("discord channel description must be valid UTF-8")
+	}
+	description := strings.TrimSpace(string(source))
+	if description == "" || len([]rune(description)) > 1024 {
+		return nil, errors.New("discord channel description must contain 1-1024 characters")
+	}
+	return &DiscordChannel{Description: description, Path: path, Source: source}, nil
 }
 
 func loadGitHubConnection(root string) (*GitHubConnection, error) {

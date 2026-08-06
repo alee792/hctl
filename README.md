@@ -32,6 +32,8 @@ my-agent/
       instructions.md
   connections/
     github.md
+  channels/
+    discord.md
   harnesses/
     claude/
       .claude/
@@ -85,7 +87,8 @@ server in either harness. It exposes `github__get-repository`,
 `github__list-issues`, and `github__get-issue`; apply never contacts GitHub.
 Private repositories, credentials, writes, generic OpenAPI loading, and remote
 MCP proxying are not part of this first connection. See the
-[minimal example](examples/minimal), [public GitHub example](examples/github), and the
+[minimal example](examples/minimal), [public GitHub example](examples/github),
+[Discord source example](examples/discord), and the
 [mixed-language example](spikes/polyglot-tools/fixture).
 
 ## Current journey
@@ -116,6 +119,23 @@ Use `--harness codex` for Codex. Interactive work remains in the native
 harness. Codex loads the generated project configuration after the user trusts
 the repository on first launch. The gateway exists for headless sessions and
 future input adapters.
+
+An agent with `channels/discord.md` can accept one signed Discord application
+command through a loopback-only HTTP Interactions endpoint:
+
+```sh
+hctl channel discord ~/agents/reviewer --workspace ~/Code/example \
+  --harness codex --application-id "$DISCORD_APPLICATION_ID" \
+  --public-key "$DISCORD_PUBLIC_KEY" --allowed-user "$DISCORD_USER_ID"
+```
+
+The command accepts one string option named `message`. Hctl verifies the
+signature, application, user, and timestamp, acknowledges before the harness
+turn finishes, and edits the interaction response with bounded output. The
+listener is plain loopback HTTP; hctl does not register the command, expose a
+public endpoint, or terminate TLS. The short-lived interaction token remains
+in adapter memory and is not written to agent source, generated setup, gateway
+state, or audit output.
 
 ## Product boundary
 

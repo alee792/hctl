@@ -149,6 +149,90 @@ func TestLoadRejectsInvalidConnections(t *testing.T) {
 	})
 }
 
+func TestLoadDiscoversDiscordChannelForBothHarnesses(t *testing.T) {
+	root := agent(t, "portable")
+	baseline, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "channels", "discord.md")
+	write(t, path, "Receive signed Discord commands.\n")
+
+	for _, harness := range []string{"claude", "codex"} {
+		loaded, err := Load(root, harness)
+		if err != nil {
+			t.Fatalf("%s: %v", harness, err)
+		}
+		if loaded.DiscordChannel == nil || loaded.DiscordChannel.Description != "Receive signed Discord commands." || loaded.DiscordChannel.Path != "channels/discord.md" {
+			t.Fatalf("%s Discord channel = %#v", harness, loaded.DiscordChannel)
+		}
+		if loaded.SourceFingerprint == baseline.SourceFingerprint {
+			t.Fatalf("%s channel did not join the source fingerprint", harness)
+		}
+	}
+
+	first, _ := Load(root, "claude")
+	write(t, path, "Receive Discord commands carefully.\n")
+	second, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SourceFingerprint == second.SourceFingerprint {
+		t.Fatal("channel description change did not change source fingerprint")
+	}
+}
+
+func TestLoadRejectsInvalidChannels(t *testing.T) {
+	tests := map[string]struct {
+		path    string
+		content []byte
+		want    string
+	}{
+		"empty Discord description":     {"channels/discord.md", nil, "must contain 1-1024"},
+		"oversized Discord description": {"channels/discord.md", bytes.Repeat([]byte("a"), 1025), "must contain 1-1024"},
+		"non-UTF-8 Discord description": {"channels/discord.md", []byte{0xff}, "valid UTF-8"},
+		"unsupported file":              {"channels/slack.md", []byte("Slack.\n"), "supports discord.md only"},
+		"unsupported directory":         {"channels/discord/channel.md", []byte("Discord.\n"), "supports discord.md only"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := agent(t, "portable")
+			writeBytes(t, filepath.Join(root, filepath.FromSlash(test.path)), test.content, 0o644)
+			if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("invalid channel was not rejected with %q: %v", test.want, err)
+			}
+		})
+	}
+
+	t.Run("channel file symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		outside := filepath.Join(t.TempDir(), "discord.md")
+		write(t, outside, "Discord.\n")
+		path := filepath.Join(root, "channels", "discord.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "symlinks") {
+			t.Fatalf("channel symlink was not rejected: %v", err)
+		}
+	})
+
+	t.Run("channels directory symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		outside := t.TempDir()
+		write(t, filepath.Join(outside, "discord.md"), "Discord.\n")
+		if err := os.Symlink(outside, filepath.Join(root, "channels")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "real directory") {
+			t.Fatalf("channels directory symlink was not rejected: %v", err)
+		}
+	})
+}
+
 func TestLoadAllowsInstructionsWithoutSkills(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "Simple Helper")
 	if err := os.Mkdir(root, 0o755); err != nil {

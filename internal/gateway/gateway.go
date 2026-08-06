@@ -27,16 +27,18 @@ var (
 	inputName        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$`)
 )
 
-type inbound struct {
-	InputID string `json:"input_id"`
-	Text    string `json:"text"`
+type Submission struct {
+	InputID string                  `json:"input_id"`
+	Text    string                  `json:"text"`
+	Reply   chan<- SubmissionResult `json:"-"`
+	bytes   int
+	status  string
+	err     error
 }
 
-type readResult struct {
-	input  inbound
-	bytes  int
-	status string
-	err    error
+type SubmissionResult struct {
+	Status    string
+	Duplicate bool
 }
 
 type turnMessage struct {
@@ -61,7 +63,7 @@ type Event struct {
 }
 
 type eventSink struct {
-	encoder      *json.Encoder
+	emitEvent    func(Event) error
 	next         int
 	harness      string
 	conversation string
@@ -77,12 +79,25 @@ func (s *eventSink) emit(event Event) {
 	event.Harness = s.harness
 	event.Conversation = s.conversation
 	s.next++
-	s.err = s.encoder.Encode(event)
+	s.err = s.emitEvent(event)
 }
 
 func Run(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, input io.Reader, output io.Writer) error {
+	submissions := make(chan Submission)
+	go readInput(input, submissions)
+	encoder := json.NewEncoder(output)
+	return RunSubmissions(ctx, p, driver, conversationID, submissions, func(event Event) error { return encoder.Encode(event) })
+}
+
+// RunSubmissions drives one durable conversation from typed input. The caller
+// owns the input transport and must close submissions when it stops accepting
+// new input.
+func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error) error {
 	if !conversationName.MatchString(conversationID) {
 		return errors.New("conversation must use only letters, digits, dot, underscore, and dash")
+	}
+	if emit == nil {
+		return errors.New("gateway event receiver is required")
 	}
 	state, err := session.Load(p.WorkspaceRoot)
 	if err != nil {
@@ -92,7 +107,7 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 	if err != nil {
 		return err
 	}
-	sink := &eventSink{encoder: json.NewEncoder(output), next: 1, harness: driver.Name(), conversation: conversationID}
+	sink := &eventSink{emitEvent: emit, next: 1, harness: driver.Name(), conversation: conversationID}
 	if uncertain := conversation.RecoverUncertain(); len(uncertain) > 0 {
 		if err := session.Save(p.WorkspaceRoot, state); err != nil {
 			return err
@@ -102,8 +117,6 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 		}
 	}
 
-	reads := make(chan readResult)
-	go readInput(input, reads)
 	inputOpen := true
 	var active *session.Input
 	var process harness.Session
@@ -165,33 +178,43 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 			}
 			sink.emit(Event{Type: "driver.process_failed", SessionID: conversation.SessionID, Status: status})
 			return ctx.Err()
-		case result, ok := <-reads:
+		case result, ok := <-submissions:
 			if !ok {
 				inputOpen = false
-				reads = nil
+				submissions = nil
 				continue
 			}
 			if result.err != nil {
 				return result.err
 			}
+			if result.bytes == 0 {
+				result.bytes = len([]byte(result.Text))
+			}
+			if result.status == "" {
+				result.status = validateInput(result)
+			}
 			if result.status != "" {
-				sink.emit(Event{Type: "input.rejected", InputID: result.input.InputID, Bytes: result.bytes, Status: result.status})
+				replySubmission(ctx, result, SubmissionResult{Status: result.status})
+				sink.emit(Event{Type: "input.rejected", InputID: result.InputID, Bytes: result.bytes, Status: result.status})
 				continue
 			}
-			status, duplicate, err := conversation.Accept(result.input.InputID, result.input.Text)
+			status, duplicate, err := conversation.Accept(result.InputID, result.Text)
 			if err != nil {
-				sink.emit(Event{Type: "input.rejected", InputID: result.input.InputID, Bytes: result.bytes, Status: err.Error()})
+				replySubmission(ctx, result, SubmissionResult{Status: err.Error()})
+				sink.emit(Event{Type: "input.rejected", InputID: result.InputID, Bytes: result.bytes, Status: err.Error()})
 				continue
 			}
 			if duplicate {
-				sink.emit(Event{Type: "input.duplicate", InputID: result.input.InputID, Bytes: result.bytes, Status: status})
+				replySubmission(ctx, result, SubmissionResult{Status: status, Duplicate: true})
+				sink.emit(Event{Type: "input.duplicate", InputID: result.InputID, Bytes: result.bytes, Status: status})
 				continue
 			}
 			if err := session.Save(p.WorkspaceRoot, state); err != nil {
 				return err
 			}
-			sink.emit(Event{Type: "input.accepted", InputID: result.input.InputID, Bytes: result.bytes})
-			sink.emit(Event{Type: "turn.queued", InputID: result.input.InputID})
+			replySubmission(ctx, result, SubmissionResult{Status: status})
+			sink.emit(Event{Type: "input.accepted", InputID: result.InputID, Bytes: result.bytes})
+			sink.emit(Event{Type: "turn.queued", InputID: result.InputID})
 		case message := <-turns:
 			if active == nil {
 				return errors.New("received a harness event without an active input")
@@ -228,7 +251,17 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 	}
 }
 
-func readInput(input io.Reader, results chan<- readResult) {
+func replySubmission(ctx context.Context, submission Submission, result SubmissionResult) {
+	if submission.Reply == nil {
+		return
+	}
+	select {
+	case submission.Reply <- result:
+	case <-ctx.Done():
+	}
+}
+
+func readInput(input io.Reader, results chan<- Submission) {
 	defer close(results)
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), maxInputLine)
@@ -237,27 +270,29 @@ func readInput(input io.Reader, results chan<- readResult) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		var value inbound
+		var value Submission
 		decoder := json.NewDecoder(bytes.NewReader(line))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&value); err != nil {
-			results <- readResult{bytes: len(line), status: "invalid_json"}
+			results <- Submission{bytes: len(line), status: "invalid_json"}
 			continue
 		}
 		var extra any
 		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-			results <- readResult{input: value, bytes: len(line), status: "invalid_json"}
+			results <- Submission{InputID: value.InputID, Text: value.Text, bytes: len(line), status: "invalid_json"}
 			continue
 		}
 		status := validateInput(value)
-		results <- readResult{input: value, bytes: len([]byte(value.Text)), status: status}
+		value.bytes = len([]byte(value.Text))
+		value.status = status
+		results <- value
 	}
 	if scanner.Err() != nil {
-		results <- readResult{err: errors.New("gateway input exceeded the bounded JSONL line size")}
+		results <- Submission{err: errors.New("gateway input exceeded the bounded JSONL line size")}
 	}
 }
 
-func validateInput(value inbound) string {
+func validateInput(value Submission) string {
 	if !inputName.MatchString(value.InputID) {
 		return "invalid_input_id"
 	}

@@ -99,16 +99,27 @@ func TestAssistantMessageItemsRemainSeparate(t *testing.T) {
 }
 
 func TestNoReplyIsExact(t *testing.T) {
-	if strings.TrimSpace("  "+NoReply+"\n") != NoReply {
+	if suppressedControl("  "+NoReply+"\n") != NoReply {
 		t.Fatal("no reply control result changed")
 	}
-	if strings.TrimSpace(NoReply+" explanation") == NoReply {
+	if suppressedControl(NoReply+" explanation") != "" {
 		t.Fatal("non-exact output was suppressed")
 	}
 }
 
+func TestWriteAccessRequestIsExactAndSuppressed(t *testing.T) {
+	if suppressedControl(" \n"+RequestWriteAccess+"\t") != RequestWriteAccess {
+		t.Fatal("write access control result was not recognized")
+	}
+	for _, output := range []string{RequestWriteAccess + " because", "please " + RequestWriteAccess, "`" + RequestWriteAccess + "`"} {
+		if suppressedControl(output) != "" {
+			t.Fatalf("non-exact write access output was suppressed: %q", output)
+		}
+	}
+}
+
 func TestTypingWaitsUntilVisibleReplyIsDecided(t *testing.T) {
-	for _, output := range []string{"", "  ", "H", "HCTL_NO_", "HCTL_NO_REPLY", " \nHCTL_NO_REPLY"} {
+	for _, output := range []string{"", "  ", "H", "HCTL_NO_", "HCTL_NO_REPLY", " \nHCTL_NO_REPLY", "HCTL_REQUEST_", RequestWriteAccess} {
 		if visibleReplyDecided(output) {
 			t.Fatalf("typing started for possible no-reply output %q", output)
 		}

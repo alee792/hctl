@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"time"
 	"unicode/utf8"
 
 	"hctl/internal/connection/github"
+	"hctl/internal/harness"
 	"hctl/internal/project"
 	"hctl/internal/setup"
 	"hctl/internal/tool"
@@ -24,23 +26,44 @@ const maxLineBytes = 64 << 10
 
 var portableToolName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
-func Serve(source, workspace, harness string, input io.Reader, output, audit io.Writer) error {
-	return serve(source, workspace, harness, input, output, audit, github.NewClient(nil))
+func Serve(source, workspace, harnessName string, input io.Reader, output, audit io.Writer) error {
+	return serve(source, workspace, harnessName, input, output, audit, github.NewClient(nil))
 }
 
-func serve(source, workspace, harness string, input io.Reader, output, audit io.Writer, githubClient *github.Client) error {
-	p, err := project.Load(source, harness, workspace)
+func serve(source, workspace, harnessName string, input io.Reader, output, audit io.Writer, githubClient *github.Client) error {
+	return serveWithRuntime(source, workspace, harnessName, input, output, audit, githubClient, func(ctx context.Context, p *project.Project) (managedRuntime, error) {
+		return tool.Open(ctx, p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools)
+	})
+}
+
+type managedRuntime interface {
+	List() []tool.Definition
+	Call(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	Close()
+}
+
+type runtimeOpener func(context.Context, *project.Project) (managedRuntime, error)
+
+func serveWithRuntime(source, workspace, harnessName string, input io.Reader, output, audit io.Writer, githubClient *github.Client, openRuntime runtimeOpener) error {
+	p, err := project.Load(source, harnessName, workspace)
 	if err != nil {
 		return err
 	}
 	if err := setup.Verify(p); err != nil {
 		return err
 	}
-	runtime, err := tool.Open(context.Background(), p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools)
-	if err != nil {
-		return err
+	if os.Getenv("HCTL_EXECUTION_POLICY") != string(harness.PolicyReadOnly) {
+		opened, openErr := openRuntime(context.Background(), p)
+		if openErr != nil {
+			return openErr
+		}
+		defer opened.Close()
+		return serveRequests(p, opened, githubClient, input, output, audit)
 	}
-	defer runtime.Close()
+	return serveRequests(p, nil, githubClient, input, output, audit)
+}
+
+func serveRequests(p *project.Project, runtime managedRuntime, githubClient *github.Client, input io.Reader, output, audit io.Writer) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), maxLineBytes)
 	encoder := json.NewEncoder(output)
@@ -76,8 +99,10 @@ func serve(source, workspace, harness string, input io.Reader, output, audit io.
 			if p.GitHubConnection != nil {
 				tools = append(tools, github.Definitions(p.GitHubConnection.Description)...)
 			}
-			for _, definition := range runtime.List() {
-				tools = append(tools, definition)
+			if runtime != nil {
+				for _, definition := range runtime.List() {
+					tools = append(tools, definition)
+				}
 			}
 			writeResult(encoder, request.ID, map[string]any{"tools": tools})
 		case "tools/call":
@@ -103,7 +128,7 @@ func serve(source, workspace, harness string, input io.Reader, output, audit io.
 	return nil
 }
 
-func callManaged(p *project.Project, runtime *tool.Runtime, githubClient *github.Client, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
+func callManaged(p *project.Project, runtime managedRuntime, githubClient *github.Client, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
 	requestHash := sha256.Sum256(append(append([]byte{}, id...), params...))
 	requestID := hex.EncodeToString(requestHash[:8])
 	var call struct {
@@ -131,6 +156,8 @@ func callManaged(p *project.Project, runtime *tool.Runtime, githubClient *github
 		var err error
 		if githubTool {
 			output, err = githubClient.Call(ctx, call.Name, call.Arguments)
+		} else if runtime == nil {
+			return nil, requestID, call.Name, errors.New("managed authored tools are unavailable in a read-only channel session")
 		} else {
 			output, err = runtime.Call(ctx, call.Name, call.Arguments)
 		}

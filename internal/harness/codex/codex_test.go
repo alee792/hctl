@@ -24,6 +24,7 @@ fi
 printf 'ARGS' >> "$FAKE_LOG"
 for arg in "$@"; do printf '\t%s' "$arg" >> "$FAKE_LOG"; done
 printf '\n' >> "$FAKE_LOG"
+printf 'POLICY\t%s\n' "$HCTL_EXECUTION_POLICY" >> "$FAKE_LOG"
 turn=0
 while IFS= read -r line; do
   printf 'WIRE\t%s\n' "$line" >> "$FAKE_LOG"
@@ -33,7 +34,7 @@ while IFS= read -r line; do
       printf '{"id":%s,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.1"}}\n' "$id"
       ;;
     *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
-      printf '{"id":%s,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"}}}\n' "$id"
+      printf '{"id":%s,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"},"sandbox":{"type":"readOnly","networkAccess":false},"approvalPolicy":"never"}}\n' "$id"
       ;;
     *'"method":"turn/start"'*)
       turn=$((turn + 1))
@@ -54,7 +55,7 @@ done
 		t.Fatal(err)
 	}
 
-	session, err := driver.Open(ctx, t.TempDir(), "")
+	session, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ done
 		t.Fatal(err)
 	}
 
-	resumed, err := driver.Open(ctx, t.TempDir(), result.SessionID)
+	resumed, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), ResumeID: result.SessionID, Policy: harness.PolicyDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,14 +91,46 @@ done
 	if err := resumed.Close(); err != nil {
 		t.Fatal(err)
 	}
+	readOnly, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyReadOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := readOnly.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	methods, texts := wire(t, readFile(t, logPath))
-	wantMethods := []string{"initialize", "initialized", "thread/start", "turn/start", "initialize", "initialized", "thread/resume", "turn/start"}
+	log := readFile(t, logPath)
+	methods, texts := wire(t, log)
+	wantMethods := []string{"initialize", "initialized", "thread/start", "turn/start", "initialize", "initialized", "thread/resume", "turn/start", "initialize", "initialized", "thread/start"}
 	if !reflect.DeepEqual(methods, wantMethods) {
 		t.Fatalf("methods = %v, want %v", methods, wantMethods)
 	}
 	if !reflect.DeepEqual(texts, []string{"first", "second"}) {
 		t.Fatalf("texts = %v", texts)
+	}
+	if !strings.Contains(log, `"approvalPolicy":"never"`) || !strings.Contains(log, `"sandbox":"read-only"`) || !strings.Contains(log, "POLICY\tread-only") {
+		t.Fatalf("read-only policy missing:\n%s", log)
+	}
+	if _, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.ExecutionPolicy("unsupported")}); err == nil {
+		t.Fatal("unsupported Codex execution policy was accepted")
+	}
+}
+
+func TestReadOnlyPolicyRequiresEffectiveServerConfirmation(t *testing.T) {
+	for _, test := range []struct {
+		sandbox  string
+		approval string
+	}{
+		{sandbox: "workspaceWrite", approval: "never"},
+		{sandbox: "readOnly", approval: "on-request"},
+		{sandbox: "", approval: ""},
+	} {
+		if err := validateEffectivePolicy(harness.PolicyReadOnly, test.sandbox, test.approval); err == nil {
+			t.Fatalf("effective policy sandbox=%q approval=%q accepted", test.sandbox, test.approval)
+		}
+	}
+	if err := validateEffectivePolicy(harness.PolicyReadOnly, "readOnly", "never"); err != nil {
+		t.Fatal(err)
 	}
 }
 

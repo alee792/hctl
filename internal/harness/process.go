@@ -24,9 +24,16 @@ type Process struct {
 }
 
 func StartProcess(ctx context.Context, dir, executable string, args ...string) (*Process, error) {
+	return StartProcessWithPolicy(ctx, dir, executable, PolicyDefault, args...)
+}
+
+func StartProcessWithPolicy(ctx context.Context, dir, executable string, policy ExecutionPolicy, args ...string) (*Process, error) {
+	if policy != PolicyDefault && policy != PolicyReadOnly {
+		return nil, errors.New("unsupported harness execution policy")
+	}
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Dir = dir
-	cmd.Env = secureenv.Child()
+	cmd.Env = secureenv.With("HCTL_EXECUTION_POLICY", string(policy))
 	input, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, errors.New("cannot open harness input")

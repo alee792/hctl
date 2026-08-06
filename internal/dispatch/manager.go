@@ -364,7 +364,7 @@ func (m *Manager) run(worker *managedConversation) {
 		}
 		m.mu.Unlock()
 		return m.emit(worker.conversation, event)
-	}, false, m.turnTimeout, m.idleTimeout, m.timers, m.store)
+	}, false, m.turnTimeout, m.idleTimeout, m.timers, harness.PolicyReadOnly, m.store)
 	m.mu.Lock()
 	worker.err = err
 	close(worker.done)

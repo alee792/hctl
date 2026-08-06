@@ -50,5 +50,5 @@ conversation lifecycle without introducing a supervisor agent.
   states without paths or runtime identifiers.
 - One conversation failure still terminates the channel runtime consistently;
   recovery never silently retries ambiguous work.
-- Capacity limits, read-only execution, and writable worktrees remain separate
-  changes built through this lifecycle interface.
+- Capacity limits and writable worktrees remain separate changes built through
+  this lifecycle interface. Read-only channel execution is defined by ADR 0015.

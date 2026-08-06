@@ -25,11 +25,12 @@ import (
 )
 
 const (
-	NoReply          = "HCTL_NO_REPLY"
-	maxOutputRunes   = 6*2000 - 64
-	maxChunks        = 6
-	defaultTurnLimit = 2 * time.Minute
-	defaultIdleLimit = dispatch.DefaultIdleTimeout
+	NoReply            = channelconfig.NoReplyResult
+	RequestWriteAccess = channelconfig.RequestWriteAccessResult
+	maxOutputRunes     = 6*2000 - 64
+	maxChunks          = 6
+	defaultTurnLimit   = 2 * time.Minute
+	defaultIdleLimit   = dispatch.DefaultIdleTimeout
 )
 
 type Identity struct {
@@ -395,8 +396,12 @@ func (r *Runtime) handleDispatch(conversation string, event dispatch.Event) {
 	parts := outputParts(turn)
 	truncated := turn.truncated
 	r.mu.Unlock()
-	if content == NoReply {
+	if suppressedControl(content) == NoReply {
 		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn suppressed input_id=%s class=no_reply\n", event.InputID)
+		return
+	}
+	if suppressedControl(content) == RequestWriteAccess {
+		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn suppressed input_id=%s class=write_access_requested\n", event.InputID)
 		return
 	}
 	if content == "" {
@@ -418,6 +423,17 @@ func (r *Runtime) handleDispatch(conversation string, event dispatch.Event) {
 	}
 }
 
+func suppressedControl(output string) string {
+	switch strings.TrimSpace(output) {
+	case NoReply:
+		return NoReply
+	case RequestWriteAccess:
+		return RequestWriteAccess
+	default:
+		return ""
+	}
+}
+
 func discordTerminalMessage(eventType string) string {
 	switch eventType {
 	case "turn.failed", "driver.process_failed":
@@ -433,7 +449,15 @@ func discordTerminalMessage(eventType string) string {
 
 func visibleReplyDecided(output string) bool {
 	candidate := strings.TrimLeftFunc(output, unicode.IsSpace)
-	return candidate != "" && !strings.HasPrefix(NoReply, candidate)
+	if candidate == "" {
+		return false
+	}
+	for _, control := range []string{NoReply, RequestWriteAccess} {
+		if strings.HasPrefix(control, candidate) {
+			return false
+		}
+	}
+	return true
 }
 
 func statusMessage(agent, harnessName, surfaceKind string, status dispatch.ConversationStatus) string {

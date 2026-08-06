@@ -13,6 +13,11 @@ import (
 
 const maxConfigBytes = 64 << 10
 
+const (
+	NoReplyResult            = "HCTL_NO_REPLY"
+	RequestWriteAccessResult = "HCTL_REQUEST_WRITE_ACCESS"
+)
+
 var profileName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 type Config struct {

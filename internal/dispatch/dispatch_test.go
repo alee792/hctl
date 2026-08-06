@@ -112,6 +112,9 @@ func TestDispatcherRunsHarnessAndStateInSelectedWorkspace(t *testing.T) {
 	if driver.openedRoot != p.WorkspaceRoot {
 		t.Fatalf("harness opened in %q, want workspace %q", driver.openedRoot, p.WorkspaceRoot)
 	}
+	if driver.policy != harness.PolicyDefault {
+		t.Fatalf("JSONL execution policy = %q", driver.policy)
+	}
 	if _, err := os.Stat(filepath.Join(p.WorkspaceRoot, ".hctl", "dispatch.json")); err != nil {
 		t.Fatalf("workspace state missing: %v", err)
 	}
@@ -158,6 +161,9 @@ func TestTaskInputsUseFreshSessionsAndDeduplicate(t *testing.T) {
 	if !reflect.DeepEqual(driver.inputs, []string{"occurrence-1", "occurrence-2"}) {
 		t.Fatalf("task inputs = %v", driver.inputs)
 	}
+	if !reflect.DeepEqual(driver.policies, []harness.ExecutionPolicy{harness.PolicyDefault, harness.PolicyDefault}) {
+		t.Fatalf("task execution policies = %v", driver.policies)
+	}
 	if eventIndex(events, "input.duplicate", "occurrence-2") < 0 {
 		t.Fatalf("duplicate task input was not reported: %#v", events)
 	}
@@ -176,14 +182,16 @@ type fakeDriver struct {
 	release    chan struct{}
 	inputs     []string
 	openedRoot string
+	policy     harness.ExecutionPolicy
 	mu         sync.Mutex
 }
 
 func (d *fakeDriver) Name() string                 { return "claude" }
 func (d *fakeDriver) Executable() string           { return "/fake/claude" }
 func (d *fakeDriver) Verify(context.Context) error { return nil }
-func (d *fakeDriver) Open(_ context.Context, root, _ string) (harness.Session, error) {
-	d.openedRoot = root
+func (d *fakeDriver) Open(_ context.Context, request harness.OpenRequest) (harness.Session, error) {
+	d.openedRoot = request.Root
+	d.policy = request.Policy
 	return &fakeSession{driver: d}, nil
 }
 
@@ -211,15 +219,17 @@ func (s *fakeSession) Close() error { return nil }
 func (s *fakeSession) Abort()       {}
 
 type taskDriver struct {
-	resumed []string
-	inputs  []string
+	resumed  []string
+	inputs   []string
+	policies []harness.ExecutionPolicy
 }
 
 func (d *taskDriver) Name() string                 { return "claude" }
 func (d *taskDriver) Executable() string           { return "/fake/claude" }
 func (d *taskDriver) Verify(context.Context) error { return nil }
-func (d *taskDriver) Open(_ context.Context, _ string, sessionID string) (harness.Session, error) {
-	d.resumed = append(d.resumed, sessionID)
+func (d *taskDriver) Open(_ context.Context, request harness.OpenRequest) (harness.Session, error) {
+	d.resumed = append(d.resumed, request.ResumeID)
+	d.policies = append(d.policies, request.Policy)
 	return &taskSession{driver: d, sessionID: fmt.Sprintf("task-session-%d", len(d.resumed))}, nil
 }
 

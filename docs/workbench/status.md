@@ -133,6 +133,12 @@ a generated custom subagent, and session resume in a fresh external workspace.
   repository and issue operations through hctl's existing managed MCP server.
   It deliberately adds no credential, broker, generic OpenAPI runtime, or
   remote MCP proxy.
+- The first Discord channel slice uses Eve's `channels/` and normalized-input
+  precedent with Discord's signed HTTP Interactions transport. A bounded
+  `channels/discord.md` description enables one loopback runner for one
+  configured application, user, conversation, and harness session. It defers
+  signed commands immediately and consumes the short-lived response token only
+  for bounded delivery; bot credentials and Gateway behavior remain deferred.
 
 ## Retained product horizon
 
@@ -197,8 +203,9 @@ The Codex native journey has live evidence, and the `darwin-arm64`
 clean-machine release archive journey is credential-free tested. Equivalent
 Claude acceptance remains. The credential-broker execution boundary is settled
 in ADR 0009; its backend and credential-owner decision remain deferred because
-the first GitHub slice is anonymous. HCTL-010 is complete; shape the Discord
-channel next, with remaining ordered conventions behind it. Do not implement
+the first GitHub slice is anonymous. HCTL-010 is complete and HCTL-011 is shaped
+and Ready; schedules and sandbox/runtime conventions remain behind the Discord
+slice. Do not implement
 proposal capture, image deployment, or broker code merely to exercise future
 seams.
 

@@ -17,19 +17,65 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-None. Shape HCTL-011 before moving it here.
+### HCTL-011 — Add a signed Discord Interactions channel
+
+**Outcome:** A bounded UTF-8 description at `channels/discord.md` registers one
+built-in Discord channel. `hctl channel discord` runs one loopback HTTP
+Interactions adapter for one selected harness and hctl conversation. It verifies
+Discord's Ed25519 signature and bounded timestamp, authorizes one configured
+application and user, maps the interaction ID to the existing durable gateway
+input ID, acknowledges immediately, then delivers bounded turn output through
+Discord's interaction response token.
+
+**Boundaries:** Follow Eve's `channels/`, path-derived identity, normalized
+input, continuation ownership, deferred response, and followup precedent. Use
+Discord HTTP Interactions, not a Gateway bot or incoming webhook. No bot token,
+OAuth, proactive sending, ordinary message/mention ingestion, command
+registration, tunnel, TLS termination, public listener, deployment, component,
+modal, typing, or interruption support is part of this slice. Bind loopback by
+default and require explicit application ID, public key, and one allowed user
+at runtime; none belong in agent source or generated harness files. Apply makes
+no network request.
+
+Refactor the gateway only enough to expose typed submission and events while
+keeping JSONL as its existing adapter and persistence authoritative. One channel
+process owns one conversation and one harness session; do not add concurrent
+multi-conversation state mutation. Accept PING and one application-command
+string option named `message`. Never pass the raw request, signature,
+interaction token, or reusable Discord context to the model, state, logs, or
+audit. Consume the short-lived interaction token in memory only against fixed
+Discord response endpoints. The new ADR must record why that inbound
+continuation capability does not select ADR 0009's future reusable-credential
+backend; a bot token would.
+
+**Acceptance:** Credential-free tests with generated Ed25519 keys, fake
+harnesses, and fake Discord HTTP cover discovery/fingerprinting and invalid
+channel source for both harnesses; setup verification; safe listener/path and
+runtime identity validation; PING; valid deferred command; bad/missing/stale
+signature; wrong application; unauthorized user; bounded `message`; immediate
+acknowledgement before a blocked turn; interaction-ID deduplication; FIFO input
+while active; completion/failure/uncertain delivery; 2,000-character splitting
+with bounded followups and disabled mentions; rate limits; timeouts, redirects,
+response bounds, and ambiguous-delivery behavior; content-free state/log/audit;
+and no live Discord request, credential, registration, or exposed listener.
+`./scripts/check.sh` passes.
+
+**Context:** Eve's current
+[`channels` contract](https://github.com/vercel/eve/blob/84c3dfc1ff91e075444eee7c6d8e2ef55b2aaebe/docs/channels/overview.mdx),
+[`Discord` adapter](https://github.com/vercel/eve/blob/84c3dfc1ff91e075444eee7c6d8e2ef55b2aaebe/docs/channels/discord.mdx),
+Discord's official
+[`Interactions` contract](https://docs.discord.com/developers/interactions/receiving-and-responding),
+[product specification](../product-spec.md), and
+[ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md). Add ADR
+0012 and update README, product specification, glossary, status, task list, and
+a minimal credential-free example.
 
 ## Ordered next
 
 Do not start these concurrently. Shape each item using evidence from the
 completed predecessor.
 
-1. **HCTL-011 — Discord channel.** Inspect Eve's then-current channel
-   filesystem convention and interface, then connect Discord to hctl's
-   session-aware gateway with authenticated, deduplicated input and bounded
-   outbound delivery. No live bot, webhook, listener, or Discord action is
-   authorized by this queue entry.
-2. **HCTL-012 — Schedules and sandbox/runtime conventions.** Reassess these
+1. **HCTL-012 — Schedules and sandbox/runtime conventions.** Reassess these
    after a real connection and channel expose the runtime and deployment needs;
    do not treat them as one implementation project unless the evidence supports
    that shape.

@@ -95,23 +95,40 @@ See [the vision](docs/vision.md), [product specification](docs/product-spec.md),
 [glossary](docs/glossary.md), [current working status](docs/workbench/status.md),
 and [architecture decisions](docs/adr/).
 
-## First install contract
+## Install on Apple silicon
 
-The first supported distribution is `darwin-arm64` only: the exact `vX.Y.Z` Git
-tag names `hctl_X.Y.Z_darwin_arm64.tar.gz`, which contains `hctl` at its archive
-root, plus `hctl_X.Y.Z_SHA256SUMS`. Download the exact release, verify its
-checksum, extract the executable to a stable location on `PATH`, then apply an
-agent source to the chosen workspace. The generated MCP setup records that
-executable's absolute resolved path, so moving it requires `hctl apply` again.
-Replacing the binary at that same path keeps the reference valid, but the
-supported upgrade journey reruns `apply` to refresh any runtime cache.
+The first supported distribution is `darwin-arm64` only. From the release page
+for the exact `vX.Y.Z` tag, download only these two matching files:
+
+```text
+hctl_X.Y.Z_darwin_arm64.tar.gz
+hctl_X.Y.Z_SHA256SUMS
+```
+
+Verify and install them with the macOS-native tools (replace `X.Y.Z` with the
+same version in both filenames):
+
+```sh
+cd ~/Downloads
+shasum -a 256 -c hctl_X.Y.Z_SHA256SUMS
+mkdir -p "$HOME/.local/bin"
+tar -xzf hctl_X.Y.Z_darwin_arm64.tar.gz -C "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
+hctl apply ~/agents/reviewer --workspace ~/Code/example --harness codex
+cd ~/Code/example && codex
+```
+
+Keep the executable at that stable path: generated MCP setup records its
+resolved absolute path, so moving it requires `hctl apply` again. Replacing the
+binary in place keeps the reference valid, but the supported upgrade journey
+reruns `apply` to refresh any runtime cache. Keep the agent source and its
+native lockfiles on each machine; install its required native runtimes and rerun
+`apply` rather than copying `.hctl/cache/`.
 
 `go install` is not a supported end-user installation path in the first
 release: it requires a Go toolchain and source/module resolution rather than
 using the released, checked artifact. A `hctl package` command is also not part
-of this contract. On each machine, retain the agent source and its lockfiles,
-install the native runtimes required by its authored tools, and run `apply` to
-rebuild the workspace-local disposable cache.
+of this contract.
 
 ## Development
 

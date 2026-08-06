@@ -21,6 +21,9 @@ assert_contains() {
 if [ ! -x "$go" ]; then
   fail "repository-local Go is missing; run ./scripts/bootstrap-tools.sh"
 fi
+if ! command -v deno >/dev/null 2>&1 || ! command -v uv >/dev/null 2>&1; then
+  fail "Deno and uv are required for the successful polyglot rerun"
+fi
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/hctl-clean-install.XXXXXX")
 scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
@@ -29,15 +32,23 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+release_source="$scratch/release-source"
+first_release_output="$scratch/release-first"
+second_release_output="$scratch/release-second"
 install_prefix="$scratch/prefix"
 fake_bin="$scratch/fake-bin"
 workspace="$scratch/workspace"
 agent_source="$scratch/minimal"
+missing_runtime_agent_source="$scratch/polyglot-agent"
 missing_runtime_workspace="$scratch/missing-runtime-workspace"
 installed_hctl="$install_prefix/bin/hctl"
 fake_codex="$fake_bin/codex"
 mkdir -p "$install_prefix/bin" "$fake_bin" "$workspace" "$agent_source" "$missing_runtime_workspace"
 cp -R "$repo_root/examples/minimal/." "$agent_source"
+cp -R "$repo_root/spikes/polyglot-tools/fixture/." "$missing_runtime_agent_source"
+git clone -q --no-local "$repo_root" "$release_source"
+git -C "$release_source" tag v0.0.0
+git -C "$release_source" checkout -q --detach v0.0.0
 
 printf '%s\n' \
   '#!/bin/sh' \
@@ -49,13 +60,57 @@ printf '%s\n' \
   'exit 64' >"$fake_codex"
 chmod 755 "$fake_codex"
 
+assert_dirty_source_rejected() {
+  set +e
+  (
+    cd "$release_source"
+    PATH="$tools_root/go/bin:$PATH" ./scripts/build-release-archive.sh --output "$scratch/dirty-release"
+  ) >"$scratch/dirty.out" 2>&1
+  dirty_status=$?
+  set -e
+  [ "$dirty_status" -ne 0 ] || fail "release builder accepted a dirty source"
+  assert_contains "$scratch/dirty.out" "release archive requires a clean tagged source"
+}
+
+printf '%s\n' "tracked change" >>"$release_source/README.md"
+assert_dirty_source_rejected
+git -C "$release_source" checkout -q -- README.md
+printf '%s\n' "staged change" >>"$release_source/README.md"
+git -C "$release_source" add README.md
+assert_dirty_source_rejected
+git -C "$release_source" reset -q --hard HEAD
+touch "$release_source/untracked"
+assert_dirty_source_rejected
+rm "$release_source/untracked"
+
+build_archive() {
+  output=$1
+  (
+    cd "$release_source"
+    GOCACHE="$scratch/go-build-cache" \
+      GOMODCACHE="$tools_root/cache/mod" \
+      GOTOOLCHAIN=local \
+      PATH="$tools_root/go/bin:$PATH" \
+      ./scripts/build-release-archive.sh --output "$output"
+  )
+}
+
+build_archive "$first_release_output"
+build_archive "$second_release_output"
+archive="$first_release_output/hctl_0.0.0_darwin_arm64.tar.gz"
+checksums="$first_release_output/hctl_0.0.0_SHA256SUMS"
+second_archive="$second_release_output/hctl_0.0.0_darwin_arm64.tar.gz"
+second_checksums="$second_release_output/hctl_0.0.0_SHA256SUMS"
+cmp -s "$archive" "$second_archive" || fail "two builds of the same tag produced different archives"
+cmp -s "$checksums" "$second_checksums" || fail "two builds of the same tag produced different checksums"
+assert_file "$archive"
+assert_file "$checksums"
+assert_contains "$checksums" "hctl_0.0.0_darwin_arm64.tar.gz"
 (
-  cd "$repo_root"
-  GOCACHE="$scratch/go-build-cache" \
-    GOMODCACHE="$tools_root/cache/mod" \
-    GOTOOLCHAIN=local \
-    "$go" build -mod=readonly -o "$installed_hctl" ./cmd/hctl
+  cd "$first_release_output"
+  shasum -a 256 -c "$(basename "$checksums")"
 )
+tar -xzf "$archive" -C "$install_prefix/bin"
 assert_file "$installed_hctl"
 
 apply_output="$scratch/apply.out"
@@ -101,9 +156,10 @@ assert_contains "$mcp_output" '"name":"hctl-managed"'
 assert_contains "$mcp_output" '"name":"echo"'
 
 missing_runtime_output="$scratch/missing-runtime.out"
+[ ! -e "$missing_runtime_workspace/.hctl/cache" ] || fail "fresh workspace started with a runtime cache"
 set +e
 PATH="$fake_bin" "$installed_hctl" apply \
-  "$repo_root/spikes/polyglot-tools/fixture" \
+  "$missing_runtime_agent_source" \
   --workspace "$missing_runtime_workspace" \
   --harness codex \
   --command "$fake_codex" \
@@ -112,10 +168,31 @@ missing_runtime_status=$?
 set -e
 [ "$missing_runtime_status" -ne 0 ] || fail "apply succeeded without the authored TypeScript runtime"
 assert_contains "$missing_runtime_output" "hctl: deno is required for authored tools"
+[ -f "$missing_runtime_agent_source/deno.lock" ] || fail "fresh agent source lost deno.lock"
+[ -f "$missing_runtime_agent_source/uv.lock" ] || fail "fresh agent source lost uv.lock"
+[ -f "$missing_runtime_agent_source/go.mod" ] || fail "fresh agent source lost go.mod"
+[ ! -e "$missing_runtime_agent_source/.hctl/cache" ] || fail "agent source received a runtime cache"
 [ ! -e "$missing_runtime_workspace/AGENTS.md" ] || fail "failed apply wrote native instructions"
 [ ! -e "$missing_runtime_workspace/.codex/config.toml" ] || fail "failed apply wrote native MCP configuration"
 
-printf '%s\n' "PASS built with $($go version) into an isolated install prefix"
+PATH="$fake_bin:$tools_root/go/bin:$(dirname "$(command -v deno)"):$(dirname "$(command -v uv)"):/usr/bin:/bin" "$installed_hctl" apply \
+  "$missing_runtime_agent_source" \
+  --workspace "$missing_runtime_workspace" \
+  --harness codex \
+  --command "$fake_codex" \
+  >"$scratch/successful-runtime.out" 2>&1
+assert_file "$missing_runtime_workspace/AGENTS.md"
+assert_file "$missing_runtime_workspace/.codex/config.toml"
+assert_file "$missing_runtime_workspace/.hctl/apply/codex.json"
+assert_file "$missing_runtime_workspace/.hctl/cache/tools"/*/typescript.ts
+assert_file "$missing_runtime_workspace/.hctl/cache/tools"/*/python.py
+assert_file "$missing_runtime_workspace/.hctl/cache/tools"/*/go/host
+assert_file "$missing_runtime_workspace/.hctl/cache/tools"/*/executables.json
+
+printf '%s\n' "PASS built and checksum-verified a darwin-arm64 release archive with $($go version)"
+printf '%s\n' "PASS dirty tracked, staged, and untracked tagged sources were rejected"
+printf '%s\n' "PASS two builds of the same tag produced identical archive and checksum bytes"
 printf '%s\n' "PASS applied an unrelated copied agent source with fake Codex and installed MCP command"
 printf '%s\n' "PASS the installed managed MCP server verified setup and listed echo"
 printf '%s\n' "PASS missing authored-tool runtime failed clearly before native setup"
+printf '%s\n' "PASS fresh source kept native lockfiles and successful apply rebuilt its local cache"

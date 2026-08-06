@@ -52,11 +52,15 @@ as a pinned, attributed portable import. Its independent Standards and Spec
 reviews layer beside the existing hctl-specific review skills.
 
 The [credential-free clean-install check](../../spikes/clean-install/README.md)
-builds a fresh hctl binary with the pinned repository Go toolchain into a
-disposable install prefix, copies a minimal agent source outside the checkout,
-applies it to a fresh workspace with fake Codex, verifies that the native MCP
-setup names that installed binary, starts that MCP server, and proves a missing
-authored-tool runtime fails clearly before native setup is written.
+creates a disposable exact-tagged `darwin-arm64` release archive, verifies its
+checksum, extracts it into an isolated install prefix, copies a minimal agent
+source outside the checkout, applies it to a fresh workspace with fake Codex,
+verifies that the native MCP setup names that installed binary, starts that MCP
+server, and proves a missing authored-tool runtime fails clearly before native
+setup is written. It rejects dirty tagged source states, proves archive and
+checksum bytes are reproducible across two builds, and successfully rebuilds a
+fresh external polyglot workspace cache from source and its lockfiles. It does
+not publish or deploy anything.
 
 A [live Codex acceptance pass](codex-live-acceptance.md) on CLI 0.144.1 also
 proved native instruction and skill discovery, all three authored-tool hosts,
@@ -138,9 +142,10 @@ The authored-tool questions are enumerated in the
 [tool-authoring workbench](tool-authoring.md#remaining-questions). The main unresolved
 areas are whether a future helper package should wrap the intentionally small
 structural source APIs, graceful per-call cancellation and host restart,
-concurrent calls, richer local imports, and cache cleanup. HCTL-001 selected a
-versioned release archive for first installation; it deliberately leaves a
-relocatable package command out until a concrete need demonstrates one.
+concurrent calls, richer local imports, and cache cleanup. HCTL-001 selected
+and HCTL-002 implemented a versioned `darwin-arm64` release archive for first
+installation; it deliberately leaves a relocatable package command out until a
+concrete need demonstrates one.
 
 Product naming, the concrete credential-broker backend, proposal storage and
 review UX, and specific vendor channel adapters are also intentionally
@@ -151,10 +156,11 @@ unresolved. Do not infer answers from the current prototype.
 Portable source, independent workspaces, authored tools, native inherited
 subagents, and the Agent Skills compatibility contract are implemented and
 exercised through generated Claude and Codex configurations. The Codex native
-journey has live evidence; equivalent Claude acceptance and clean-machine
-packaging remain. The next product decision is packaging, proposal capture,
-credential brokering, or another vision item. Do not add channels or image
-deployment merely to exercise those future seams.
+journey has live evidence, and the `darwin-arm64` clean-machine release archive
+journey is credential-free tested. Equivalent Claude acceptance remains. The
+next product decision is proposal capture, credential brokering, or another
+vision item. Do not add channels or image deployment merely to exercise those
+future seams.
 
 The [maintainer task list](tasks.md) turns that frontier into a prioritized,
 permission-aware queue. It is the source for agent assignments; this section

@@ -17,6 +17,10 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
+No task is ready without further direction.
+
+## Completed
+
 ### HCTL-002 — Implement the accepted install journey
 
 **Outcome:** Implement the accepted release-archive contract without
@@ -26,6 +30,16 @@ root-level `hctl` executable and `hctl_X.Y.Z_SHA256SUMS` containing its SHA-256
 checksum. Document the exact download, verification, extraction, `PATH`, and
 `apply` journey. Do not add `hctl package`, bundle agent source, tool runtimes,
 workspace cache output, or another platform.
+
+**Evidence:** A credential-free check builds the exact-tagged `darwin-arm64`
+release archive, verifies its checksum, extracts it into an isolated prefix,
+then uses only that extracted executable to apply an agent source and workspace
+outside the checkout and start its generated managed MCP server. It also proves
+the generated configuration records the resolved installed executable, required
+language runtimes fail before native setup is written, and source plus lockfiles
+are retained while a successful fresh apply rebuilds `.hctl/cache/`. The builder
+rejects dirty tagged source and emits reproducible archive and checksum bytes.
+No publication or deployment occurred.
 
 **Acceptance:** A credential-free check builds and extracts the release-shaped
 archive into an isolated prefix, uses only that extracted executable to apply
@@ -39,8 +53,6 @@ without explicit human authorization.
 **Context:** [ADR 0007](../adr/0007-first-install-release-archive.md),
 [product specification](../product-spec.md#initial-installation), and the
 [clean-install proof](../../spikes/clean-install/README.md).
-
-## Completed
 
 ### HCTL-001 — Choose the first install and packaging contract
 

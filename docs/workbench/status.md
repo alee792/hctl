@@ -46,6 +46,10 @@ The proof keeps mixed-language agent source separate from its workspace,
 validates generated subagent files for both harnesses, and switches the
 workspace safely to a second agent.
 
+The maintainer agent includes Matt Pocock's MIT-licensed `code-review` skill
+as a pinned, attributed portable import. Its independent Standards and Spec
+reviews layer beside the existing hctl-specific review skills.
+
 The [credential-free clean-install check](../../spikes/clean-install/README.md)
 builds a fresh hctl binary with the pinned repository Go toolchain into a
 disposable install prefix, applies the minimal example to a fresh workspace

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -201,6 +202,51 @@ Use echo.
 			t.Fatalf("Codex OpenAI diagnostics = %#v", generated.Diagnostics)
 		}
 	})
+}
+
+func TestMaintainerCodeReviewSkillProjectsWithProvenance(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate repository source")
+	}
+	agentRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", "agents", "maintainer"))
+	provenance := read(t, filepath.Join(agentRoot, "skills", "code-review", "UPSTREAM.md"))
+	for _, text := range []string{
+		"https://github.com/mattpocock/skills",
+		"8b36d4fb2635b3c21998dcd8144439c9e5ba7302",
+		"MIT License",
+		"Copyright (c) 2026 Matt Pocock",
+	} {
+		if !strings.Contains(provenance, text) {
+			t.Fatalf("code-review provenance is missing %q", text)
+		}
+	}
+
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			workspace := t.TempDir()
+			p, err := project.Load(agentRoot, harness, workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Apply(p, "/opt/hctl/bin/hctl"); err != nil {
+				t.Fatal(err)
+			}
+			prefix := ".claude/skills"
+			if harness == "codex" {
+				prefix = ".agents/skills"
+			}
+			generatedSkill := read(t, filepath.Join(workspace, filepath.FromSlash(prefix), "code-review", "SKILL.md"))
+			for _, text := range []string{"## Standards", "## Spec", "### 4. Spawn both sub-agents in parallel"} {
+				if !strings.Contains(generatedSkill, text) {
+					t.Fatalf("generated %s code-review skill is missing %q", harness, text)
+				}
+			}
+			if got := read(t, filepath.Join(workspace, filepath.FromSlash(prefix), "code-review", "UPSTREAM.md")); got != provenance {
+				t.Fatalf("generated %s provenance changed during apply", harness)
+			}
+		})
+	}
 }
 
 func TestGeneratedSkillMarkerHandlesYAMLContentAndCRLF(t *testing.T) {

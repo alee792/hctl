@@ -17,17 +17,52 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-None. Shape HCTL-012 before moving it here.
+None. HCTL-012 needs one product decision before implementation.
+
+## Needs direction
+
+### HCTL-012 — Add portable schedule source and one-shot dispatch
+
+**Settled shape:** Follow Eve's Markdown convention at
+`schedules/NESTED/NAME.md`: strict frontmatter contains only one five-field
+`cron` string and the non-empty Markdown body is the scheduled prompt. The
+relative path supplies the schedule name. Apply validates and fingerprints
+root-agent schedules but starts no clock or model. `hctl schedule trigger`
+runs one named occurrence through the existing native harness and durable
+gateway using an operator-supplied stable input ID; it reports bounded lifecycle
+status, discards model text, and performs no registration, daemon installation,
+missed-run replay, channel delivery, network request, credential use, or live
+model call in credential-free tests. TypeScript handlers, subagent schedules,
+and Eve's hosted auth/delivery runtime remain unsupported.
+
+**Decision needed:** Should every occurrence open a fresh native-harness task
+session, matching Eve, or resume one durable conversation per schedule?
+Recommend **fresh task sessions**: repeated jobs do not silently accumulate
+model context, source changes need no context migration, and retry/uncertain
+semantics stay tied to one occurrence. A resumed schedule is more stateful but
+would make prior executions hidden input to every later run.
+
+**Context:** Eve's current
+[`schedules` contract](https://github.com/vercel/eve/blob/84c3dfc1ff91e075444eee7c6d8e2ef55b2aaebe/docs/schedules.mdx),
+the [product specification](../product-spec.md), and current gateway/session
+state. No implementation is authorized until the occurrence-session decision
+is recorded.
 
 ## Ordered next
 
 Do not start these concurrently. Shape each item using evidence from the
 completed predecessor.
 
-1. **HCTL-012 — Schedules and sandbox/runtime conventions.** Reassess these
-   after a real connection and channel expose the runtime and deployment needs;
-   do not treat them as one implementation project unless the evidence supports
-   that shape.
+1. **HCTL-014 — Add per-turn gateway deadlines.** Shape an operator runtime
+   deadline at the gateway/session seam after HCTL-012. It must persist timeout
+   as uncertain, abort the affected native process, and state whether later
+   queued input can safely reopen a session. Do not put deployment policy in
+   portable agent source.
+2. **HCTL-015 — Add a foreground local schedule clock.** After one-shot
+   dispatch and turn deadlines are proven, assess a foreground UTC five-field
+   cron runner that reuses the same trigger path, does no downtime backfill,
+   and skips overlapping occurrences. Do not install or mutate launchd,
+   systemd, crontab, or a hosted scheduler.
 
 ## Completed
 

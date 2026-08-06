@@ -150,11 +150,10 @@ a generated custom subagent, and session resume in a fresh external workspace.
 
 These are later product promises, not MVP implementation work:
 
-- Advance the remaining filesystem conventions with schedules and
-  sandbox/runtime conventions. Each item must remain a
-  bounded product slice; completing the sequence is not permission to add live
-  credentials, contact GitHub or Discord, publish, deploy, or replace native
-  harness behavior.
+- Advance schedules as separate bounded slices: portable Markdown source and
+  one-shot dispatch, per-turn gateway deadlines, then a foreground local clock.
+  Completing that sequence is not permission to add live credentials, contact
+  GitHub or Discord, publish, deploy, or replace native harness behavior.
 - Future channel adapters feed the same session-aware gateway exercised by
   local input. Network adapters verify their source before acceptance.
 - An external conversation maps to one native-harness session. Accepted input
@@ -203,9 +202,14 @@ The Codex native journey has live evidence, and the `darwin-arm64`
 clean-machine release archive journey is credential-free tested. Equivalent
 Claude acceptance remains. The credential-broker execution boundary is settled
 in ADR 0009; its backend and credential-owner decision remain deferred because
-the first GitHub slice is anonymous. HCTL-010 and HCTL-011 are complete;
-schedules and sandbox/runtime conventions are the next design frontier. Do not
-implement proposal capture, image deployment, or broker code merely to
+the first GitHub slice is anonymous. HCTL-010 and HCTL-011 are complete.
+HCTL-012's schedule source and one-shot dispatch are shaped but need a decision
+between fresh task sessions and a resumed per-schedule conversation. Per-turn
+gateway deadlines and a foreground local clock are separate follow-ups.
+Portable sandbox and image/runtime authoring are deferred: the native harnesses
+do not expose equivalent sandbox contracts, native lockfiles already cover
+authored-tool runtimes, and hctl does not own deployment. Do not implement
+proposal capture, image deployment, sandbox source, or broker code merely to
 exercise future seams.
 
 Live Discord acceptance remains waiting on a disposable application, a

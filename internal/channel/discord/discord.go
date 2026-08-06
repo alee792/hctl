@@ -227,6 +227,9 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 		cancel()
 		return nil, err
 	}
+	for _, diagnostic := range manager.Diagnostics() {
+		_, _ = fmt.Fprintf(config.Audit, "Discord worktree reconciliation: %s\n", diagnostic)
+	}
 	runtime.manager = manager
 	s.AddHandler(runtime.handleMessage)
 	s.AddHandler(runtime.handleInteraction)

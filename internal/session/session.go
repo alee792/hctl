@@ -37,6 +37,7 @@ type Conversation struct {
 	SessionID                 string            `json:"session_id,omitempty"`
 	WorkspaceRoot             string            `json:"workspace_root,omitempty"`
 	WorktreeBranch            string            `json:"worktree_branch,omitempty"`
+	WorktreeRetiring          bool              `json:"worktree_retiring,omitempty"`
 	Queue                     []Input           `json:"queue"`
 	Outcomes                  map[string]string `json:"outcomes"`
 	OutcomeOrder              []string          `json:"outcome_order"`
@@ -114,7 +115,7 @@ func decode(data []byte, mode os.FileMode) (*State, error) {
 		if conversation.SourceFingerprint == "" {
 			return nil, errors.New("dispatch conversation source fingerprint is missing")
 		}
-		if (conversation.WorkspaceRoot == "") != (conversation.WorktreeBranch == "") || (conversation.WorkspaceRoot != "" && (!filepath.IsAbs(conversation.WorkspaceRoot) || filepath.Clean(conversation.WorkspaceRoot) != conversation.WorkspaceRoot || len(conversation.WorkspaceRoot) > 4096 || len(conversation.WorktreeBranch) > 255 || strings.ContainsAny(conversation.WorktreeBranch, "\x00\r\n"))) {
+		if (conversation.WorkspaceRoot == "") != (conversation.WorktreeBranch == "") || conversation.WorktreeRetiring && conversation.WorkspaceRoot == "" || (conversation.WorkspaceRoot != "" && (!filepath.IsAbs(conversation.WorkspaceRoot) || filepath.Clean(conversation.WorkspaceRoot) != conversation.WorkspaceRoot || len(conversation.WorkspaceRoot) > 4096 || len(conversation.WorktreeBranch) > 255 || strings.ContainsAny(conversation.WorktreeBranch, "\x00\r\n"))) {
 			return nil, errors.New("dispatch conversation worktree assignment is invalid")
 		}
 		if conversation.Outcomes == nil {

@@ -183,6 +183,7 @@ func TestConversationWorktreeAssignmentRoundTrips(t *testing.T) {
 	}
 	conversation.WorkspaceRoot = filepath.Join(root, "worktree")
 	conversation.WorktreeBranch = "hctl/reviewer/abc123"
+	conversation.WorktreeRetiring = true
 	if err := Save(root, state); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +192,7 @@ func TestConversationWorktreeAssignmentRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := loaded.Conversations[conversationKey("reviewer@one", "claude", "discord-one", "source-1")]
-	if got == nil || got.WorkspaceRoot != conversation.WorkspaceRoot || got.WorktreeBranch != conversation.WorktreeBranch {
+	if got == nil || got.WorkspaceRoot != conversation.WorkspaceRoot || got.WorktreeBranch != conversation.WorktreeBranch || !got.WorktreeRetiring {
 		t.Fatalf("worktree assignment = %#v", got)
 	}
 	data, err := os.ReadFile(filepath.Join(root, statePath))
@@ -222,6 +223,7 @@ func TestLoadRejectsInvalidWorktreeAssignment(t *testing.T) {
 		`"workspace_root":"relative","worktree_branch":"hctl/test/one",`,
 		`"workspace_root":"/tmp/worktree",`,
 		`"workspace_root":"/tmp/worktree","worktree_branch":"bad\\nbranch",`,
+		`"worktree_retiring":true,`,
 	} {
 		t.Run(fields, func(t *testing.T) {
 			root := t.TempDir()

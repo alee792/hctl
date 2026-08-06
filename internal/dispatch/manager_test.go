@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -701,6 +702,191 @@ func TestManagerStopsRuntimeWhenDispatchEventDeliveryFails(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("dispatch event delivery failure did not stop runtime")
+	}
+}
+
+func TestManagerReconcilesPersistedWorktreesConservativelyAtStartup(t *testing.T) {
+	p := testProject(t)
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type fixture struct {
+		name       string
+		queue      []session.Input
+		outcomes   map[string]string
+		order      []string
+		retiring   bool
+		inspection worktree.Inspection
+		inspectErr error
+	}
+	fixtures := []fixture{
+		{name: "clean", inspection: worktree.Inspection{Clean: true, Merged: true, Reason: "clean and merged"}},
+		{name: "active", queue: []session.Input{{ID: "active-input", Text: "active content", Status: "active"}}, inspection: worktree.Inspection{Clean: true, Merged: true, Reason: "clean and merged"}},
+		{name: "queued", queue: []session.Input{{ID: "queued-input", Text: "queued content", Status: "queued"}}, inspection: worktree.Inspection{Clean: true, Merged: true, Reason: "clean and merged"}},
+		{name: "uncertain", outcomes: map[string]string{"prior-input": "uncertain"}, order: []string{"prior-input"}, inspection: worktree.Inspection{Clean: true, Merged: true, Reason: "clean and merged"}},
+		{name: "dirty", inspection: worktree.Inspection{Merged: true, Reason: "dirty or untracked work"}},
+		{name: "unmerged", inspection: worktree.Inspection{Clean: true, Reason: "unmerged commits"}},
+		{name: "unverifiable", inspectErr: errors.New("worktree is missing")},
+		{name: "stale-source", inspectErr: errors.New("worktree source fingerprint changed")},
+		{name: "partial", retiring: true},
+	}
+	provider := &reconcilingWorkspaceProvider{
+		base: p, assignments: map[string]worktree.Assignment{}, inspections: map[string]worktree.Inspection{}, inspectErrs: map[string]error{},
+		retireErrs: map[string]error{"partial": errors.New("branch deletion interrupted")},
+	}
+	for _, item := range fixtures {
+		fingerprint := p.SourceFingerprint
+		if item.name == "stale-source" {
+			fingerprint = "older-source-fingerprint"
+		}
+		conversation, err := state.GetOrCreate(p.AgentID, "claude", item.name, fingerprint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assignment := worktree.Assignment{Root: filepath.Join(t.TempDir(), item.name), Branch: "hctl/test/" + item.name}
+		conversation.WorkspaceRoot = assignment.Root
+		conversation.WorktreeBranch = assignment.Branch
+		conversation.WorktreeRetiring = item.retiring
+		conversation.Queue = item.queue
+		if item.outcomes != nil {
+			conversation.Outcomes = item.outcomes
+			conversation.OutcomeOrder = item.order
+		}
+		provider.assignments[item.name] = assignment
+		provider.inspections[item.name] = item.inspection
+		provider.inspectErrs[item.name] = item.inspectErr
+	}
+	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := NewManagerWithWorkspace(context.Background(), p, newManagerDriver(), time.Minute, time.Hour, func(string, Event) error { return nil }, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Submit(context.Background(), "partial", Submission{InputID: "blocked", Text: "must not run"}); err == nil || !strings.Contains(err.Error(), "local recovery") {
+		t.Fatalf("submission during partial retirement = %v", err)
+	}
+	if err := manager.Reset("partial"); err == nil || !strings.Contains(err.Error(), "local recovery") {
+		t.Fatalf("reset during partial retirement = %v", err)
+	}
+	manager.Close()
+	provider.mu.Lock()
+	inspected := append([]string(nil), provider.inspected...)
+	retired := append([]string(nil), provider.retired...)
+	provider.mu.Unlock()
+	sort.Strings(inspected)
+	wantInspected := []string{"active", "clean", "dirty", "queued", "stale-source", "uncertain", "unmerged", "unverifiable"}
+	if !reflect.DeepEqual(inspected, wantInspected) {
+		t.Fatalf("startup inspections = %v, want %v", inspected, wantInspected)
+	}
+	sort.Strings(retired)
+	if !reflect.DeepEqual(retired, []string{"clean", "partial"}) {
+		t.Fatalf("startup retirements = %v", retired)
+	}
+	diagnostics := strings.Join(manager.Diagnostics(), "\n")
+	for _, reason := range []string{"active or queued durable work", "uncertain recovered work", "dirty or untracked work", "unmerged commits", "ownership could not be verified", "interrupted cleanup"} {
+		if !strings.Contains(diagnostics, reason) {
+			t.Fatalf("diagnostics missing %q:\n%s", reason, diagnostics)
+		}
+	}
+	for _, forbidden := range []string{"active content", "queued content", "HCTL_DISCORD_TOKEN"} {
+		if strings.Contains(diagnostics, forbidden) {
+			t.Fatalf("diagnostics exposed %q: %s", forbidden, diagnostics)
+		}
+	}
+
+	persisted, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clean := findConversation(persisted, "clean"); clean == nil || clean.WorkspaceRoot != "" || clean.WorktreeRetiring {
+		t.Fatalf("clean retirement state = %#v", clean)
+	}
+	partial := findConversation(persisted, "partial")
+	if partial == nil || partial.WorkspaceRoot == "" || !partial.WorktreeRetiring {
+		t.Fatalf("partial retirement evidence = %#v", partial)
+	}
+	for _, name := range []string{"active", "queued", "uncertain", "dirty", "unmerged", "unverifiable", "stale-source"} {
+		conversation := findConversation(persisted, name)
+		if conversation == nil || conversation.WorkspaceRoot == "" || conversation.WorktreeRetiring {
+			t.Fatalf("preserved %s state = %#v", name, conversation)
+		}
+	}
+
+	retryProvider := &reconcilingWorkspaceProvider{base: p, assignments: provider.assignments, inspections: provider.inspections, inspectErrs: provider.inspectErrs, retireErrs: map[string]error{}}
+	retried, err := NewManagerWithWorkspace(context.Background(), p, newManagerDriver(), time.Minute, time.Hour, func(string, Event) error { return nil }, retryProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried.Close()
+	persisted, err = session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial = findConversation(persisted, "partial")
+	if partial == nil || partial.WorkspaceRoot != "" || partial.WorktreeRetiring {
+		t.Fatalf("retried retirement state = %#v", partial)
+	}
+}
+
+func TestManagerPreservedAssignmentResumesWithoutProvisioning(t *testing.T) {
+	p := testProject(t)
+	assignment := worktree.Assignment{Root: t.TempDir(), Branch: "hctl/test/preserved"}
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := state.GetOrCreate(p.AgentID, "claude", "preserved", p.SourceFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation.WorkspaceRoot = assignment.Root
+	conversation.WorktreeBranch = assignment.Branch
+	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+		t.Fatal(err)
+	}
+	provider := &reconcilingWorkspaceProvider{
+		base: p, assignments: map[string]worktree.Assignment{"preserved": assignment},
+		inspections: map[string]worktree.Inspection{"preserved": {Merged: true, Reason: "dirty or untracked work"}}, inspectErrs: map[string]error{}, retireErrs: map[string]error{},
+	}
+	driver := newManagerDriver()
+	manager, err := NewManagerWithWorkspace(context.Background(), p, driver, time.Minute, time.Hour, func(string, Event) error { return nil }, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	if _, err := manager.Submit(context.Background(), "preserved", Submission{InputID: "next", Text: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "next")
+	provider.mu.Lock()
+	provisions, resolves := provider.provisions, provider.resolves
+	provider.mu.Unlock()
+	if provisions != 0 || resolves != 1 || driver.rootForInput("next") != assignment.Root {
+		t.Fatalf("preserved resume provisions=%d resolves=%d root=%q", provisions, resolves, driver.rootForInput("next"))
+	}
+	driver.release("next")
+}
+
+func TestManagerRefusesToSkipPersistedWorktreeReconciliation(t *testing.T) {
+	p := testProject(t)
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := state.GetOrCreate(p.AgentID, "claude", "persisted", p.SourceFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation.WorkspaceRoot = t.TempDir()
+	conversation.WorktreeBranch = "hctl/test/persisted"
+	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewManager(context.Background(), p, newManagerDriver(), time.Minute, func(string, Event) error { return nil }); err == nil || !strings.Contains(err.Error(), "Git ownership recovery") {
+		t.Fatalf("manager without reconciliation provider = %v", err)
 	}
 }
 
@@ -1556,6 +1742,59 @@ type multiWorkspaceProvider struct {
 	resolveFailures map[string]error
 }
 
+type reconcilingWorkspaceProvider struct {
+	mu          sync.Mutex
+	base        *project.Project
+	assignments map[string]worktree.Assignment
+	inspections map[string]worktree.Inspection
+	inspectErrs map[string]error
+	retireErrs  map[string]error
+	inspected   []string
+	retired     []string
+	provisions  int
+	resolves    int
+}
+
+func (p *reconcilingWorkspaceProvider) Provision(_ context.Context, conversation string) (*project.Project, worktree.Assignment, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.provisions++
+	assignment := p.assignments[conversation]
+	return projectAtWorkspace(p.base, assignment.Root), assignment, nil
+}
+
+func (p *reconcilingWorkspaceProvider) Resolve(_ context.Context, conversation string, assignment worktree.Assignment) (*project.Project, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resolves++
+	if p.assignments[conversation] != assignment {
+		return nil, errors.New("unexpected reconciled assignment")
+	}
+	return projectAtWorkspace(p.base, assignment.Root), nil
+}
+
+func (*reconcilingWorkspaceProvider) Remove(context.Context, worktree.Assignment) {}
+
+func (p *reconcilingWorkspaceProvider) Inspect(_ context.Context, conversation string, assignment worktree.Assignment) (worktree.Inspection, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inspected = append(p.inspected, conversation)
+	if p.assignments[conversation] != assignment {
+		return worktree.Inspection{}, errors.New("unexpected inspection assignment")
+	}
+	return p.inspections[conversation], p.inspectErrs[conversation]
+}
+
+func (p *reconcilingWorkspaceProvider) Retire(_ context.Context, conversation string, assignment worktree.Assignment) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.retired = append(p.retired, conversation)
+	if p.assignments[conversation] != assignment {
+		return errors.New("unexpected retirement assignment")
+	}
+	return p.retireErrs[conversation]
+}
+
 func (p *multiWorkspaceProvider) Provision(_ context.Context, conversation string) (*project.Project, worktree.Assignment, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1580,6 +1819,19 @@ func (p *multiWorkspaceProvider) Resolve(_ context.Context, conversation string,
 
 func (*multiWorkspaceProvider) Remove(context.Context, worktree.Assignment) {}
 
+func (p *multiWorkspaceProvider) Inspect(_ context.Context, conversation string, assignment worktree.Assignment) (worktree.Inspection, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.assignments[conversation] != assignment {
+		return worktree.Inspection{}, errors.New("unexpected test workspace assignment")
+	}
+	return worktree.Inspection{Reason: "test worktree preserved"}, nil
+}
+
+func (*multiWorkspaceProvider) Retire(context.Context, string, worktree.Assignment) error {
+	return errors.New("test worktree is not disposable")
+}
+
 func (p *fakeWorkspaceProvider) Provision(context.Context, string) (*project.Project, worktree.Assignment, error) {
 	p.provisions++
 	if p.provisionErr != nil {
@@ -1597,6 +1849,17 @@ func (p *fakeWorkspaceProvider) Resolve(_ context.Context, _ string, assignment 
 }
 
 func (p *fakeWorkspaceProvider) Remove(context.Context, worktree.Assignment) { p.removed++ }
+
+func (p *fakeWorkspaceProvider) Inspect(_ context.Context, _ string, assignment worktree.Assignment) (worktree.Inspection, error) {
+	if assignment != p.assignment {
+		return worktree.Inspection{}, errors.New("unexpected assignment")
+	}
+	return worktree.Inspection{Reason: "test worktree preserved"}, nil
+}
+
+func (*fakeWorkspaceProvider) Retire(context.Context, string, worktree.Assignment) error {
+	return errors.New("test worktree is not disposable")
+}
 
 func projectAtWorkspace(base *project.Project, root string) *project.Project {
 	copy := *base

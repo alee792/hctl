@@ -2,9 +2,11 @@ package dispatch
 
 import (
 	"errors"
+	"sort"
 	"sync"
 
 	"hctl/internal/session"
+	"hctl/internal/worktree"
 )
 
 // conversationStore owns one in-memory view of the durable dispatch state.
@@ -31,6 +33,16 @@ type conversationSnapshot struct {
 	exists    bool
 	workspace string
 	branch    string
+	retiring  bool
+}
+
+type workspaceRecord struct {
+	conversation string
+	fingerprint  string
+	assignment   worktree.Assignment
+	busy         bool
+	uncertain    bool
+	retiring     bool
 }
 
 func openConversationStore(root string) (*conversationStore, error) {
@@ -67,7 +79,7 @@ func (s *conversationStore) snapshot(ref conversationRef) (conversationSnapshot,
 	if conversation == nil {
 		return conversationSnapshot{}, nil
 	}
-	snapshot := conversationSnapshot{sessionID: conversation.SessionID, queueLen: len(conversation.Queue), exists: true, workspace: conversation.WorkspaceRoot, branch: conversation.WorktreeBranch}
+	snapshot := conversationSnapshot{sessionID: conversation.SessionID, queueLen: len(conversation.Queue), exists: true, workspace: conversation.WorkspaceRoot, branch: conversation.WorktreeBranch, retiring: conversation.WorktreeRetiring}
 	if len(conversation.Queue) > 0 {
 		snapshot.firstID = conversation.Queue[0].ID
 		snapshot.active = conversation.Queue[0].Status == "active"
@@ -91,6 +103,65 @@ func (s *conversationStore) queued(ref conversationRef) int {
 		}
 	}
 	return total
+}
+
+func (s *conversationStore) workspaceRecords(ref conversationRef) ([]workspaceRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.SchemaVersion == 1 && len(s.state.Conversations) != 1 {
+		return nil, errors.New("legacy dispatch state cannot be reconciled unambiguously")
+	}
+	var records []workspaceRecord
+	for _, conversation := range s.state.Conversations {
+		agentMatches := conversation.AgentID == ref.agentID || s.state.SchemaVersion == 1 && conversation.AgentID == ""
+		if !agentMatches || conversation.Harness != ref.harness || conversation.WorkspaceRoot == "" {
+			continue
+		}
+		uncertain := false
+		for _, outcome := range conversation.Outcomes {
+			if outcome == "uncertain" {
+				uncertain = true
+				break
+			}
+		}
+		records = append(records, workspaceRecord{
+			conversation: conversation.ID,
+			fingerprint:  conversation.SourceFingerprint,
+			assignment:   worktree.Assignment{Root: conversation.WorkspaceRoot, Branch: conversation.WorktreeBranch},
+			busy:         len(conversation.Queue) != 0,
+			uncertain:    uncertain,
+			retiring:     conversation.WorktreeRetiring,
+		})
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].conversation < records[j].conversation })
+	return records, nil
+}
+
+func (s *conversationStore) markWorkspaceRetiring(ref conversationRef) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, err := s.lookup(ref)
+	if err != nil || conversation == nil {
+		return err
+	}
+	conversation.WorktreeRetiring = true
+	return session.Save(s.root, s.state)
+}
+
+func (s *conversationStore) clearRetiredWorkspace(ref conversationRef, assignment worktree.Assignment) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, err := s.lookup(ref)
+	if err != nil || conversation == nil {
+		return err
+	}
+	if conversation.WorkspaceRoot != assignment.Root || conversation.WorktreeBranch != assignment.Branch || !conversation.WorktreeRetiring {
+		return errors.New("durable worktree retirement ownership changed")
+	}
+	conversation.WorkspaceRoot = ""
+	conversation.WorktreeBranch = ""
+	conversation.WorktreeRetiring = false
+	return session.Save(s.root, s.state)
 }
 
 func (s *conversationStore) inputStatus(ref conversationRef, inputID string) (string, bool, error) {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,11 +24,18 @@ type Assignment struct {
 	Branch string
 }
 
+type Inspection struct {
+	Clean  bool
+	Merged bool
+	Reason string
+}
+
 type Manager struct {
 	mu         sync.Mutex
 	base       *project.Project
 	executable string
 	repo       string
+	common     string
 	parent     string
 }
 
@@ -43,8 +51,16 @@ func New(ctx context.Context, base *project.Project, executable string) (*Manage
 	if err != nil || repo != base.WorkspaceRoot {
 		return nil, errors.New("selected workspace must be the root of a Git checkout")
 	}
+	common, err := gitOutput(ctx, repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return nil, errors.New("cannot resolve selected Git checkout ownership")
+	}
+	common, err = filepath.EvalSymlinks(strings.TrimSpace(common))
+	if err != nil {
+		return nil, errors.New("cannot resolve selected Git checkout ownership")
+	}
 	parent := filepath.Join(filepath.Dir(repo), "."+filepath.Base(repo)+".hctl-worktrees")
-	return &Manager{base: base, executable: executable, repo: repo, parent: parent}, nil
+	return &Manager{base: base, executable: executable, repo: repo, common: common, parent: parent}, nil
 }
 
 func (m *Manager) Provision(ctx context.Context, conversation string) (*project.Project, Assignment, error) {
@@ -72,19 +88,127 @@ func (m *Manager) Provision(ctx context.Context, conversation string) (*project.
 }
 
 func (m *Manager) Resolve(ctx context.Context, conversation string, assignment Assignment) (*project.Project, error) {
-	expected := m.expected(conversation)
-	if assignment != expected {
-		return nil, errors.New("durable conversation worktree assignment is invalid")
-	}
-	root, err := filepath.EvalSymlinks(assignment.Root)
-	if err != nil || root != assignment.Root {
-		return nil, errors.New("conversation worktree is missing or unsafe")
-	}
-	branch, err := gitOutput(ctx, assignment.Root, "branch", "--show-current")
-	if err != nil || strings.TrimSpace(branch) != assignment.Branch {
-		return nil, errors.New("conversation worktree branch does not match durable state")
+	if err := m.validateCheckout(ctx, conversation, assignment); err != nil {
+		return nil, err
 	}
 	return m.prepare(ctx, assignment)
+}
+
+func (m *Manager) Inspect(ctx context.Context, conversation string, assignment Assignment) (Inspection, error) {
+	if err := m.validateCheckout(ctx, conversation, assignment); err != nil {
+		return Inspection{}, err
+	}
+	p, err := m.relocatedProject(assignment)
+	if err != nil {
+		return Inspection{}, err
+	}
+	managedFiles, err := setup.WritableChannelFiles(p)
+	if err != nil {
+		return Inspection{}, errors.New("cannot verify managed setup before worktree reconciliation")
+	}
+	clean, err := worktreeContainsOnlyManagedFiles(ctx, assignment.Root, managedFiles)
+	if err != nil {
+		return Inspection{}, errors.New("cannot verify conversation worktree cleanliness")
+	}
+	merged, err := gitSuccess(ctx, m.repo, "merge-base", "--is-ancestor", assignment.Branch, "HEAD")
+	if err != nil {
+		return Inspection{}, errors.New("cannot verify whether conversation work is merged")
+	}
+	reason := "clean and merged"
+	if !clean {
+		reason = "dirty or untracked work"
+	} else if !merged {
+		reason = "unmerged commits"
+	}
+	return Inspection{Clean: clean, Merged: merged, Reason: reason}, nil
+}
+
+// Retire removes one exact managed assignment after the caller has durably
+// recorded retirement intent. A missing path or branch is accepted only when
+// the remaining Git evidence proves an earlier cleanup step already finished.
+func (m *Manager) Retire(ctx context.Context, conversation string, assignment Assignment) error {
+	if assignment != m.expected(conversation) {
+		return errors.New("durable conversation worktree assignment is invalid")
+	}
+	info, statErr := os.Lstat(assignment.Root)
+	switch {
+	case statErr == nil:
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("conversation worktree retirement target is unsafe")
+		}
+		inspection, err := m.Inspect(ctx, conversation, assignment)
+		if err != nil {
+			if validateErr := m.validateCheckout(ctx, conversation, assignment); validateErr != nil {
+				return validateErr
+			}
+			managedFiles := []string(nil)
+			p, projectErr := m.relocatedProject(assignment)
+			if projectErr == nil {
+				managedFiles, _ = setup.WritableChannelRetirementFiles(p)
+			}
+			clean, statusErr := worktreeContainsOnlyManagedFiles(ctx, assignment.Root, managedFiles)
+			merged, mergeErr := gitSuccess(ctx, m.repo, "merge-base", "--is-ancestor", assignment.Branch, "HEAD")
+			if statusErr != nil || !clean || mergeErr != nil || !merged {
+				return errors.New("interrupted conversation worktree cleanup is not safely resumable")
+			}
+			if managedFiles != nil {
+				retained, retainErr := trackedPaths(ctx, assignment.Root, managedFiles)
+				if retainErr != nil {
+					return retainErr
+				}
+				if err := setup.RemoveWritableChannel(p, retained); err != nil {
+					return errors.New("cannot resume managed setup cleanup; durable ownership was preserved")
+				}
+			}
+		} else {
+			if !inspection.Clean || !inspection.Merged {
+				return fmt.Errorf("conversation worktree is not disposable: %s", inspection.Reason)
+			}
+			p, err := m.relocatedProject(assignment)
+			if err != nil {
+				return err
+			}
+			managedFiles, err := setup.WritableChannelRetirementFiles(p)
+			if err != nil {
+				return err
+			}
+			retained, err := trackedPaths(ctx, assignment.Root, managedFiles)
+			if err != nil {
+				return err
+			}
+			if err := setup.RemoveWritableChannel(p, retained); err != nil {
+				return errors.New("cannot remove managed setup; durable ownership was preserved")
+			}
+		}
+		if _, err := gitOutput(ctx, m.repo, "worktree", "remove", assignment.Root); err != nil {
+			return errors.New("cannot retire conversation worktree; durable ownership was preserved")
+		}
+	case !os.IsNotExist(statErr):
+		return errors.New("cannot inspect conversation worktree retirement target")
+	default:
+		otherRoot, err := m.branchWorktree(ctx, assignment.Branch)
+		if err != nil {
+			return err
+		}
+		if otherRoot != "" {
+			return errors.New("conversation branch is attached to a foreign worktree")
+		}
+	}
+	exists, err := m.branchExists(ctx, assignment.Branch)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	merged, err := gitSuccess(ctx, m.repo, "merge-base", "--is-ancestor", assignment.Branch, "HEAD")
+	if err != nil || !merged {
+		return errors.New("conversation worktree branch is not provably merged")
+	}
+	if _, err := gitOutput(ctx, m.repo, "branch", "-d", assignment.Branch); err != nil {
+		return errors.New("cannot retire conversation branch; durable ownership was preserved")
+	}
+	return nil
 }
 
 func (m *Manager) Remove(ctx context.Context, assignment Assignment) {
@@ -97,14 +221,70 @@ func (m *Manager) expected(conversation string) Assignment {
 	return Assignment{Root: filepath.Join(m.parent, suffix), Branch: "hctl/" + m.base.AgentID + "/" + suffix}
 }
 
-func (m *Manager) prepare(ctx context.Context, assignment Assignment) (*project.Project, error) {
-	source := m.base.SourceRoot
-	if relative, err := filepath.Rel(m.repo, source); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		source = filepath.Join(assignment.Root, relative)
+func (m *Manager) validateCheckout(ctx context.Context, conversation string, assignment Assignment) error {
+	if assignment != m.expected(conversation) {
+		return errors.New("durable conversation worktree assignment is invalid")
 	}
-	p, err := project.LoadRelocated(source, m.base.Harness, assignment.Root, m.base)
+	info, err := os.Lstat(assignment.Root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("conversation worktree is missing or unsafe")
+	}
+	root, err := filepath.EvalSymlinks(assignment.Root)
+	if err != nil || root != assignment.Root {
+		return errors.New("conversation worktree is missing or unsafe")
+	}
+	top, err := gitOutput(ctx, assignment.Root, "rev-parse", "--show-toplevel")
+	if err != nil || strings.TrimSpace(top) != assignment.Root {
+		return errors.New("conversation worktree root does not match durable state")
+	}
+	common, err := gitOutput(ctx, assignment.Root, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
-		return nil, errors.New("conversation worktree does not contain the selected agent source")
+		return errors.New("cannot verify conversation worktree ownership")
+	}
+	actualCommon, err := filepath.EvalSymlinks(strings.TrimSpace(common))
+	if err != nil || actualCommon != m.common {
+		return errors.New("conversation worktree belongs to a different repository")
+	}
+	branch, err := gitOutput(ctx, assignment.Root, "branch", "--show-current")
+	if err != nil || strings.TrimSpace(branch) != assignment.Branch {
+		return errors.New("conversation worktree branch does not match durable state")
+	}
+	registered, err := m.branchWorktree(ctx, assignment.Branch)
+	if err != nil || registered != assignment.Root {
+		return errors.New("conversation worktree registration does not match durable state")
+	}
+	return nil
+}
+
+func (m *Manager) branchExists(ctx context.Context, branch string) (bool, error) {
+	exists, err := gitSuccess(ctx, m.repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	if err != nil {
+		return false, errors.New("cannot inspect conversation worktree branch")
+	}
+	return exists, nil
+}
+
+func (m *Manager) branchWorktree(ctx context.Context, branch string) (string, error) {
+	output, err := gitOutput(ctx, m.repo, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", errors.New("cannot inspect managed Git worktrees")
+	}
+	var current string
+	for _, line := range strings.Split(output, "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			current = strings.TrimPrefix(line, "worktree ")
+		case line == "branch refs/heads/"+branch:
+			return current, nil
+		}
+	}
+	return "", nil
+}
+
+func (m *Manager) prepare(ctx context.Context, assignment Assignment) (*project.Project, error) {
+	p, err := m.relocatedProject(assignment)
+	if err != nil {
+		return nil, err
 	}
 	if err := setup.VerifyWritableChannel(p); err == nil {
 		return p, nil
@@ -118,6 +298,59 @@ func (m *Manager) prepare(ctx context.Context, assignment Assignment) (*project.
 		return nil, err
 	}
 	return p, nil
+}
+
+func (m *Manager) relocatedProject(assignment Assignment) (*project.Project, error) {
+	source := m.base.SourceRoot
+	if relative, err := filepath.Rel(m.repo, source); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		source = filepath.Join(assignment.Root, relative)
+	}
+	p, err := project.LoadRelocated(source, m.base.Harness, assignment.Root, m.base)
+	if err != nil {
+		return nil, errors.New("conversation worktree does not contain the selected agent source")
+	}
+	return p, nil
+}
+
+func worktreeContainsOnlyManagedFiles(ctx context.Context, root string, managedFiles []string) (bool, error) {
+	status, err := gitOutput(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return false, err
+	}
+	ignored, err := gitOutput(ctx, root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+	if err != nil {
+		return false, err
+	}
+	managed := make(map[string]bool, len(managedFiles))
+	for _, path := range managedFiles {
+		managed[path] = true
+	}
+	for _, record := range strings.Split(status, "\x00") {
+		if record == "" {
+			continue
+		}
+		if len(record) < 4 || strings.ContainsAny(record[:2], "RC") || !managed[record[3:]] {
+			return false, nil
+		}
+	}
+	for _, path := range strings.Split(ignored, "\x00") {
+		if path != "" && !managed[path] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func trackedPaths(ctx context.Context, root string, paths []string) (map[string]bool, error) {
+	tracked := map[string]bool{}
+	for _, path := range paths {
+		yes, err := gitSuccess(ctx, root, "ls-files", "--error-unmatch", "--", path)
+		if err != nil {
+			return nil, errors.New("cannot verify tracked managed setup files")
+		}
+		tracked[path] = yes
+	}
+	return tracked, nil
 }
 
 func (m *Manager) cleanup(assignment Assignment) {
@@ -164,4 +397,18 @@ func gitOutput(ctx context.Context, directory string, args ...string) (string, e
 		return "", errors.New("git operation failed")
 	}
 	return string(output), nil
+}
+
+func gitSuccess(ctx context.Context, directory string, args ...string) (bool, error) {
+	command := exec.CommandContext(ctx, "git", append([]string{"-C", directory}, args...)...)
+	command.Env = secureenv.Child()
+	err := command.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, errors.New("git operation failed")
 }

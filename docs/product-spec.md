@@ -225,9 +225,22 @@ returns its redacted lifecycle and queue state. After 15 idle minutes by
 default, the lifecycle closes the resident harness but retains the durable
 native session mapping; `--idle-timeout` configures a positive interval up to
 24 hours, and the next eligible message resumes that native conversation.
-Active or queued work is never hibernated. Explicit `--input jsonl`
-selects the existing headless stream instead; one-shot schedules retain their
-fresh-session semantics.
+Active work is never hibernated, and queued work is never discarded. Under
+resident saturation, a process with a durable backlog may close between turns
+to let an older nonresident waiter run, then resume its own queue later.
+Explicit `--input jsonl` selects the existing headless stream instead; one-shot
+schedules retain their fresh-session semantics.
+
+The channel runtime defaults to at most four resident harness processes and two
+simultaneously active turns. `--max-resident-sessions` and
+`--max-active-turns` provide bounded overrides. Accepted input remains durably
+queued while it waits for active capacity, and turn grants advance in request
+order across conversations so one busy surface cannot repeatedly jump ahead of
+another. At resident pressure, the least-recently-idle eligible process
+hibernates before a replacement opens; if all residents have backlogs, fair
+rotation happens only between turns and preserves every queued input. Duplicate
+delivery consumes neither a new queue entry nor capacity. `/status` includes
+only aggregate active, resident, limit, and queued counts.
 
 New and resumed channel-managed sessions run read-only in the shared workspace:
 Claude uses native plan permission mode, Codex uses a read-only sandbox with
@@ -545,6 +558,9 @@ The MVP is complete when credential-free tests prove:
     a validated branch-backed Git worktree, resumes the same Claude or Codex
     session under workspace-write policy, and continues the original request
     once without exposing internal control text.
+17. Runtime-wide resident-session and active-turn limits keep accepted work
+    durable under saturation, hibernate eligible idle capacity, and advance
+    turns fairly across conversations without a model scheduler.
 
 ## Explicit non-goals
 

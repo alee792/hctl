@@ -131,6 +131,257 @@ func TestManagerQueuesOneConversationBehindOneResidentProcess(t *testing.T) {
 	}
 }
 
+func TestManagerBoundsActiveTurnsAndAdvancesConversationsFairly(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	events := make(chan managedEvent, 64)
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 2, 1, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	if _, err := manager.Submit(context.Background(), "conversation-one", Submission{InputID: "one-1", Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "one-1")
+	if _, err := manager.Submit(context.Background(), "conversation-one", Submission{InputID: "one-2", Text: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := manager.Submit(context.Background(), "conversation-one", Submission{InputID: "one-1", Text: "first"})
+	if err != nil || !duplicate.Duplicate || duplicate.Status != "active" {
+		t.Fatalf("active duplicate = %+v, %v", duplicate, err)
+	}
+	if _, err := manager.Submit(context.Background(), "conversation-two", Submission{InputID: "two-1", Text: "other"}); err != nil {
+		t.Fatal(err)
+	}
+	waitCapacityQueued(t, manager.capacity, "conversation-two")
+	if status := manager.Capacity(); status.Active != 1 || status.ActiveLimit != 1 || status.Queued != 2 {
+		t.Fatalf("saturated capacity = %+v", status)
+	}
+
+	driver.release("one-1")
+	driver.waitStarted(t, "two-1")
+	if status := manager.Capacity(); status.Active != 1 || status.Resident > status.ResidentLimit {
+		t.Fatalf("capacity after fair handoff = %+v", status)
+	}
+	driver.release("two-1")
+	driver.waitStarted(t, "one-2")
+	driver.release("one-2")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"conversation-one": "one-2"})
+}
+
+func TestManagerShutdownDoesNotGrantWaitingCapacity(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 2, 1, func(string, Event) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Submit(context.Background(), "conversation-one", Submission{InputID: "one-1", Text: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "one-1")
+	if _, err := manager.Submit(context.Background(), "conversation-two", Submission{InputID: "two-1", Text: "waiting"}); err != nil {
+		t.Fatal(err)
+	}
+	waitCapacityQueued(t, manager.capacity, "conversation-two")
+
+	manager.Close()
+	if got := driver.openCount(); got != 1 {
+		t.Fatalf("shutdown opened %d processes, want only the active one", got)
+	}
+	if status := manager.Capacity(); status.Active != 0 || status.Resident != 0 {
+		t.Fatalf("shutdown leaked capacity: %+v", status)
+	}
+}
+
+func TestManagerRestartReusesDurableQueueWithoutDuplicateCapacity(t *testing.T) {
+	p := testProject(t)
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		conversation string
+		inputID      string
+	}{{"conversation-one", "one-1"}, {"conversation-two", "two-1"}} {
+		conversation, err := state.GetOrCreate(p.AgentID, "claude", item.conversation, p.SourceFingerprint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, duplicate, err := conversation.Accept(item.inputID, "persisted"); err != nil || duplicate {
+			t.Fatalf("seed durable input = duplicate %v, error %v", duplicate, err)
+		}
+	}
+	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+		t.Fatal(err)
+	}
+
+	driver := newManagerDriver()
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 2, 1, func(string, Event) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	if capacity := manager.Capacity(); capacity.Queued != 2 || capacity.Active != 0 || capacity.Resident != 0 {
+		t.Fatalf("restart capacity = %+v", capacity)
+	}
+	for _, item := range []struct {
+		conversation string
+		inputID      string
+	}{{"conversation-one", "one-1"}, {"conversation-two", "two-1"}} {
+		result, err := manager.Submit(context.Background(), item.conversation, Submission{InputID: item.inputID, Text: "redelivered"})
+		if err != nil || !result.Duplicate || result.Status != "queued" {
+			t.Fatalf("restart duplicate %s = %+v, %v", item.inputID, result, err)
+		}
+	}
+	first := driver.waitAnyStarted(t)
+	if first != "one-1" && first != "two-1" {
+		t.Fatalf("first restarted input = %s", first)
+	}
+	if capacity := manager.Capacity(); capacity.Active != 1 || capacity.Queued != 1 {
+		t.Fatalf("restart saturation = %+v", capacity)
+	}
+	driver.release(first)
+	second := driver.waitAnyStarted(t)
+	if second == first || second != "one-1" && second != "two-1" {
+		t.Fatalf("second restarted input = %s after %s", second, first)
+	}
+	driver.release(second)
+}
+
+func TestManagerHibernatesIdleResidentUnderCapacityPressure(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	events := make(chan managedEvent, 64)
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	if _, err := manager.Submit(context.Background(), "conversation-one", Submission{InputID: "one-1", Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "one-1")
+	driver.release("one-1")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"conversation-one": "one-1"})
+	if status := manager.Capacity(); status.Resident != 1 || status.Active != 0 {
+		t.Fatalf("idle resident capacity = %+v", status)
+	}
+
+	if _, err := manager.Submit(context.Background(), "conversation-two", Submission{InputID: "two-1", Text: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	hibernated := waitManagedEvent(t, events, "driver.process_hibernated")
+	if hibernated.conversation != "conversation-one" || hibernated.event.Status != "capacity_pressure" {
+		t.Fatalf("capacity hibernation = %+v", hibernated)
+	}
+	driver.waitStarted(t, "two-1")
+	if status := manager.Capacity(); status.Resident != 1 || status.Active != 1 {
+		t.Fatalf("replacement capacity = %+v", status)
+	}
+	driver.release("two-1")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"conversation-two": "two-1"})
+}
+
+func TestManagerRotatesResidentAfterTurnToPreventStarvation(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	events := make(chan managedEvent, 64)
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	if _, err := manager.Submit(context.Background(), "conversation-one", Submission{InputID: "one-1", Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "one-1")
+	if _, err := manager.Submit(context.Background(), "conversation-one", Submission{InputID: "one-2", Text: "backlog"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Submit(context.Background(), "conversation-two", Submission{InputID: "two-1", Text: "waiting"}); err != nil {
+		t.Fatal(err)
+	}
+	waitCapacityQueued(t, manager.capacity, "conversation-two")
+	driver.release("one-1")
+	hibernated := waitManagedEvent(t, events, "driver.process_hibernated")
+	if hibernated.conversation != "conversation-one" || hibernated.event.Status != "capacity_fairness" {
+		t.Fatalf("fairness rotation = %+v", hibernated)
+	}
+	driver.waitStarted(t, "two-1")
+	driver.release("two-1")
+	driver.waitStarted(t, "one-2")
+	driver.release("one-2")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"conversation-one": "one-2"})
+}
+
+func TestManagerConsumesSynchronousCapacityHandoffBeforeReopening(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	events := make(chan managedEvent, 64)
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	const conversation = "conversation-one"
+	if _, err := manager.Submit(context.Background(), conversation, Submission{InputID: "one-1", Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "one-1")
+	driver.release("one-1")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{conversation: "one-1"})
+
+	manager.capacity.mu.Lock()
+	state := manager.capacity.states[conversation]
+	if state == nil || !state.resident || state.active {
+		manager.capacity.mu.Unlock()
+		t.Fatalf("resident state before handoff = %#v", state)
+	}
+	submitted := make(chan error, 1)
+	go func() {
+		_, submitErr := manager.Submit(context.Background(), conversation, Submission{InputID: "one-2", Text: "second"})
+		submitted <- submitErr
+	}()
+	if err := <-submitted; err != nil {
+		manager.capacity.mu.Unlock()
+		t.Fatal(err)
+	}
+	state.hibernating = true
+	state.hibernate <- struct{}{}
+	manager.capacity.mu.Unlock()
+
+	driver.waitStarted(t, "one-2")
+	manager.capacity.mu.Lock()
+	pendingHandoff := len(state.hibernate)
+	manager.capacity.mu.Unlock()
+	if pendingHandoff != 0 {
+		t.Fatalf("pending capacity handoff notices = %d, want 0", pendingHandoff)
+	}
+	if got := driver.closeCount(); got != 1 {
+		t.Fatalf("closed harness processes = %d, want one synchronous handoff", got)
+	}
+	driver.release("one-2")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{conversation: "one-2"})
+}
+
 func TestManagerResetRequiresIdleConversation(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
@@ -321,7 +572,7 @@ func TestManagerHibernatesAndResumesIdleHarnesses(t *testing.T) {
 			driver := newNamedManagerDriver(harnessName)
 			clock := newFakeIdleClock()
 			events := make(chan managedEvent, 32)
-			manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
+			manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(conversation string, event Event) error {
 				events <- managedEvent{conversation: conversation, event: event}
 				return nil
 			}, clock.NewTimer, nil)
@@ -377,7 +628,7 @@ func TestManagerElevatesOnceAndReusesDurableWritableWorkspace(t *testing.T) {
 	driver := newManagerDriver()
 	clock := newFakeIdleClock()
 	events := make(chan managedEvent, 64)
-	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
 	}, clock.NewTimer, provider)
@@ -443,7 +694,7 @@ func TestManagerElevatesOnceAndReusesDurableWritableWorkspace(t *testing.T) {
 
 	restartedDriver := newManagerDriver()
 	restartedEvents := make(chan managedEvent, 16)
-	restarted, err := newManager(context.Background(), p, restartedDriver, time.Minute, time.Hour, func(conversation string, event Event) error {
+	restarted, err := newManager(context.Background(), p, restartedDriver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(conversation string, event Event) error {
 		restartedEvents <- managedEvent{conversation: conversation, event: event}
 		return nil
 	}, newFakeIdleClock().NewTimer, provider)
@@ -511,7 +762,7 @@ func TestManagerDoesNotHibernateActiveOrQueuedWork(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	clock := newFakeIdleClock()
-	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(string, Event) error { return nil }, clock.NewTimer, nil)
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(string, Event) error { return nil }, clock.NewTimer, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +788,7 @@ func TestManagerClassifiesHibernateCloseFailureWithoutLosingConversation(t *test
 	driver.closeErr = errors.New("close failed")
 	clock := newFakeIdleClock()
 	events := make(chan managedEvent, 32)
-	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
 	}, clock.NewTimer, nil)
@@ -601,6 +852,14 @@ func TestManagerClassifiesReadOnlyPolicyStartupFailure(t *testing.T) {
 	if got := driver.executionPolicies(); !reflect.DeepEqual(got, []harness.ExecutionPolicy{harness.PolicyReadOnly}) {
 		t.Fatalf("execution policies = %v", got)
 	}
+	select {
+	case <-manager.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("manager did not finish after startup failure")
+	}
+	if capacity := manager.Capacity(); capacity.Active != 0 || capacity.Resident != 0 {
+		t.Fatalf("startup failure leaked capacity: %+v", capacity)
+	}
 }
 
 func TestManagerBoundsBlockedHibernateClose(t *testing.T) {
@@ -609,7 +868,7 @@ func TestManagerBoundsBlockedHibernateClose(t *testing.T) {
 	driver.blockProcessClose()
 	clock := newFakeIdleClock()
 	events := make(chan managedEvent, 32)
-	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
 	}, clock.NewTimer, nil)
@@ -651,7 +910,7 @@ func TestManagedRunBoundsBlockedCloseAfterAdmissionsStop(t *testing.T) {
 		done <- runSubmissions(context.Background(), p, driver, "discord-guild", submissions, func(event Event) error {
 			events <- event
 			return nil
-		}, false, time.Minute, time.Hour, clock.NewTimer, harness.PolicyReadOnly, store)
+		}, false, time.Minute, time.Hour, clock.NewTimer, harness.PolicyReadOnly, store, nil, nil)
 	}()
 	reply := make(chan SubmissionResult, 1)
 	submissions <- Submission{InputID: "message-1", Text: "first", Reply: reply}

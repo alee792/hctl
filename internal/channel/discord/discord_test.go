@@ -238,8 +238,8 @@ func TestFailedTurnCannotRequestWriteAccess(t *testing.T) {
 }
 
 func TestStatusMessageUsesOnlySafeLifecycleState(t *testing.T) {
-	message := statusMessage("maintainer", "codex", "guild", dispatch.ConversationStatus{State: dispatch.LifecycleQueued, Pending: 2})
-	if message != "hctl is online: agent=maintainer harness=codex surface=guild state=queued pending=2" {
+	message := statusMessage("maintainer", "codex", "guild", dispatch.ConversationStatus{State: dispatch.LifecycleQueued, Pending: 2}, dispatch.CapacityStatus{Active: 1, ActiveLimit: 2, Resident: 2, ResidentLimit: 4, Queued: 3})
+	if message != "hctl is online: agent=maintainer harness=codex surface=guild state=queued pending=2 active=1/2 resident=2/4 queued=3" {
 		t.Fatalf("status = %q", message)
 	}
 	for _, forbidden := range []string{"discord-", "/Users/", "session-", "channel_id", "token"} {
@@ -250,8 +250,8 @@ func TestStatusMessageUsesOnlySafeLifecycleState(t *testing.T) {
 }
 
 func TestStatusMessageReportsHibernatedWithoutRuntimeIdentity(t *testing.T) {
-	message := statusMessage("maintainer", "claude", "dm", dispatch.ConversationStatus{State: dispatch.LifecycleHibernated})
-	if message != "hctl is online: agent=maintainer harness=claude surface=dm state=hibernated pending=0" {
+	message := statusMessage("maintainer", "claude", "dm", dispatch.ConversationStatus{State: dispatch.LifecycleHibernated}, dispatch.CapacityStatus{ActiveLimit: 2, ResidentLimit: 4})
+	if message != "hctl is online: agent=maintainer harness=claude surface=dm state=hibernated pending=0 active=0/2 resident=0/4 queued=0" {
 		t.Fatalf("status = %q", message)
 	}
 }
@@ -290,6 +290,10 @@ func (m *fakeConversationManager) Elevate(_ context.Context, conversation string
 
 func (m *fakeConversationManager) Status(conversation string) dispatch.ConversationStatus {
 	return m.statuses[conversation]
+}
+
+func (m *fakeConversationManager) Capacity() dispatch.CapacityStatus {
+	return dispatch.CapacityStatus{ActiveLimit: dispatch.DefaultMaxActiveTurns, ResidentLimit: dispatch.DefaultMaxResidentSessions}
 }
 
 func (m *fakeConversationManager) Reset(string) error    { return nil }

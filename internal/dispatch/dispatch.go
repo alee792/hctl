@@ -126,7 +126,7 @@ func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0, 0, nil, harness.PolicyDefault, store)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0, 0, nil, harness.PolicyDefault, store, nil, nil)
 }
 
 // RunSubmissionsWithTurnTimeout drives a long-lived channel conversation while
@@ -142,7 +142,7 @@ func RunSubmissionsWithTurnTimeout(ctx context.Context, p *project.Project, driv
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout, 0, nil, harness.PolicyDefault, store)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout, 0, nil, harness.PolicyDefault, store, nil, nil)
 }
 
 // RunTask drives bounded task input while opening a fresh native harness
@@ -159,10 +159,10 @@ func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, con
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0, 0, nil, harness.PolicyDefault, store)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0, 0, nil, harness.PolicyDefault, store, nil, nil)
 }
 
-func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout, idleTimeout time.Duration, timers idleTimerFactory, policy harness.ExecutionPolicy, store *conversationStore) error {
+func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout, idleTimeout time.Duration, timers idleTimerFactory, policy harness.ExecutionPolicy, store *conversationStore, capacity *capacityCoordinator, forceHibernate <-chan struct{}) error {
 	if err := validateDispatch(conversationID, emit); err != nil {
 		return err
 	}
@@ -181,6 +181,8 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	inputOpen := true
 	var active *session.Input
 	var process harness.Session
+	turnHeld := false
+	residentHeld := false
 	var idle idleTimer
 	var idleC <-chan time.Time
 	turns := make(chan turnMessage, 64)
@@ -195,8 +197,20 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			process.Abort()
 		}
 	}
+	defer func() {
+		if capacity == nil {
+			return
+		}
+		if turnHeld {
+			capacity.releaseTurn(conversationID, false)
+		}
+		if residentHeld {
+			capacity.releaseResident(conversationID)
+		}
+	}()
 	defer abort()
 
+dispatchLoop:
 	for {
 		if sink.err != nil {
 			return errors.New("cannot write dispatch events")
@@ -210,6 +224,33 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 				idle.Stop()
 				idle = nil
 				idleC = nil
+			}
+			needsResident := process == nil
+			if capacity != nil {
+				if err := capacity.acquireTurn(ctx, conversationID, needsResident); err != nil {
+					if errors.Is(err, errCapacityHibernation) && process != nil {
+						select {
+						case <-forceHibernate:
+						default:
+						}
+						if closeErr := closeHarness(process, harnessCloseTimeout, timers); closeErr != nil {
+							sink.emit(Event{Type: "driver.process_failed", SessionID: snapshot.sessionID, Status: "hibernate_failure"})
+							return closeErr
+						}
+						process = nil
+						if residentHeld {
+							capacity.releaseResident(conversationID)
+							residentHeld = false
+						}
+						sink.emit(Event{Type: "driver.process_hibernated", SessionID: snapshot.sessionID, Status: "capacity_fairness"})
+						continue dispatchLoop
+					}
+					return err
+				}
+				turnHeld = true
+				if needsResident {
+					residentHeld = true
+				}
 			}
 			if process == nil {
 				if freshSessions {
@@ -262,6 +303,10 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 					return closeErr
 				}
 				process = nil
+				if capacity != nil && residentHeld {
+					capacity.releaseResident(conversationID)
+					residentHeld = false
+				}
 			}
 			return nil
 		}
@@ -289,15 +334,38 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			if err != nil {
 				return err
 			}
-			if snapshot.queueLen != 0 {
+			if err := closeHarness(process, harnessCloseTimeout, timers); err != nil {
+				sink.emit(Event{Type: "driver.process_failed", SessionID: snapshot.sessionID, Status: "hibernate_failure"})
+				return err
+			}
+			process = nil
+			if capacity != nil && residentHeld {
+				capacity.releaseResident(conversationID)
+				residentHeld = false
+			}
+			sink.emit(Event{Type: "driver.process_hibernated", SessionID: snapshot.sessionID, Status: "idle_timeout"})
+		case <-forceHibernate:
+			if active != nil || process == nil {
 				continue
+			}
+			snapshot, err := store.snapshot(ref)
+			if err != nil {
+				return err
+			}
+			hibernationStatus := "capacity_pressure"
+			if snapshot.queueLen != 0 {
+				hibernationStatus = "capacity_fairness"
 			}
 			if err := closeHarness(process, harnessCloseTimeout, timers); err != nil {
 				sink.emit(Event{Type: "driver.process_failed", SessionID: snapshot.sessionID, Status: "hibernate_failure"})
 				return err
 			}
 			process = nil
-			sink.emit(Event{Type: "driver.process_hibernated", SessionID: snapshot.sessionID, Status: "idle_timeout"})
+			if capacity != nil && residentHeld {
+				capacity.releaseResident(conversationID)
+				residentHeld = false
+			}
+			sink.emit(Event{Type: "driver.process_hibernated", SessionID: snapshot.sessionID, Status: hibernationStatus})
 		case result, ok := <-submissions:
 			if !ok {
 				inputOpen = false
@@ -359,12 +427,40 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			}
 			completedID := active.ID
 			active = nil
+			remainingQueued := false
+			if capacity != nil && turnHeld {
+				remaining, snapshotErr := store.snapshot(ref)
+				if snapshotErr != nil {
+					return snapshotErr
+				}
+				remainingQueued = remaining.queueLen > 0
+			}
 			sink.emit(Event{Type: "turn." + message.result.Status, InputID: completedID, SessionID: terminalSessionID, TurnID: message.result.TurnID})
+			if capacity != nil && turnHeld {
+				rotateResident := capacity.releaseTurn(conversationID, remainingQueued)
+				turnHeld = false
+				if rotateResident && process != nil {
+					if err := closeHarness(process, harnessCloseTimeout, timers); err != nil {
+						sink.emit(Event{Type: "driver.process_failed", SessionID: terminalSessionID, Status: "hibernate_failure"})
+						return err
+					}
+					process = nil
+					if residentHeld {
+						capacity.releaseResident(conversationID)
+						residentHeld = false
+					}
+					sink.emit(Event{Type: "driver.process_hibernated", SessionID: terminalSessionID, Status: "capacity_fairness"})
+				}
+			}
 			if freshSessions {
 				if err := process.Close(); err != nil {
 					return err
 				}
 				process = nil
+				if capacity != nil && residentHeld {
+					capacity.releaseResident(conversationID)
+					residentHeld = false
+				}
 			}
 		}
 	}

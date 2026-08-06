@@ -75,6 +75,42 @@ func (s *conversationStore) snapshot(ref conversationRef) (conversationSnapshot,
 	return snapshot, nil
 }
 
+func (s *conversationStore) queued(ref conversationRef) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := 0
+	for _, conversation := range s.state.Conversations {
+		agentMatches := conversation.AgentID == ref.agentID || s.state.SchemaVersion == 1 && len(s.state.Conversations) == 1 && conversation.AgentID == ""
+		if !agentMatches || conversation.Harness != ref.harness || conversation.SourceFingerprint != ref.fingerprint {
+			continue
+		}
+		for _, input := range conversation.Queue {
+			if input.Status == "queued" {
+				total++
+			}
+		}
+	}
+	return total
+}
+
+func (s *conversationStore) inputStatus(ref conversationRef, inputID string) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, err := s.lookup(ref)
+	if err != nil || conversation == nil {
+		return "", false, err
+	}
+	for _, input := range conversation.Queue {
+		if input.ID == inputID {
+			return input.Status, true, nil
+		}
+	}
+	if outcome := conversation.Outcomes[inputID]; outcome != "" {
+		return outcome, true, nil
+	}
+	return "", false, nil
+}
+
 func (s *conversationStore) assignWorkspaceAndAccept(ref conversationRef, workspace, branch, inputID, text string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

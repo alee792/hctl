@@ -38,9 +38,10 @@ separate, but spread lifecycle ownership into the transport adapter and loaded
 an independent in-memory copy of the same durable state file for each surface.
 Concurrent saves could therefore discard another surface's progress.
 
-Idle hibernation, global admission limits, and isolated writable
-worktrees also need one transport-independent place to observe and control
-conversation lifecycle without introducing a supervisor agent.
+Idle hibernation, global admission limits, and isolated writable worktrees also
+need one transport-independent place to observe and control conversation
+lifecycle without introducing a supervisor agent. ADR 0017 defines the global
+capacity coordinator built at this seam.
 
 ## Consequences
 
@@ -50,5 +51,5 @@ conversation lifecycle without introducing a supervisor agent.
   states without paths or runtime identifiers.
 - One conversation failure still terminates the channel runtime consistently;
   recovery never silently retries ambiguous work.
-- Capacity limits and writable worktrees remain separate changes built through
-  this lifecycle interface. Read-only channel execution is defined by ADR 0015.
+- Capacity limits are defined by ADR 0017 and writable worktrees by ADR 0016.
+  Read-only channel execution is defined by ADR 0015.

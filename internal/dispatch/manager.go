@@ -42,6 +42,7 @@ type Manager struct {
 	turnTimeout time.Duration
 	idleTimeout time.Duration
 	timers      idleTimerFactory
+	capacity    *capacityCoordinator
 	workspaces  WorkspaceProvider
 	emit        func(string, Event) error
 	store       *conversationStore
@@ -73,6 +74,7 @@ type managedConversation struct {
 	admissions   int
 	closing      bool
 	resident     bool
+	hibernate    chan struct{}
 	err          error
 }
 
@@ -81,17 +83,25 @@ func NewManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 }
 
 func NewManagerWithIdleTimeout(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error) (*Manager, error) {
-	return newManager(ctx, p, driver, turnTimeout, idleTimeout, emit, newIdleTimer, nil)
+	return newManager(ctx, p, driver, turnTimeout, idleTimeout, DefaultMaxResidentSessions, DefaultMaxActiveTurns, emit, newIdleTimer, nil)
 }
 
 func NewManagerWithWorkspace(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error, workspaces WorkspaceProvider) (*Manager, error) {
+	return NewManagerWithWorkspaceAndLimits(ctx, p, driver, turnTimeout, idleTimeout, DefaultMaxResidentSessions, DefaultMaxActiveTurns, emit, workspaces)
+}
+
+func NewManagerWithWorkspaceAndLimits(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, workspaces WorkspaceProvider) (*Manager, error) {
 	if workspaces == nil {
 		return nil, errors.New("managed writable workspace provider is required")
 	}
-	return newManager(ctx, p, driver, turnTimeout, idleTimeout, emit, newIdleTimer, workspaces)
+	return newManager(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newIdleTimer, workspaces)
 }
 
-func newManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error, timers idleTimerFactory, workspaces WorkspaceProvider) (*Manager, error) {
+func NewManagerWithLimits(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error) (*Manager, error) {
+	return newManager(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newIdleTimer, nil)
+}
+
+func newManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, timers idleTimerFactory, workspaces WorkspaceProvider) (*Manager, error) {
 	if p == nil || driver == nil {
 		return nil, errors.New("managed sessions require a project and harness driver")
 	}
@@ -104,13 +114,17 @@ func newManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 	if emit == nil {
 		return nil, errors.New("managed session event receiver is required")
 	}
+	capacity, err := newCapacityCoordinator(maxResident, maxActive)
+	if err != nil {
+		return nil, err
+	}
 	store, err := openConversationStore(p.WorkspaceRoot)
 	if err != nil {
 		return nil, err
 	}
 	managerCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
-		project: p, driver: driver, turnTimeout: turnTimeout, idleTimeout: idleTimeout, timers: timers, workspaces: workspaces, emit: emit,
+		project: p, driver: driver, turnTimeout: turnTimeout, idleTimeout: idleTimeout, timers: timers, capacity: capacity, workspaces: workspaces, emit: emit,
 		store: store, ctx: managerCtx, cancel: cancel,
 		workers: map[string]*managedConversation{}, elevating: map[string]bool{}, done: make(chan struct{}), stopped: make(chan struct{}),
 	}, nil
@@ -189,7 +203,10 @@ func (m *Manager) startDurableWorker(conversation string) error {
 	if m.workers[conversation] != nil {
 		return nil
 	}
-	worker := &managedConversation{conversation: conversation, submissions: make(chan Submission, 32), done: make(chan struct{})}
+	worker, err := m.newWorkerLocked(conversation)
+	if err != nil {
+		return err
+	}
 	m.workers[conversation] = worker
 	go m.run(worker)
 	return nil
@@ -198,6 +215,30 @@ func (m *Manager) startDurableWorker(conversation string) error {
 func (m *Manager) Submit(ctx context.Context, conversation string, submission Submission) (SubmissionResult, error) {
 	if err := ValidateConversation(conversation); err != nil {
 		return SubmissionResult{}, err
+	}
+	m.mu.Lock()
+	closed, managerErr, elevating := m.closed, m.err, m.elevating[conversation]
+	m.mu.Unlock()
+	if closed {
+		if managerErr != nil {
+			return SubmissionResult{}, managerErr
+		}
+		return SubmissionResult{}, ErrManagerClosed
+	}
+	if elevating {
+		return SubmissionResult{}, ErrConversationBusy
+	}
+	status, duplicate, err := m.store.inputStatus(m.reference(conversation), submission.InputID)
+	if err != nil {
+		return SubmissionResult{}, err
+	}
+	if duplicate {
+		if status == "queued" || status == "active" {
+			if err := m.startDurableWorker(conversation); err != nil {
+				return SubmissionResult{}, err
+			}
+		}
+		return SubmissionResult{Status: status, Duplicate: true}, nil
 	}
 	reply := make(chan SubmissionResult, 1)
 	submission.Reply = reply
@@ -217,7 +258,12 @@ func (m *Manager) Submit(ctx context.Context, conversation string, submission Su
 	}
 	worker := m.workers[conversation]
 	if worker == nil {
-		worker = &managedConversation{conversation: conversation, submissions: make(chan Submission, 32), done: make(chan struct{})}
+		var err error
+		worker, err = m.newWorkerLocked(conversation)
+		if err != nil {
+			m.mu.Unlock()
+			return SubmissionResult{}, err
+		}
 		m.workers[conversation] = worker
 		go m.run(worker)
 	}
@@ -321,6 +367,11 @@ func (m *Manager) Status(conversation string) ConversationStatus {
 	m.mu.Unlock()
 
 	return statusFromSnapshot(snapshot, admissions, resident)
+}
+
+func (m *Manager) Capacity() CapacityStatus {
+	queued := m.store.queued(m.reference(""))
+	return m.capacity.snapshot(queued)
 }
 
 func statusFromSnapshot(snapshot conversationSnapshot, admissions int, resident bool) ConversationStatus {
@@ -483,6 +534,7 @@ func (m *Manager) Close() {
 			}
 			workers = append(workers, worker)
 		}
+		m.capacity.shutdown()
 		m.cancel()
 		m.mu.Unlock()
 		for _, worker := range toClose {
@@ -522,8 +574,9 @@ func (m *Manager) run(worker *managedConversation) {
 			}
 			m.mu.Unlock()
 			return m.emit(worker.conversation, event)
-		}, false, m.turnTimeout, m.idleTimeout, m.timers, policy, m.store)
+		}, false, m.turnTimeout, m.idleTimeout, m.timers, policy, m.store, m.capacity, worker.hibernate)
 	}
+	m.capacity.unregister(worker.conversation)
 	m.mu.Lock()
 	worker.err = err
 	close(worker.done)
@@ -531,10 +584,19 @@ func (m *Manager) run(worker *managedConversation) {
 	if err != nil && !closing && m.err == nil {
 		m.err = err
 		m.closed = true
+		m.capacity.shutdown()
 		m.cancel()
 		m.doneOnce.Do(func() { close(m.done) })
 	}
 	m.mu.Unlock()
+}
+
+func (m *Manager) newWorkerLocked(conversation string) (*managedConversation, error) {
+	hibernate := make(chan struct{}, 1)
+	if err := m.capacity.register(conversation, hibernate); err != nil {
+		return nil, err
+	}
+	return &managedConversation{conversation: conversation, submissions: make(chan Submission, 32), done: make(chan struct{}), hibernate: hibernate}, nil
 }
 
 func (m *Manager) finishAdmission(worker *managedConversation) error {

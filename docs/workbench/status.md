@@ -124,6 +124,12 @@ a generated custom subagent, and session resume in a fresh external workspace.
   `harnesses/claude/.claude/` or `harnesses/codex/.codex/` tree. Only the
   selected tree is copied, its files share the existing source-fingerprint and
   apply-ownership protections, and hctl neither merges nor interprets them.
+- The first connection slice follows Eve's `connections/`, path-derived name,
+  model-facing description, and qualified-tool conventions. A bounded
+  `connections/github.md` definition enables only anonymous, public, read-only
+  repository and issue operations through hctl's existing managed MCP server.
+  It deliberately adds no credential, broker, generic OpenAPI runtime, or
+  remote MCP proxy.
 
 ## Retained product horizon
 
@@ -187,9 +193,9 @@ configurations.
 The Codex native journey has live evidence, and the `darwin-arm64`
 clean-machine release archive journey is credential-free tested. Equivalent
 Claude acceptance remains. The credential-broker execution boundary is settled
-in ADR 0009; backend selection waits for the GitHub connection slice or another
-concrete secret-bearing managed tool. The GitHub connection is the next product
-slice; the remaining ordered conventions stay behind it. Do not implement
+in ADR 0009; its backend and credential-owner decision remain deferred because
+the first GitHub slice is anonymous. HCTL-010 is shaped and Ready; the Discord
+channel and remaining ordered conventions stay behind it. Do not implement
 proposal capture, image deployment, or broker code merely to exercise future
 seams.
 

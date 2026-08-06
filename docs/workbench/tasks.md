@@ -17,24 +17,53 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-No task is ready for unattended implementation. HCTL-010 is next in the ordered
-sequence but must first inspect Eve's then-current connection contract.
+### HCTL-010 — Add an anonymous public GitHub connection
+
+**Outcome:** A bounded UTF-8 description at `connections/github.md` registers
+one managed GitHub connection. Its path supplies the name and it exposes exactly
+`github__get-repository`, `github__list-issues`, and `github__get-issue` through
+the existing managed MCP server for both harnesses. The tools perform fixed,
+anonymous, read-only GitHub REST requests and return bounded schema-shaped
+public repository and issue data.
+
+**Boundaries:** Follow Eve's `connections/`, path-derived identity,
+model-facing description, and `<connection>__<tool>` precedent. Do not add
+TypeScript connection definitions, a generic OpenAPI loader, dynamic MCP
+proxying, credentials, private-repository access, writes, approval UX, or a
+broker. Only `connections/github.md` is supported; any other connection entry
+fails clearly. Apply does not contact GitHub. Runtime requests use a fixed HTTPS
+host, endpoints, headers, short timeout, rejected redirects, bounded bodies,
+strict input and response schemas, no retries, and stable errors that expose no
+upstream body or arbitrary diagnostics.
+
+**Acceptance:** Project tests cover valid discovery for both harnesses,
+fingerprinting, missing/empty/oversized/non-UTF-8/symlinked definitions, and
+unsupported connection entries before workspace mutation. Credential-free fake
+HTTP tests cover the three exact operations, method/path/headers, absence of
+authorization, limits and truncation, redirects, timeouts, response bounds,
+status classification, no retry, and continued MCP service after a failed
+call. Both generated harness configurations reach the same qualified tools,
+audit remains content-free, absent `connections/github.md` preserves the
+existing managed surface, and `./scripts/check.sh` passes. No live GitHub call
+or credential is authorized.
+
+**Context:** [ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md),
+[product specification](../product-spec.md), and Eve's current
+[`connections` contract](https://github.com/vercel/eve/blob/84c3dfc1ff91e075444eee7c6d8e2ef55b2aaebe/docs/connections/overview.mdx).
+Add a short ADR for the anonymous-first decision and update the README, product
+specification, glossary, status, task list, and a minimal fixture.
 
 ## Ordered next
 
 Do not start these concurrently. Shape each item using evidence from the
 completed predecessor.
 
-1. **HCTL-010 — GitHub connection.** Inspect Eve's then-current connection
-   filesystem convention and interface, then implement the smallest useful
-   hctl connection consistent with ADR 0009. No live credential or GitHub
-   action is authorized by this queue entry.
-2. **HCTL-011 — Discord channel.** Inspect Eve's then-current channel
+1. **HCTL-011 — Discord channel.** Inspect Eve's then-current channel
    filesystem convention and interface, then connect Discord to hctl's
    session-aware gateway with authenticated, deduplicated input and bounded
    outbound delivery. No live bot, webhook, listener, or Discord action is
    authorized by this queue entry.
-3. **HCTL-012 — Schedules and sandbox/runtime conventions.** Reassess these
+2. **HCTL-012 — Schedules and sandbox/runtime conventions.** Reassess these
    after a real connection and channel expose the runtime and deployment needs;
    do not treat them as one implementation project unless the evidence supports
    that shape.

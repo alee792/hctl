@@ -9,6 +9,7 @@ import (
 
 	"hctl/internal/harness"
 	"hctl/internal/project"
+	"hctl/internal/session"
 )
 
 func TestTriggerUsesPromptFreshSessionsAndDeduplicates(t *testing.T) {
@@ -51,6 +52,40 @@ func TestTriggerRejectsUnknownScheduleWithoutOpeningHarness(t *testing.T) {
 	}
 	if len(driver.resumed) != 0 {
 		t.Fatal("unknown schedule opened the harness")
+	}
+}
+
+func TestTriggerRecoversSameOccurrenceAsUncertainWithoutRetry(t *testing.T) {
+	p := scheduledProject(t)
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := state.GetOrCreate(p.AgentID, "claude", conversationID("billing/sweep"), p.SourceFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := conversation.Accept("occurrence-1", "Sweep stale billing work.\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conversation.StartNext(); err != nil {
+		t.Fatal(err)
+	}
+	conversation.SessionID = "interrupted-session"
+	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+		t.Fatal(err)
+	}
+
+	driver := &fakeDriver{}
+	result, err := Trigger(context.Background(), p, driver, "billing/sweep", "occurrence-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "uncertain" || !result.Duplicate || result.SessionID != "interrupted-session" {
+		t.Fatalf("uncertain retry result = %#v", result)
+	}
+	if len(driver.resumed) != 0 {
+		t.Fatal("uncertain occurrence was silently retried")
 	}
 }
 

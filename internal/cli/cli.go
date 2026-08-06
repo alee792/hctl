@@ -102,7 +102,7 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 	}
 	result, triggerErr := schedule.Trigger(ctx, p, driver, args[2], *inputID)
 	if result.Status != "" {
-		if _, err := fmt.Fprintf(output, "schedule=%s input_id=%s status=%s duplicate=%t", result.Name, result.InputID, result.Status, result.Duplicate); err != nil {
+		if _, err := fmt.Fprintf(output, "schedule=%q input_id=%q status=%s duplicate=%t", result.Name, result.InputID, result.Status, result.Duplicate); err != nil {
 			return err
 		}
 		if result.SessionID != "" {

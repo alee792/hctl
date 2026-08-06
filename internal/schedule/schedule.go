@@ -29,7 +29,7 @@ func Trigger(ctx context.Context, p *project.Project, driver harness.Driver, nam
 	if err := gateway.ValidateInputID(inputID); err != nil {
 		return Result{}, err
 	}
-	source, ok := find(p.Schedules, name)
+	source, ok := findSchedule(p.Schedules, name)
 	if !ok {
 		available := make([]string, len(p.Schedules))
 		for index, item := range p.Schedules {
@@ -63,7 +63,7 @@ func Trigger(ctx context.Context, p *project.Project, driver harness.Driver, nam
 		}
 		return nil
 	}
-	if err := gateway.RunTask(ctx, p, driver, conversation(name), gateway.Submission{InputID: inputID, Text: string(source.Prompt)}, emit); err != nil {
+	if err := gateway.RunTask(ctx, p, driver, conversationID(name), gateway.Submission{InputID: inputID, Text: string(source.Prompt)}, emit); err != nil {
 		return result, err
 	}
 	if result.Status == "" {
@@ -72,7 +72,7 @@ func Trigger(ctx context.Context, p *project.Project, driver harness.Driver, nam
 	return result, nil
 }
 
-func find(schedules []project.Schedule, name string) (project.Schedule, bool) {
+func findSchedule(schedules []project.Schedule, name string) (project.Schedule, bool) {
 	for _, item := range schedules {
 		if item.Name == name {
 			return item, true
@@ -81,7 +81,7 @@ func find(schedules []project.Schedule, name string) (project.Schedule, bool) {
 	return project.Schedule{}, false
 }
 
-func conversation(name string) string {
+func conversationID(name string) string {
 	digest := sha256.Sum256([]byte(name))
 	return "schedule-" + hex.EncodeToString(digest[:12])
 }

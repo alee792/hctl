@@ -266,6 +266,19 @@ func TestLoadDiscoversNestedSchedulesForBothHarnesses(t *testing.T) {
 	}
 }
 
+func TestSchedulePreservesPathNameAndMarkdownBody(t *testing.T) {
+	root := agent(t, "portable")
+	path := filepath.Join(root, "schedules", "Daily Reports", "Weekly_Sweep.md")
+	write(t, path, "---\ncron: '0 9 * * MON-FRI'\n---\n\n    preserve this code block\n\n")
+	loaded, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Schedules) != 1 || loaded.Schedules[0].Name != "Daily Reports/Weekly_Sweep" || string(loaded.Schedules[0].Prompt) != "    preserve this code block\n\n" {
+		t.Fatalf("schedule = %#v", loaded.Schedules)
+	}
+}
+
 func TestLoadRejectsInvalidSchedules(t *testing.T) {
 	tests := map[string]struct {
 		path    string
@@ -273,12 +286,12 @@ func TestLoadRejectsInvalidSchedules(t *testing.T) {
 		want    string
 	}{
 		"non-Markdown schedule": {"schedules/task.ts", []byte("export default {}\n"), "Markdown files only"},
-		"invalid path":          {"schedules/Daily.md", []byte("---\ncron: '* * * * *'\n---\nRun.\n"), "lowercase letters"},
 		"missing frontmatter":   {"schedules/task.md", []byte("Run.\n"), "YAML frontmatter"},
 		"unknown field":         {"schedules/task.md", []byte("---\ncron: '* * * * *'\ntimezone: UTC\n---\nRun.\n"), "one cron field only"},
 		"duplicate cron":        {"schedules/task.md", []byte("---\ncron: '* * * * *'\ncron: '0 * * * *'\n---\nRun.\n"), "duplicated"},
 		"non-string cron":       {"schedules/task.md", []byte("---\ncron: 5\n---\nRun.\n"), "must be a string"},
 		"wrong field count":     {"schedules/task.md", []byte("---\ncron: '* * * *'\n---\nRun.\n"), "five-field"},
+		"invalid cron":          {"schedules/task.md", []byte("---\ncron: 'foo bar baz qux quux'\n---\nRun.\n"), "valid standard"},
 		"empty prompt":          {"schedules/task.md", []byte("---\ncron: '* * * * *'\n---\n"), "body must be non-empty"},
 		"oversized prompt":      {"schedules/task.md", append([]byte("---\ncron: '* * * * *'\n---\n"), bytes.Repeat([]byte("a"), (32<<10)+1)...), "body exceeds"},
 		"non-UTF-8":             {"schedules/task.md", []byte{0xff}, "valid UTF-8"},

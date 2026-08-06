@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	cronlib "github.com/robfig/cron/v3"
 	"go.yaml.in/yaml/v3"
 
 	"hctl/internal/rootfs"
@@ -302,13 +303,8 @@ func loadSchedules(root string) ([]Schedule, error) {
 			return fmt.Errorf("schedule %q has an invalid path", relative)
 		}
 		name := strings.TrimSuffix(strings.TrimPrefix(relative, "schedules/"), ".md")
-		if len(name) > 128 {
+		if len([]rune(name)) > 128 {
 			return fmt.Errorf("schedule name %q exceeds 128 characters", name)
-		}
-		for _, part := range strings.Split(name, "/") {
-			if !portableName.MatchString(part) {
-				return fmt.Errorf("schedule path %q must use lowercase letters, numbers, and hyphens", relative)
-			}
 		}
 		source, err := rootfs.ReadSource(root, relative, maxSourceBytes)
 		if err != nil {
@@ -374,14 +370,22 @@ func parseSchedule(content []byte) (string, []byte, error) {
 			return "", nil, errors.New("frontmatter cron must contain printable ASCII")
 		}
 	}
-	prompt := strings.TrimSpace(string(bytes.Join(lines[closing+1:], []byte("\n"))))
-	if prompt == "" {
+	if _, err := cronlib.ParseStandard(cron); err != nil {
+		return "", nil, errors.New("frontmatter cron must be a valid standard five-field expression")
+	}
+	prompt := bytes.Join(lines[closing+1:], []byte("\n"))
+	if bytes.HasPrefix(prompt, []byte("\r\n")) {
+		prompt = prompt[2:]
+	} else if bytes.HasPrefix(prompt, []byte("\n")) {
+		prompt = prompt[1:]
+	}
+	if strings.TrimSpace(string(prompt)) == "" {
 		return "", nil, errors.New("markdown body must be non-empty")
 	}
-	if len([]byte(prompt))+1 > maxSchedulePrompt {
+	if len(prompt) > maxSchedulePrompt {
 		return "", nil, fmt.Errorf("markdown body exceeds %d bytes", maxSchedulePrompt)
 	}
-	return cron, []byte(prompt + "\n"), nil
+	return cron, prompt, nil
 }
 
 func loadDiscordChannel(root string) (*DiscordChannel, error) {

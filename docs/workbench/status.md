@@ -149,7 +149,7 @@ a generated custom subagent, and session resume in a fresh external workspace.
   interrupting the harness; bot credentials and Gateway behavior remain
   deferred.
 - Root-agent Markdown schedules follow Eve's nested `schedules/` convention:
-  strict frontmatter contains one structural five-field cron string and the
+  strict frontmatter contains one valid standard five-field cron string and the
   body is the task prompt. Apply starts no clock. `hctl schedule trigger`
   accepts a caller-owned occurrence ID, reuses bounded gateway deduplication,
   opens a fresh native session for each accepted occurrence, reports lifecycle

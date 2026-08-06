@@ -53,12 +53,12 @@ returns the retained gateway outcome without another harness turn.
 fingerprint changes, source/path/frontmatter/body bounds, unsupported files,
 and symlinks. Gateway and schedule tests prove fresh sessions, bounded shared
 deduplication state, prompt submission, duplicate suppression, unknown-name
-failure, and terminal session cleanup. A literal CLI test applies a scheduled
-agent to an external workspace, invokes a fake Claude stream twice with two
-occurrence IDs, proves a duplicate starts no process, verifies neither accepted
-occurrence resumes a prior session, and proves model output is absent from CLI
-status. No clock, registration, daemon, missed-run replay, channel delivery,
-credential, network request, or live model call is present. See
+failure, and terminal session cleanup. Literal CLI tests apply scheduled agents
+to external workspaces and invoke fake Claude and Codex protocols with two
+occurrence IDs; they prove a duplicate starts no process, neither accepted
+occurrence resumes a prior session, and model output is absent from CLI status.
+No clock, registration, daemon, missed-run replay, channel delivery, credential,
+network request, or live model call is present. See
 [ADR 0013](../adr/0013-run-schedules-as-fresh-gateway-tasks.md).
 `./scripts/check.sh` passes.
 

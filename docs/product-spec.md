@@ -270,14 +270,16 @@ mention ingestion, command registration, tunnel, TLS termination, public
 listener, deployment, component, modal, typing, or interruption support.
 
 The optional root `schedules/` directory contains nested Markdown task files.
-The path beneath `schedules/`, without `.md`, is the schedule name; every path
-segment uses lowercase letters, numbers, and hyphens. At most 32 schedules are
-discovered. Each file is bounded UTF-8 Markdown whose strict YAML frontmatter
+The bounded, valid UTF-8 path beneath `schedules/`, without `.md`, is the
+schedule name. At most 32 schedules are discovered. Each file is bounded UTF-8
+Markdown whose strict YAML frontmatter
 contains exactly one string field named `cron`. The value is at most 256
-printable ASCII characters in canonical five-field form, and the non-empty
-body is the task prompt. Apply validates these files and includes their original
-bytes in the source fingerprint, but starts no clock, harness process, network
-request, or external registration.
+printable ASCII characters and must parse as a standard five-field expression.
+The non-empty body is the task prompt; hctl removes only one optional blank line
+after the frontmatter delimiter and otherwise preserves its Markdown bytes.
+Apply validates these files and includes their original bytes in the source
+fingerprint, but starts no clock, harness process, network request, or external
+registration.
 
 ```sh
 hctl schedule trigger AGENT NAME --workspace WORKSPACE \

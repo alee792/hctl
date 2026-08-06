@@ -238,7 +238,8 @@ The bootstrap installs a pinned Go toolchain, `gopls`, `golangci-lint`,
 your editor from the configured shell to make the repository-local `gopls`
 available. Applying authored tools also requires their native tooling on
 `PATH`: Deno for TypeScript, `uv` for Python, and Go for Go tools. The
-implementation otherwise favors the Go standard library and uses one maintained
-YAML dependency for standards-compliant skill frontmatter; language-specific
-schema libraries remain inside tool hosts. Tests use credential-free fake
-harness processes; live model calls are not part of the default suite.
+implementation otherwise favors the Go standard library and uses maintained
+YAML and cron-parser dependencies for standards-compliant authored files;
+language-specific schema libraries remain inside tool hosts. Tests use
+credential-free fake harness processes; live model calls are not part of the
+default suite.

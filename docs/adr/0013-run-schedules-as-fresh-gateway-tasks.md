@@ -18,10 +18,12 @@ and per-turn deadline policy remain separate work.
 Root-agent schedules use Eve's Markdown convention at
 `schedules/NESTED/NAME.md`. The relative path without `.md` is the schedule
 name. Frontmatter contains exactly one string field named `cron`; it must be a
-bounded, canonical five-field printable-ASCII value. The non-empty Markdown
-body is the prompt. Apply discovers at most 32 schedules, validates their real
-paths and bounded contents, and includes their original bytes in the source
-fingerprint. It starts no harness process, clock, or external registration.
+bounded, standard five-field printable-ASCII expression. The non-empty Markdown
+body is the prompt; matching Eve, only one optional blank line after the closing
+frontmatter delimiter is removed. Apply discovers at most 32 schedules,
+validates their real paths and bounded contents, and includes their original
+bytes in the source fingerprint. It starts no harness process, clock, or
+external registration.
 
 `hctl schedule trigger AGENT NAME --input-id ID` submits one prompt through the
 existing typed gateway. A stable gateway conversation derived from the
@@ -37,11 +39,10 @@ Completed duplicates return the prior status without opening a harness. Any
 non-completed terminal status produces a nonzero command result after its
 status line is written.
 
-The `cron` value is structurally validated in this slice but not evaluated.
-HCTL-015 owns calendar semantics when it adds a foreground clock, including UTC
-evaluation and overlap behavior. HCTL-014 separately owns durable per-turn
-deadline behavior; the command currently retains the gateway's bounded
-whole-process timeout.
+The `cron` value is parsed as a standard expression in this slice but no clock
+evaluates it. HCTL-015 owns UTC evaluation and overlap behavior when it adds a
+foreground clock. HCTL-014 separately owns durable per-turn deadline behavior;
+the command currently retains the gateway's bounded whole-process timeout.
 
 ## Context
 
@@ -62,8 +63,8 @@ limit while preserving task isolation.
 
 - Schedules are root-only because subagents still accept `instructions.md`
   only.
-- Nested names use the same lowercase letter, number, and hyphen convention as
-  other portable names.
+- Nested names come directly from their bounded UTF-8 relative paths; hctl does
+  not impose a model-tool identifier grammar on them.
 - Changing a schedule invalidates the applied setup through the source
   fingerprint, but it does not require native-session migration.
 - One-shot dispatch is local and explicit. It performs no channel delivery,
@@ -77,5 +78,6 @@ limit while preserving task isolation.
 ## Sources
 
 - [Eve schedules](https://github.com/vercel/eve/blob/84c3dfc1ff91e075444eee7c6d8e2ef55b2aaebe/docs/schedules.mdx)
+- [Robfig standard cron parser](https://pkg.go.dev/github.com/robfig/cron/v3#ParseStandard)
 - [Product specification](../product-spec.md)
 - [ADR 0001](0001-use-native-harnesses.md)

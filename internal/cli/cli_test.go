@@ -162,6 +162,72 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s",
 	}
 }
 
+func TestScheduleTriggerRunsFreshCodexTaskAndDiscardsOutput(t *testing.T) {
+	source := t.TempDir()
+	workspace := t.TempDir()
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "schedules", "sweep.md"), "---\ncron: '0 9 * * 1-5'\n---\n\nSweep stale work.\n", 0o644)
+	logPath := filepath.Join(t.TempDir(), "codex.log")
+	t.Setenv("FAKE_LOG", logPath)
+	command := filepath.Join(t.TempDir(), "codex")
+	writeCLIFile(t, command, `#!/bin/sh
+if [ "${1-}" = "--version" ]; then
+  echo "codex-cli 0.144.1"
+  exit 0
+fi
+printf 'ARGS' >> "$FAKE_LOG"
+for arg in "$@"; do printf '\t%s' "$arg" >> "$FAKE_LOG"; done
+printf '\n' >> "$FAKE_LOG"
+while IFS= read -r line; do
+  printf 'WIRE\t%s\n' "$line" >> "$FAKE_LOG"
+  case "$line" in
+    *'"method":"initialize"'*)
+      echo '{"id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.1"}}'
+      ;;
+    *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
+      echo '{"id":2,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"}}}'
+      ;;
+    *'"method":"turn/start"'*)
+      turn_id="01922222-2222-7222-8222-222222222222"
+      echo '{"id":3,"result":{"turn":{"id":"01922222-2222-7222-8222-222222222222","items":[],"status":"inProgress"}}}'
+      printf '{"method":"item/agentMessage/delta","params":{"threadId":"01933333-3333-7333-8333-333333333333","turnId":"01944444-4444-7444-8444-444444444444","itemId":"child-item","delta":"child"}}\n'
+      printf '{"method":"turn/completed","params":{"threadId":"01933333-3333-7333-8333-333333333333","turn":{"id":"01944444-4444-7444-8444-444444444444","items":[],"status":"completed"}}}\n'
+      printf '{"method":"item/agentMessage/delta","params":{"threadId":"01911111-1111-7111-8111-111111111111","turnId":"%s","itemId":"item-1","delta":"SECRET MODEL OUTPUT"}}\n' "$turn_id"
+      printf '{"method":"turn/completed","params":{"threadId":"01911111-1111-7111-8111-111111111111","turn":{"id":"%s","items":[],"status":"completed"}}}\n' "$turn_id"
+      ;;
+  esac
+done
+`, 0o755)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"apply", source, "--workspace", workspace, "--harness", "codex", "--command", command}, strings.NewReader(""), &output, &stderr, self); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, inputID := range []string{"occurrence-1", "occurrence-1", "occurrence-2"} {
+		output.Reset()
+		stderr.Reset()
+		if err := Run([]string{"schedule", "trigger", source, "sweep", "--workspace", workspace, "--harness", "codex", "--input-id", inputID, "--command", command}, strings.NewReader(""), &output, &stderr, self); err != nil {
+			log, _ := os.ReadFile(logPath)
+			t.Fatalf("%v\n%s", err, log)
+		}
+		if strings.Contains(output.String(), "SECRET MODEL OUTPUT") || !strings.Contains(output.String(), "status=completed") {
+			t.Fatalf("Codex schedule output = %q", output.String())
+		}
+	}
+
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(log), `"method":"thread/start"`) != 2 || strings.Contains(string(log), `"method":"thread/resume"`) {
+		t.Fatalf("Codex schedule tasks were not fresh and deduplicated:\n%s", log)
+	}
+}
+
 func writeCLIFile(t *testing.T, path, content string, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

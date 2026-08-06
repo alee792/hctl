@@ -14,7 +14,7 @@ boundary.
 
 An agent is an ordinary, portable directory. It needs an `instructions.md`
 file with a description and Markdown body; optional skills, tools, and
-instructions-only subagents are discovered by convention:
+inherited subagents are discovered by convention:
 
 ```text
 my-agent/
@@ -55,8 +55,22 @@ resources. Adding a skill directory makes it available on the next apply;
 there is no registration file to update. TypeScript, Python, and Go tool
 functions under `tools/` are exposed through the same managed MCP server.
 Immediate subagents inherit their parent's generated skills and tools through
-the native harness. Apply preserves recognized target-specific metadata and
-warns when the selected harness does not document honoring it. Native files
+the native harness. A subagent may optionally request portable reasoning effort
+in its `instructions.md` frontmatter:
+
+```md
+---
+description: Review the implementation against the specification.
+effort: high
+---
+
+Report only actionable discrepancies.
+```
+
+Effort accepts `low`, `medium`, or `high`; hctl passes the request to the
+selected harness but cannot guarantee that its model, account, or policy honors
+it. Apply preserves recognized target-specific metadata and warns when the
+selected harness does not document honoring it. Native files
 that are intentionally not portable can be mirrored under
 `harnesses/claude/.claude/` or `harnesses/codex/.codex/`; only the selected
 harness receives them. Hctl copies those files literally and owns their

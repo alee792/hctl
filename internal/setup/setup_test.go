@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -96,6 +97,103 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 	}
 	if _, err := Apply(conflict, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "without hctl ownership") {
 		t.Fatalf("hand-authored native file was not refused: %v", err)
+	}
+}
+
+func TestSubagentEffortNativeOutput(t *testing.T) {
+	for _, effort := range []string{"", "low", "medium", "high"} {
+		label := effort
+		if label == "" {
+			label = "unspecified"
+		}
+		t.Run(label, func(t *testing.T) {
+			root := testAgent(t)
+			source := "---\ndescription: Review docs.\n"
+			if effort != "" {
+				source += "effort: " + effort + "\n"
+			}
+			write(t, filepath.Join(root, "subagents", "docs-reviewer", "instructions.md"), source+"---\n\nReview documentation.\n")
+
+			claude, err := project.Load(root, "claude")
+			if err != nil {
+				t.Fatal(err)
+			}
+			claudeFiles, err := filesFor(claude, "/opt/hctl/bin/hctl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			claudeEffort := ""
+			if effort != "" {
+				claudeEffort = "effort: " + effort + "\n"
+			}
+			wantClaude := "---\nname: docs-reviewer\ndescription: \"Review docs.\"\n" + claudeEffort + "---\n\nReview documentation.\n"
+			if got := string(claudeFiles.Files[".claude/agents/docs-reviewer.md"].Content); got != wantClaude {
+				t.Fatalf("Claude subagent = %q, want %q", got, wantClaude)
+			}
+
+			codex, err := project.Load(root, "codex")
+			if err != nil {
+				t.Fatal(err)
+			}
+			codexFiles, err := filesFor(codex, "/opt/hctl/bin/hctl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			codexEffort := ""
+			if effort != "" {
+				codexEffort = "model_reasoning_effort = " + strconv.Quote(effort) + "\n"
+			}
+			wantCodex := "name = \"docs_reviewer\"\ndescription = \"Review docs.\"\n" + codexEffort + "developer_instructions = \"Review documentation.\"\n"
+			if got := string(codexFiles.Files[".codex/agents/docs-reviewer.toml"].Content); got != wantCodex {
+				t.Fatalf("Codex subagent = %q, want %q", got, wantCodex)
+			}
+		})
+	}
+}
+
+func TestApplyRemovesSubagentEffortOnReapply(t *testing.T) {
+	for _, harness := range []string{"claude", "codex"} {
+		for _, description := range []string{"Review docs.", "Review: docs", "Review # docs", `"Review docs."`} {
+			t.Run(harness+"/"+description, func(t *testing.T) {
+				source := testAgent(t)
+				path := filepath.Join(source, "subagents", "docs-reviewer", "instructions.md")
+				write(t, path, "---\ndescription: "+description+"\neffort: high\n---\n\nReview documentation.\n")
+				workspace := t.TempDir()
+				withEffort, err := project.Load(source, harness, workspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := Apply(withEffort, "/opt/hctl/bin/hctl"); err != nil {
+					t.Fatal(err)
+				}
+
+				generated := filepath.Join(workspace, ".claude", "agents", "docs-reviewer.md")
+				wantWithEffort := "---\nname: docs-reviewer\ndescription: " + strconv.Quote(description) + "\neffort: high\n---\n\nReview documentation.\n"
+				if harness == "codex" {
+					generated = filepath.Join(workspace, ".codex", "agents", "docs-reviewer.toml")
+					wantWithEffort = "name = \"docs_reviewer\"\ndescription = " + strconv.Quote(description) + "\nmodel_reasoning_effort = \"high\"\ndeveloper_instructions = \"Review documentation.\"\n"
+				}
+				if got := read(t, generated); got != wantWithEffort {
+					t.Fatalf("effort output = %q, want %q", got, wantWithEffort)
+				}
+
+				write(t, path, "---\ndescription: "+description+"\n---\n\nReview documentation.\n")
+				withoutEffort, err := project.Load(source, harness, workspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := Apply(withoutEffort, "/opt/hctl/bin/hctl"); err != nil {
+					t.Fatal(err)
+				}
+				wantWithoutEffort := "---\nname: docs-reviewer\ndescription: " + strconv.Quote(description) + "\n---\n\nReview documentation.\n"
+				if harness == "codex" {
+					wantWithoutEffort = "name = \"docs_reviewer\"\ndescription = " + strconv.Quote(description) + "\ndeveloper_instructions = \"Review documentation.\"\n"
+				}
+				if got := read(t, generated); got != wantWithoutEffort {
+					t.Fatalf("description-only output = %q, want %q", got, wantWithoutEffort)
+				}
+			})
+		}
 	}
 }
 

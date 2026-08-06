@@ -17,31 +17,10 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### HCTL-009 — Richer subagents
+No task is ready for unattended implementation. HCTL-010 is next in the ordered
+sequence but must first inspect Eve's then-current connection contract.
 
-**Outcome:** Allow an immediate subagent's `instructions.md` frontmatter to
-request one optional portable `effort: low|medium|high`. Emit the value as
-Claude's native `effort` agent field and Codex's native
-`model_reasoning_effort` custom-agent field. Omit both when unspecified so
-existing description-only children remain compatible.
-
-**Boundaries:** Hctl validates and requests effort; the selected harness,
-model, account, and policy determine whether it is honored. Keep root
-instructions description-only. Do not add model selection, tool or skill
-allowlists, child-owned tools, skills, connections or MCP servers, permissions,
-sandbox/worktree settings, hooks, turn limits, nested children, delegation
-policy, lifecycle management, harness-version detection, or runtime
-observability. Those do not have one honest portable native contract today.
-
-**Acceptance:** Accept exactly `low`, `medium`, or `high`; reject unknown or
-duplicate fields, non-string effort, and unsupported values clearly. Prove
-description-only output remains unchanged, both native outputs use their exact
-field names, effort changes the source fingerprint, and removing it safely
-removes the native field on reapply. Update README, product specification,
-status, and ADR 0006's accepted boundary through a new short ADR. Run
-`./scripts/check.sh` and the maintainer's independent reviews.
-
-## Ordered after HCTL-009
+## Ordered next
 
 Do not start these concurrently. Shape each item using evidence from the
 completed predecessor.
@@ -61,6 +40,21 @@ completed predecessor.
    that shape.
 
 ## Completed
+
+### HCTL-009 — Add portable subagent effort
+
+**Outcome:** An immediate subagent may request optional `effort: low|medium|high`
+in its `instructions.md` frontmatter. Hctl emits Claude's native `effort` field
+or Codex's native `model_reasoning_effort` field and omits both when the request
+is absent. This is a validated request, not a guarantee that the selected
+harness, model, account, or policy honors it. Root instructions and all other
+subagent inheritance and isolation boundaries remain unchanged.
+
+**Evidence:** Project and setup tests cover every supported value, unknown and
+duplicate fields, non-string and unsupported values, exact native field names,
+source-fingerprint changes, byte-identical description-only output, and safe
+field removal on reapply. [ADR 0010](../adr/0010-allow-portable-subagent-effort.md)
+amends ADR 0006 only for this optional field. `./scripts/check.sh` passes.
 
 ### HCTL-008 — Add harness-specific authored files
 

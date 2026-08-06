@@ -119,6 +119,65 @@ func TestLoadDiscoversInstructionsOnlySubagents(t *testing.T) {
 	}
 }
 
+func TestLoadSubagentEffort(t *testing.T) {
+	root := agent(t, "portable")
+	path := filepath.Join(root, "subagents", "docs-reviewer", "instructions.md")
+	write(t, path, "---\ndescription: Review documentation.\n---\n\nCheck links.\n")
+	baseline, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Subagents[0].Effort != "" {
+		t.Fatalf("description-only effort = %q", baseline.Subagents[0].Effort)
+	}
+
+	fingerprints := map[string]bool{baseline.SourceFingerprint: true}
+	for _, effort := range []string{"low", "medium", "high"} {
+		write(t, path, "---\ndescription: Review documentation.\neffort: "+effort+"\n---\n\nCheck links.\n")
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatalf("effort %s: %v", effort, err)
+		}
+		if got := loaded.Subagents[0].Effort; got != effort {
+			t.Fatalf("effort = %q, want %q", got, effort)
+		}
+		if fingerprints[loaded.SourceFingerprint] {
+			t.Fatalf("effort %q did not produce a distinct source fingerprint", effort)
+		}
+		fingerprints[loaded.SourceFingerprint] = true
+	}
+}
+
+func TestLoadRejectsInvalidSubagentEffortFrontmatter(t *testing.T) {
+	tests := map[string]struct {
+		frontmatter string
+		want        string
+	}{
+		"unknown field":      {"description: Review.\nfuture: true", `field "future" is not supported`},
+		"duplicate field":    {"description: Review.\neffort: low\neffort: high", `field "effort" is duplicated`},
+		"non-string effort":  {"description: Review.\neffort: true", `field "effort" must be a string`},
+		"empty effort":       {"description: Review.\neffort: ''", `must be low, medium, or high`},
+		"unsupported effort": {"description: Review.\neffort: ultra", `must be low, medium, or high`},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := agent(t, "portable")
+			write(t, filepath.Join(root, "subagents", "reviewer", "instructions.md"), "---\n"+test.frontmatter+"\n---\n\nReview.\n")
+			if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("invalid frontmatter was not rejected clearly: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadKeepsRootInstructionsDescriptionOnly(t *testing.T) {
+	root := agent(t, "portable")
+	write(t, filepath.Join(root, "instructions.md"), "---\ndescription: Test agent.\neffort: high\n---\n\nBe concise.\n")
+	if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "one plain description only") {
+		t.Fatalf("root effort was not rejected: %v", err)
+	}
+}
+
 func TestLoadDiscoversOnlySelectedHarnessFiles(t *testing.T) {
 	root := agent(t, "portable")
 	claudeSettings := filepath.Join(root, "harnesses", "claude", ".claude", "settings.json")

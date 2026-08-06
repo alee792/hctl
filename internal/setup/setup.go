@@ -212,7 +212,11 @@ func filesFor(p *project.Project, executable string) (generatedSetup, error) {
 			}
 		}
 		for _, subagent := range p.Subagents {
-			files[fmt.Sprintf(".claude/agents/%s.md", subagent.Name)] = generatedFile{Content: []byte("---\nname: " + subagent.Name + "\ndescription: " + strconv.Quote(subagent.Description) + "\n---\n\n" + strings.TrimSpace(string(subagent.Instructions)) + "\n"), Mode: 0o644}
+			effort := ""
+			if subagent.Effort != "" {
+				effort = "effort: " + subagent.Effort + "\n"
+			}
+			files[fmt.Sprintf(".claude/agents/%s.md", subagent.Name)] = generatedFile{Content: []byte("---\nname: " + subagent.Name + "\ndescription: " + strconv.Quote(subagent.Description) + "\n" + effort + "---\n\n" + strings.TrimSpace(string(subagent.Instructions)) + "\n"), Mode: 0o644}
 		}
 	} else {
 		files["AGENTS.md"] = generatedFile{Content: []byte(instructions), Mode: 0o644}
@@ -242,7 +246,11 @@ func filesFor(p *project.Project, executable string) (generatedSetup, error) {
 		}
 		for _, subagent := range p.Subagents {
 			codexName := strings.ReplaceAll(subagent.Name, "-", "_")
-			files[fmt.Sprintf(".codex/agents/%s.toml", subagent.Name)] = generatedFile{Content: []byte("name = " + strconv.Quote(codexName) + "\ndescription = " + strconv.Quote(subagent.Description) + "\ndeveloper_instructions = " + strconv.Quote(strings.TrimSpace(string(subagent.Instructions))) + "\n"), Mode: 0o644}
+			effort := ""
+			if subagent.Effort != "" {
+				effort = "model_reasoning_effort = " + strconv.Quote(subagent.Effort) + "\n"
+			}
+			files[fmt.Sprintf(".codex/agents/%s.toml", subagent.Name)] = generatedFile{Content: []byte("name = " + strconv.Quote(codexName) + "\ndescription = " + strconv.Quote(subagent.Description) + "\n" + effort + "developer_instructions = " + strconv.Quote(strings.TrimSpace(string(subagent.Instructions))) + "\n"), Mode: 0o644}
 		}
 	}
 	for _, file := range p.HarnessFiles {

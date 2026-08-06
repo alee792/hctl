@@ -59,6 +59,7 @@ type File struct {
 type Subagent struct {
 	Name         string
 	Description  string
+	Effort       string
 	Path         string
 	Instructions []byte
 	Source       []byte
@@ -398,13 +399,94 @@ func loadSubagents(root string) ([]Subagent, error) {
 		if err != nil {
 			return nil, fmt.Errorf("subagent %q: %w", entry.Name(), err)
 		}
-		description, instructions, err := parseInstructions(source)
+		description, effort, instructions, err := parseSubagentInstructions(source)
 		if err != nil {
 			return nil, fmt.Errorf("subagent %q instructions: %w", entry.Name(), err)
 		}
-		result = append(result, Subagent{Name: entry.Name(), Description: description, Path: path, Instructions: instructions, Source: source})
+		result = append(result, Subagent{Name: entry.Name(), Description: description, Effort: effort, Path: path, Instructions: instructions, Source: source})
 	}
 	return result, nil
+}
+
+func parseSubagentInstructions(content []byte) (string, string, []byte, error) {
+	if !utf8.Valid(content) {
+		return "", "", nil, errors.New("file must be valid UTF-8")
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(content))
+	if !scanner.Scan() || strings.TrimSuffix(scanner.Text(), "\r") != "---" {
+		return "", "", nil, errors.New("file must start with YAML frontmatter")
+	}
+	description, effort := "", ""
+	seen := map[string]bool{}
+	closed := false
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if line == "---" {
+			closed = true
+			break
+		}
+		key, value, ok := strings.Cut(line, ":")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			return "", "", nil, errors.New("frontmatter fields must use plain key: value lines")
+		}
+		if seen[key] {
+			return "", "", nil, fmt.Errorf("frontmatter field %q is duplicated", key)
+		}
+		seen[key] = true
+		switch key {
+		case "description":
+			description = strings.TrimSpace(value)
+		case "effort":
+			var err error
+			effort, err = parseEffort(value)
+			if err != nil {
+				return "", "", nil, err
+			}
+		default:
+			return "", "", nil, fmt.Errorf("frontmatter field %q is not supported", key)
+		}
+	}
+	if !closed {
+		return "", "", nil, errors.New("frontmatter is not closed")
+	}
+	if description == "" || len(description) > 1024 {
+		return "", "", nil, errors.New("frontmatter description must be non-empty and bounded")
+	}
+
+	var body []string
+	for scanner.Scan() {
+		body = append(body, strings.TrimSuffix(scanner.Text(), "\r"))
+	}
+	if err := scanner.Err(); err != nil {
+		return "", "", nil, errors.New("cannot read instructions")
+	}
+	trimmed := strings.TrimSpace(strings.Join(body, "\n"))
+	if trimmed == "" {
+		return "", "", nil, errors.New("markdown body must be non-empty")
+	}
+	return description, effort, []byte(trimmed + "\n"), nil
+}
+
+func parseEffort(raw string) (string, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal([]byte(strings.TrimSpace(raw)), &document); err != nil {
+		return "", errors.New("frontmatter field \"effort\" must be a string")
+	}
+	if err := validateYAMLTree(&document); err != nil {
+		return "", fmt.Errorf("frontmatter field \"effort\": %w", err)
+	}
+	if len(document.Content) != 1 {
+		return "", errors.New("frontmatter field \"effort\" must be a string")
+	}
+	effort, err := yamlString(document.Content[0], "effort")
+	if err != nil {
+		return "", err
+	}
+	if effort != "low" && effort != "medium" && effort != "high" {
+		return "", errors.New("frontmatter field \"effort\" must be low, medium, or high")
+	}
+	return effort, nil
 }
 
 func loadSkills(root string) ([]Skill, error) {

@@ -1,6 +1,6 @@
 # Working status
 
-- Updated: 2026-08-05
+- Updated: 2026-08-06
 - Repository: local-only `hctl` experiment; product naming remains deferred
 - Purpose: let a clean session resume without depending on chat history or the
   previous Roster repository
@@ -24,7 +24,8 @@ The repository contains a small Go CLI, with one maintained YAML dependency,
 that:
 
 - applies portable agent instructions, open Agent Skills directories with
-  bundled resources, immediate instructions-only subagents, and selected
+  bundled resources, immediate inherited subagents with an optional portable
+  reasoning-effort request, and selected
   harness-specific native files to an
   independently selected workspace as native Claude Code and Codex files
   without overwriting hand-authored files;
@@ -111,8 +112,10 @@ a generated custom subagent, and session resume in a fresh external workspace.
 - `apply` prepares locked tool dependencies through native Deno, Python, and Go
   tooling. hctl does not invent a second package manager or dependency file.
 - Immediate subagents use native Claude and Codex configuration, inherit their
-  parent's skills and tools, and may not define child tools, skills,
-  dependencies, or further subagents in the current slice.
+  parent's skills and tools, and may optionally request `low`, `medium`, or
+  `high` reasoning effort. Hctl maps that request to each harness's native
+  field without claiming it will be honored. Children may not define tools,
+  skills, dependencies, or further subagents in the current slice.
 - Skills use the open `skills/NAME/SKILL.md` layout. Portable documentary
   metadata and regular-file resources survive both native project harness
   setups. Recognized vendor metadata is copied unchanged to either target and
@@ -126,9 +129,9 @@ a generated custom subagent, and session resume in a fresh external workspace.
 
 These are later product promises, not MVP implementation work:
 
-- Advance the remaining filesystem conventions in this order: richer
-  subagents, a GitHub connection, a Discord channel, then schedules and
-  sandbox/runtime conventions. Each item must remain a
+- Advance the remaining filesystem conventions in this order: a GitHub
+  connection, a Discord channel, then schedules and sandbox/runtime
+  conventions. Each item must remain a
   bounded product slice; completing the sequence is not permission to add live
   credentials, contact GitHub or Discord, publish, deploy, or replace native
   harness behavior.
@@ -178,13 +181,14 @@ interfaces before their ordered work item reaches the frontier.
 ## Current design frontier
 
 Portable source, independent workspaces, authored tools, native inherited
-subagents, Agent Skills compatibility, and harness-specific authored files are
-implemented and exercised through generated Claude and Codex configurations.
+subagents with optional effort, Agent Skills compatibility, and harness-specific
+authored files are implemented and exercised through generated Claude and Codex
+configurations.
 The Codex native journey has live evidence, and the `darwin-arm64`
 clean-machine release archive journey is credential-free tested. Equivalent
 Claude acceptance remains. The credential-broker execution boundary is settled
 in ADR 0009; backend selection waits for the GitHub connection slice or another
-concrete secret-bearing managed tool. Richer subagents are the next product
+concrete secret-bearing managed tool. The GitHub connection is the next product
 slice; the remaining ordered conventions stay behind it. Do not implement
 proposal capture, image deployment, or broker code merely to exercise future
 seams.

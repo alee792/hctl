@@ -124,7 +124,12 @@ agent project.
 
 Immediate directories under `subagents/` define native harness subagents. Each
 contains only an `instructions.md` file with the same description-and-body
-contract. The MVP allows one level and at most eight subagents. A subagent
+contract plus optional string `effort`. Effort accepts exactly `low`, `medium`,
+or `high`; apply emits it as Claude agent `effort` or Codex custom-agent
+`model_reasoning_effort`. The field is omitted from native output when absent.
+Hctl validates and requests effort, while the selected harness, model, account,
+and policy determine whether it is honored. Root `instructions.md` remains
+description-only. The MVP allows one level and at most eight subagents. A subagent
 inherits the selected parent's generated instructions, skills, managed MCP
 tools, native tools, and permissions through native harness behavior. Child
 skills, tools, dependency files, and nested subagents are rejected rather than
@@ -383,9 +388,9 @@ The MVP is complete when credential-free tests prove:
 10. One agent project can be applied outside its source directory; generated
     files and execution use the selected workspace while dependencies and tool
     definitions remain rooted in agent source.
-11. Immediate instructions-only subagents are generated in each harness's
-    native format and inherit the parent setup without duplicated child tools
-    or skills.
+11. Immediate subagents are generated in each harness's native format, inherit
+    the parent setup without duplicated child tools or skills, and map optional
+    `low`, `medium`, or `high` effort to the exact native field.
 12. Agent Skills directories and their regular-file resources round-trip into
     both native project skill locations, including executable intent, while
     recognized unsupported vendor metadata remains intact and produces a

@@ -111,8 +111,6 @@ type Adapter struct {
 
 	mu      sync.Mutex
 	turns   map[string]*turn
-	results map[string]string
-	order   []string
 	jobs    chan delivery
 	done    chan struct{}
 	stopped chan struct{}
@@ -154,7 +152,6 @@ func New(config Config, submissions chan<- gateway.Submission) (*Adapter, error)
 		client:      client,
 		apiBase:     strings.TrimSuffix(base.String(), "/"),
 		turns:       map[string]*turn{},
-		results:     map[string]string{},
 		jobs:        make(chan delivery, 32),
 		done:        make(chan struct{}),
 		stopped:     make(chan struct{}),
@@ -225,7 +222,6 @@ func (a *Adapter) HandleEvent(event gateway.Event) {
 	if status == "" {
 		return
 	}
-	a.remember(event.InputID, status)
 	if current.token != nil {
 		a.queueLocked(delivery{inputID: event.InputID, token: current.token, content: current.output.String(), status: status, truncated: current.truncated})
 	}
@@ -301,7 +297,6 @@ func (a *Adapter) handle(response http.ResponseWriter, request *http.Request) {
 		a.turns[incoming.ID] = current
 	}
 	current.token = entry
-	known := a.results[incoming.ID]
 	a.mu.Unlock()
 
 	reply := make(chan gateway.SubmissionResult, 1)
@@ -340,10 +335,10 @@ func (a *Adapter) handle(response http.ResponseWriter, request *http.Request) {
 	}
 	writeJSON(response, http.StatusOK, map[string]any{"type": 5, "data": map[string]any{"allowed_mentions": allowedMentions()}})
 	entry.markReady()
-	if result.Duplicate && known != "" {
+	if result.Duplicate && terminalOutcome(result.Status) {
 		a.mu.Lock()
 		if current := a.turns[incoming.ID]; current != nil && current.token == entry {
-			a.queueLocked(delivery{inputID: incoming.ID, token: entry, status: known})
+			a.queueLocked(delivery{inputID: incoming.ID, token: entry, status: result.Status})
 			delete(a.turns, incoming.ID)
 		}
 		a.mu.Unlock()
@@ -381,17 +376,6 @@ func (a *Adapter) removeToken(inputID string, entry *tokenEntry) {
 func (a *Adapter) queueLocked(job delivery) {
 	// The gateway queue and Discord input validation bound pending jobs.
 	a.jobs <- job
-}
-
-func (a *Adapter) remember(id, status string) {
-	if a.results[id] == "" {
-		a.order = append(a.order, id)
-	}
-	a.results[id] = status
-	for len(a.order) > 256 {
-		delete(a.results, a.order[0])
-		a.order = a.order[1:]
-	}
 }
 
 func (a *Adapter) deliver() {
@@ -561,7 +545,7 @@ func validateAPIBase(value string) (*url.URL, error) {
 func terminalStatus(event gateway.Event) string {
 	if strings.HasPrefix(event.Type, "turn.") {
 		status := strings.TrimPrefix(event.Type, "turn.")
-		if status == "completed" || status == "failed" || status == "uncertain" {
+		if terminalOutcome(status) {
 			return status
 		}
 	}
@@ -569,6 +553,10 @@ func terminalStatus(event gateway.Event) string {
 		return "failed"
 	}
 	return ""
+}
+
+func terminalOutcome(status string) bool {
+	return status == "completed" || status == "failed" || status == "uncertain"
 }
 
 func appendBounded(current *turn, value string) {

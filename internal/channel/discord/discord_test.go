@@ -322,6 +322,89 @@ func TestRecoveredInteractionDeliversUncertainWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestCompletedDurableDuplicateAfterAdapterRestartIsDelivered(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := make(chan string, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		delivered <- string(body)
+		_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
+	}))
+	defer upstream.Close()
+	p := discordProject(t, "claude")
+	interactionID := "345678901234567890"
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := state.GetOrCreate(p.AgentID, "claude", "discord", p.SourceFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := conversation.Accept(interactionID, "already completed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conversation.StartNext(); err != nil {
+		t.Fatal(err)
+	}
+	if err := conversation.Complete(interactionID, "completed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+		t.Fatal(err)
+	}
+
+	submissions := make(chan gateway.Submission, 1)
+	adapter, err := New(Config{
+		ApplicationID: testApplication, AllowedUserID: testUser, PublicKey: publicKey,
+		Listen: "127.0.0.1:0", APIBase: upstream.URL,
+		Now: func() time.Time { return time.Unix(2_000_000_000, 0) },
+	}, submissions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := &fakeDriver{started: make(chan string, 1)}
+	done := make(chan error, 1)
+	go func() {
+		done <- gateway.RunSubmissions(context.Background(), p, driver, "discord", submissions, func(event gateway.Event) error { adapter.HandleEvent(event); return nil })
+	}()
+	response := signedCommand(t, adapter.Handler(), privateKey, interactionID, "replacement-token", "already completed")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"type":5`) {
+		t.Fatalf("completed duplicate acknowledgement = %d %s", response.Code, response.Body.String())
+	}
+	close(submissions)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	adapter.Close()
+
+	select {
+	case body := <-delivered:
+		if !strings.Contains(body, "Agent turn completed") {
+			t.Fatalf("completed duplicate delivery = %s", body)
+		}
+	default:
+		t.Fatal("completed durable duplicate was not delivered")
+	}
+	if len(delivered) != 0 {
+		t.Fatalf("completed duplicate delivered more than once: %d extra", len(delivered))
+	}
+	select {
+	case id := <-driver.started:
+		t.Fatalf("completed input was rerun as turn %s", id)
+	default:
+	}
+	adapter.mu.Lock()
+	retained := len(adapter.turns)
+	adapter.mu.Unlock()
+	if retained != 0 {
+		t.Fatalf("completed duplicate retained response token/turn: %d", retained)
+	}
+}
+
 func TestFailedTurnIsDelivered(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

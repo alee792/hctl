@@ -232,7 +232,10 @@ result. That result now promotes the requesting conversation into a validated,
 durably assigned branch-backed Git worktree, resumes the same native session
 under workspace-write policy, and continues the request once. Unassigned
 conversations remain read-only. Global resident-session and active-turn limits
-remain the next ordered slice tracked by the concurrent-session epic.
+now bound the runtime with documented defaults, durable saturation queues,
+fair cross-conversation turn admission, and idle hibernation under resident
+pressure. Simultaneous writable-conversation isolation remains the next ordered
+slice tracked by the concurrent-session epic.
 
 Live Discord acceptance remains pending enrollment of a user-controlled bot and
 authorized guild/channel. The automated evidence uses credential-free tests;

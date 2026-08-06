@@ -46,6 +46,8 @@ type Config struct {
 	Token       string
 	TurnTimeout time.Duration
 	IdleTimeout time.Duration
+	MaxResident int
+	MaxActive   int
 	Audit       io.Writer
 	Executable  string
 }
@@ -74,6 +76,7 @@ type conversationManager interface {
 	Submit(context.Context, string, dispatch.Submission) (dispatch.SubmissionResult, error)
 	Elevate(context.Context, string, dispatch.Submission) (dispatch.SubmissionResult, error)
 	Status(string) dispatch.ConversationStatus
+	Capacity() dispatch.CapacityStatus
 	Reset(string) error
 	Done() <-chan struct{}
 	Err() error
@@ -181,6 +184,15 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 	if config.IdleTimeout <= 0 || config.IdleTimeout > 24*time.Hour {
 		return nil, errors.New("discord idle timeout must be greater than zero and at most 24h")
 	}
+	if config.MaxResident == 0 {
+		config.MaxResident = dispatch.DefaultMaxResidentSessions
+	}
+	if config.MaxActive == 0 {
+		config.MaxActive = dispatch.DefaultMaxActiveTurns
+	}
+	if config.MaxResident <= 0 || config.MaxActive <= 0 || config.MaxActive > config.MaxResident || config.MaxResident > 64 {
+		return nil, errors.New("discord session capacity limits are invalid")
+	}
 	if config.Audit == nil {
 		config.Audit = io.Discard
 	}
@@ -205,9 +217,9 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 	workspaceManager, _ := worktree.New(ctx, p, config.Executable)
 	var manager *dispatch.Manager
 	if workspaceManager != nil {
-		manager, err = dispatch.NewManagerWithWorkspace(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, emit, workspaceManager)
+		manager, err = dispatch.NewManagerWithWorkspaceAndLimits(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, workspaceManager)
 	} else {
-		manager, err = dispatch.NewManagerWithIdleTimeout(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, emit)
+		manager, err = dispatch.NewManagerWithLimits(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit)
 	}
 	if err != nil {
 		cancel()
@@ -358,7 +370,7 @@ func (r *Runtime) handleInteraction(_ *discordgo.Session, incoming *discordgo.In
 			surfaceKind = "dm"
 		}
 		status := r.manager.Status(conversationID(r.config.Runtime.ApplicationID, incoming.ChannelID))
-		r.respond(incoming.Interaction, statusMessage(r.project.Name, r.driver.Name(), surfaceKind, status))
+		r.respond(incoming.Interaction, statusMessage(r.project.Name, r.driver.Name(), surfaceKind, status, r.manager.Capacity()))
 	case "new":
 		if err := r.resetSurface(incoming.ChannelID); err != nil {
 			r.respond(incoming.Interaction, "The conversation is busy. Try again after current work finishes.")
@@ -507,8 +519,8 @@ func visibleReplyDecided(output string) bool {
 	return true
 }
 
-func statusMessage(agent, harnessName, surfaceKind string, status dispatch.ConversationStatus) string {
-	return fmt.Sprintf("hctl is online: agent=%s harness=%s surface=%s state=%s pending=%d", agent, harnessName, surfaceKind, status.State, status.Pending)
+func statusMessage(agent, harnessName, surfaceKind string, status dispatch.ConversationStatus, capacity dispatch.CapacityStatus) string {
+	return fmt.Sprintf("hctl is online: agent=%s harness=%s surface=%s state=%s pending=%d active=%d/%d resident=%d/%d queued=%d", agent, harnessName, surfaceKind, status.State, status.Pending, capacity.Active, capacity.ActiveLimit, capacity.Resident, capacity.ResidentLimit, capacity.Queued)
 }
 
 func (r *Runtime) resetSurface(id string) error {

@@ -286,7 +286,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 
 func runAgent(args []string, input io.Reader, output, stderr io.Writer, self string) error {
 	if len(args) == 1 && isHelp(args[0]) {
-		_, err := io.WriteString(output, "Usage: hctl run AGENT [--workspace DIR] --harness <claude|codex> [--input channels|jsonl] [--profile NAME] [--config PATH] [--conversation ID] [--command PATH] [--timeout DURATION] [--turn-timeout DURATION] [--idle-timeout DURATION]\n")
+		_, err := io.WriteString(output, "Usage: hctl run AGENT [--workspace DIR] --harness <claude|codex> [--input channels|jsonl] [--profile NAME] [--config PATH] [--conversation ID] [--command PATH] [--timeout DURATION] [--turn-timeout DURATION] [--idle-timeout DURATION] [--max-resident-sessions N] [--max-active-turns N]\n")
 		return err
 	}
 	if len(args) == 0 {
@@ -304,14 +304,16 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 	timeout := fs.Duration("timeout", 2*time.Minute, "bounded run process lifetime")
 	turnTimeout := fs.Duration("turn-timeout", 2*time.Minute, "bounded channel turn lifetime")
 	idleTimeout := fs.Duration("idle-timeout", dispatch.DefaultIdleTimeout, "idle channel session lifetime")
+	maxResident := fs.Int("max-resident-sessions", dispatch.DefaultMaxResidentSessions, "maximum resident channel harness sessions")
+	maxActive := fs.Int("max-active-turns", dispatch.DefaultMaxActiveTurns, "maximum simultaneous channel turns")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("unexpected run arguments")
 	}
-	if (*inputMode != "channels" && *inputMode != "jsonl") || *timeout <= 0 || *timeout > 30*time.Minute || *turnTimeout <= 0 || *turnTimeout > 30*time.Minute || *idleTimeout <= 0 || *idleTimeout > 24*time.Hour {
-		return errors.New("run modes and timeouts are invalid")
+	if (*inputMode != "channels" && *inputMode != "jsonl") || *timeout <= 0 || *timeout > 30*time.Minute || *turnTimeout <= 0 || *turnTimeout > 30*time.Minute || *idleTimeout <= 0 || *idleTimeout > 24*time.Hour || *maxResident <= 0 || *maxResident > 64 || *maxActive <= 0 || *maxActive > *maxResident {
+		return errors.New("run mode, timeout, or capacity limit is invalid")
 	}
 	if err := dispatch.ValidateConversation(*conversation); err != nil {
 		return err
@@ -358,7 +360,7 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 	if err != nil {
 		return err
 	}
-	runtime, err := discord.New(p, driver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, Audit: stderr, Executable: hctlExecutable})
+	runtime, err := discord.New(p, driver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, MaxResident: *maxResident, MaxActive: *maxActive, Audit: stderr, Executable: hctlExecutable})
 	if err != nil {
 		return err
 	}

@@ -4,7 +4,6 @@
 /.agents/
 /.claude/
 /.codex/
-/AGENTS.md
 /CLAUDE.md
 /agents/*/.hctl/
 /agents/*/.mcp.json

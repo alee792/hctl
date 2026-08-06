@@ -10,7 +10,8 @@
 1. Read the [vision](../vision.md) for the product boundary.
 2. Read the [product specification](../product-spec.md) for the accepted MVP.
 3. Use the [glossary](../glossary.md) for author-facing terminology.
-4. Read the [tool-authoring workbench](tool-authoring.md) before designing or
+4. Use the [maintainer task list](tasks.md) for executable next work.
+5. Read the [tool-authoring workbench](tool-authoring.md) before designing or
    implementing authored tools.
 
 The product specification and accepted ADRs are the current contract.
@@ -152,3 +153,7 @@ journey has live evidence; equivalent Claude acceptance and clean-machine
 packaging remain. The next product decision is packaging, proposal capture,
 credential brokering, or another vision item. Do not add channels or image
 deployment merely to exercise those future seams.
+
+The [maintainer task list](tasks.md) turns that frontier into a prioritized,
+permission-aware queue. It is the source for agent assignments; this section
+remains the broader state summary.

@@ -205,7 +205,10 @@ harness file for the channel.
 
 `hctl channel discord` requires the selected project to have been applied and
 accepts one application ID, Ed25519 public key, allowed user ID, harness, and
-conversation at runtime. It binds a numeric loopback address, serves one clean
+optional conversation override at runtime. Without an override, its bounded,
+deterministic conversation ID includes both the configured application and
+allowed user so changing either cannot inherit the prior native session. It
+binds a numeric loopback address, serves one clean
 Interactions path, and accepts Discord PING plus application commands with
 exactly one string option named `message`. It verifies the signature over the
 timestamp and raw body, rejects timestamps outside five minutes, validates the
@@ -215,17 +218,31 @@ The interaction ID is the durable input ID, so the existing FIFO queue,
 deduplication, session mapping, and uncertain-recovery behavior remain
 authoritative.
 
-Accepted commands receive Discord's deferred acknowledgement after durable
-gateway acceptance and before turn completion. The adapter retains the
-short-lived interaction token only in process memory, aggregates bounded text
-deltas, and updates the fixed original-response endpoint. Further 2,000-rune
-chunks use at most seven fixed followup requests; every payload disables
-mentions. Completed, failed, and recovered-uncertain outcomes have bounded
-fallback text. Delivery has a five-second timeout, follows no redirect, reads
-at most 64 KiB of response, and never retries. A transport failure or invalid
-successful response is recorded as uncertain; an explicit rate limit or other
-non-success response is classified as rate-limited or failed without its
-response body. Audit contains only channel, input ID, and classified delivery
+Valid commands receive a flushed Discord deferred acknowledgement immediately
+after transport authentication, authorization, and bounded input validation;
+the HTTP handler does not wait for durable gateway acceptance. Submission then
+runs asynchronously. Queue-full or other gateway rejection edits the deferred
+original with stable bounded text, while accepted input keeps the gateway's
+existing durable FIFO and deduplication semantics. A model turn cannot start
+before the gateway reports acceptance.
+
+The adapter retains the short-lived interaction token only in process memory,
+aggregates bounded text deltas, and updates the fixed original-response
+endpoint. The original plus at most five 2,000-rune followups fit the limit for
+user-installed apps; every payload disables mentions and the final bounded
+chunk retains any truncation marker. Discord documents a three-second initial
+response deadline and a 15-minute interaction-token lifetime. Hctl defers
+immediately and, after 14 minutes from the signed timestamp, updates a still
+pending response with stable expiry text and releases its token, output, and
+turn memory. This cleanup does not interrupt or claim to stop the harness.
+HCTL-012 must revisit the separate runtime-turn timeout implied by this limit.
+
+Completed, failed, and recovered-uncertain outcomes have bounded fallback text.
+Delivery has a five-second timeout, follows no redirect, reads at most 64 KiB
+of response, and never retries. A transport failure or invalid successful
+response is recorded as uncertain; an explicit rate limit or other non-success
+response is classified as rate-limited or failed without its response body.
+Audit contains only channel, input ID, status class, and classified delivery
 outcome.
 
 This slice follows Eve's `channels/`, path-derived identity, normalized input,
@@ -475,9 +492,10 @@ The MVP is complete when credential-free tests prove:
 13. Harness-specific regular files round-trip only into their selected native
     project directory, join stale-source detection, and use the same collision,
     ownership, modified-file, and cleanup protections as generated setup.
-14. A signed Discord interaction is authorized, durably accepted, deduplicated,
-    and delivered through bounded responses for both harnesses without
-    persisting its token or exposing a non-loopback listener.
+14. A signed Discord interaction is authorized and immediately deferred, then
+    asynchronously accepted or rejected by the durable gateway. Accepted input
+    is deduplicated and delivered through bounded responses for both harnesses
+    without persisting its token or exposing a non-loopback listener.
 
 ## Explicit non-goals
 

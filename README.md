@@ -130,8 +130,13 @@ hctl channel discord ~/agents/reviewer --workspace ~/Code/example \
 ```
 
 The command accepts one string option named `message`. Hctl verifies the
-signature, application, user, and timestamp, acknowledges before the harness
-turn finishes, and edits the interaction response with bounded output. The
+signature, application, user, timestamp, and input, immediately flushes a
+deferred response, then submits to the durable gateway asynchronously. Queue
+rejection edits that response with stable text. The default conversation is
+scoped to the configured application and user; `--conversation` explicitly
+overrides it. Hctl uses at most six bounded response messages and replaces a
+still-loading response after 14 minutes without claiming to interrupt the
+harness. The
 listener is plain loopback HTTP; hctl does not register the command, expose a
 public endpoint, or terminate TLS. The short-lived interaction token remains
 in adapter memory and is not written to agent source, generated setup, gateway

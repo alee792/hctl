@@ -33,11 +33,13 @@ const (
 	maxRequestBytes  = 64 << 10
 	maxResponseBytes = 64 << 10
 	maxMessageBytes  = 32 << 10
-	maxChunks        = 8
+	maxChunks        = 6
 	maxChunkRunes    = 2_000
 	maxOutputRunes   = maxChunks*maxChunkRunes - 64
 	maxTokenBytes    = 512
 	maxClockSkew     = 5 * time.Minute
+	tokenLifetime    = 15 * time.Minute
+	defaultExpiry    = 14 * time.Minute
 )
 
 var snowflake = regexp.MustCompile(`^[0-9]{1,20}$`)
@@ -51,6 +53,7 @@ type Config struct {
 	APIBase       string
 	HTTPClient    *http.Client
 	Now           func() time.Time
+	ExpiryAfter   time.Duration
 	Audit         io.Writer
 }
 
@@ -81,12 +84,13 @@ type interactionOption struct {
 }
 
 type tokenEntry struct {
-	token string
-	ready chan struct{}
-	once  sync.Once
+	token     string
+	expiresAt time.Time
+	done      chan struct{}
+	once      sync.Once
 }
 
-func (entry *tokenEntry) markReady() { entry.once.Do(func() { close(entry.ready) }) }
+func (entry *tokenEntry) release() { entry.once.Do(func() { close(entry.done) }) }
 
 type turn struct {
 	token     *tokenEntry
@@ -115,6 +119,7 @@ type Adapter struct {
 	done    chan struct{}
 	stopped chan struct{}
 	stop    sync.Once
+	workers sync.WaitGroup
 }
 
 func New(config Config, submissions chan<- gateway.Submission) (*Adapter, error) {
@@ -126,6 +131,12 @@ func New(config Config, submissions chan<- gateway.Submission) (*Adapter, error)
 	}
 	if config.Now == nil {
 		config.Now = time.Now
+	}
+	if config.ExpiryAfter == 0 {
+		config.ExpiryAfter = defaultExpiry
+	}
+	if config.ExpiryAfter < 0 || config.ExpiryAfter >= tokenLifetime {
+		return nil, errors.New("discord response expiry must be positive and shorter than 15 minutes")
 	}
 	if config.Audit == nil {
 		config.Audit = io.Discard
@@ -201,6 +212,10 @@ func ParsePublicKey(value string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(decoded), nil
 }
 
+func DefaultConversation(applicationID, userID string) string {
+	return "discord-" + applicationID + "-" + userID
+}
+
 func (a *Adapter) Handler() http.Handler { return http.HandlerFunc(a.handle) }
 
 func (a *Adapter) HandleEvent(event gateway.Event) {
@@ -208,33 +223,49 @@ func (a *Adapter) HandleEvent(event gateway.Event) {
 		return
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	current := a.turns[event.InputID]
 	if current == nil {
-		current = &turn{}
-		a.turns[event.InputID] = current
+		a.mu.Unlock()
+		return
 	}
 	if event.Type == "agent.output.delta" {
 		appendBounded(current, event.Delta)
+		a.mu.Unlock()
 		return
 	}
 	status := terminalStatus(event)
 	if status == "" {
+		a.mu.Unlock()
 		return
 	}
 	if current.token != nil {
 		a.queueLocked(delivery{inputID: event.InputID, token: current.token, content: current.output.String(), status: status, truncated: current.truncated})
+		current.token.release()
 	}
 	delete(a.turns, event.InputID)
+	a.mu.Unlock()
 }
 
 func (a *Adapter) Close() {
 	a.Stop()
+	a.workers.Wait()
 	close(a.jobs)
 	<-a.done
 }
 
-func (a *Adapter) Stop() { a.stop.Do(func() { close(a.stopped) }) }
+func (a *Adapter) Stop() {
+	a.stop.Do(func() {
+		close(a.stopped)
+		a.mu.Lock()
+		for _, current := range a.turns {
+			if current.token != nil {
+				current.token.release()
+			}
+		}
+		a.turns = map[string]*turn{}
+		a.mu.Unlock()
+	})
+}
 
 func (a *Adapter) handle(response http.ResponseWriter, request *http.Request) {
 	requestPath := a.config.Path
@@ -255,7 +286,8 @@ func (a *Adapter) handle(response http.ResponseWriter, request *http.Request) {
 		http.Error(response, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if !a.verify(request.Header, body) {
+	signedAt, verified := a.verify(request.Header, body)
+	if !verified {
 		http.Error(response, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -269,7 +301,7 @@ func (a *Adapter) handle(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if incoming.Type == 1 {
-		writeJSON(response, http.StatusOK, map[string]any{"type": 1})
+		_ = writeJSON(response, http.StatusOK, map[string]any{"type": 1})
 		return
 	}
 	if incoming.Type != 2 {
@@ -289,87 +321,117 @@ func (a *Adapter) handle(response http.ResponseWriter, request *http.Request) {
 		http.Error(response, "invalid command", http.StatusBadRequest)
 		return
 	}
-	entry := &tokenEntry{token: incoming.Token, ready: make(chan struct{})}
+	entry := &tokenEntry{token: incoming.Token, expiresAt: signedAt.Add(tokenLifetime), done: make(chan struct{})}
 	a.mu.Lock()
 	current := a.turns[incoming.ID]
 	if current == nil {
 		current = &turn{}
 		a.turns[incoming.ID] = current
 	}
+	if current.token != nil {
+		current.token.release()
+	}
 	current.token = entry
 	a.mu.Unlock()
 
+	if err := writeJSON(response, http.StatusOK, map[string]any{"type": 5, "data": map[string]any{"allowed_mentions": allowedMentions()}}); err != nil {
+		a.discard(incoming.ID, entry)
+		return
+	}
+	if err := http.NewResponseController(response).Flush(); err != nil {
+		a.discard(incoming.ID, entry)
+		return
+	}
+	a.workers.Add(2)
+	go func() {
+		defer a.workers.Done()
+		a.expireAfter(incoming.ID, entry, signedAt.Add(a.config.ExpiryAfter).Sub(a.config.Now()))
+	}()
+	go func() {
+		defer a.workers.Done()
+		a.submit(incoming.ID, message, entry)
+	}()
+}
+
+func (a *Adapter) verify(header http.Header, body []byte) (time.Time, bool) {
+	timestamp := header.Get("X-Signature-Timestamp")
+	signature, err := hex.DecodeString(header.Get("X-Signature-Ed25519"))
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return time.Time{}, false
+	}
+	seconds, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	signedAt := time.Unix(seconds, 0)
+	delta := a.config.Now().Sub(signedAt)
+	if delta < -maxClockSkew || delta > maxClockSkew {
+		return time.Time{}, false
+	}
+	message := make([]byte, 0, len(timestamp)+len(body))
+	message = append(message, timestamp...)
+	message = append(message, body...)
+	return signedAt, ed25519.Verify(a.config.PublicKey, message, signature)
+}
+
+func (a *Adapter) submit(inputID, message string, entry *tokenEntry) {
 	reply := make(chan gateway.SubmissionResult, 1)
 	select {
-	case a.submissions <- gateway.Submission{InputID: incoming.ID, Text: message, Reply: reply}:
-	case <-request.Context().Done():
-		a.removeToken(incoming.ID, entry)
-		entry.markReady()
-		http.Error(response, "gateway unavailable", http.StatusServiceUnavailable)
-		return
+	case a.submissions <- gateway.Submission{InputID: inputID, Text: message, Reply: reply}:
 	case <-a.stopped:
-		a.removeToken(incoming.ID, entry)
-		entry.markReady()
-		http.Error(response, "gateway unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	var result gateway.SubmissionResult
 	select {
 	case result = <-reply:
-	case <-request.Context().Done():
-		a.removeToken(incoming.ID, entry)
-		entry.markReady()
-		http.Error(response, "gateway unavailable", http.StatusServiceUnavailable)
-		return
 	case <-a.stopped:
-		a.removeToken(incoming.ID, entry)
-		entry.markReady()
-		http.Error(response, "gateway unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if result.Status != "queued" && result.Status != "active" && !result.Duplicate {
-		a.removeToken(incoming.ID, entry)
-		entry.markReady()
-		writeJSON(response, http.StatusOK, immediateMessage("The agent could not accept that command."))
+		a.finish(inputID, entry, delivery{content: rejectionText(result.Status), status: "rejected"})
 		return
 	}
-	writeJSON(response, http.StatusOK, map[string]any{"type": 5, "data": map[string]any{"allowed_mentions": allowedMentions()}})
-	entry.markReady()
 	if result.Duplicate && terminalOutcome(result.Status) {
-		a.mu.Lock()
-		if current := a.turns[incoming.ID]; current != nil && current.token == entry {
-			a.queueLocked(delivery{inputID: incoming.ID, token: entry, status: result.Status})
-			delete(a.turns, incoming.ID)
-		}
-		a.mu.Unlock()
+		a.finish(inputID, entry, delivery{status: result.Status})
 	}
 }
 
-func (a *Adapter) verify(header http.Header, body []byte) bool {
-	timestamp := header.Get("X-Signature-Timestamp")
-	signature, err := hex.DecodeString(header.Get("X-Signature-Ed25519"))
-	if err != nil || len(signature) != ed25519.SignatureSize {
-		return false
+func (a *Adapter) expireAfter(inputID string, entry *tokenEntry, delay time.Duration) {
+	if delay < 0 {
+		delay = 0
 	}
-	seconds, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil {
-		return false
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		a.finish(inputID, entry, delivery{content: "Discord response window expired; the agent may still be running.", status: "expired"})
+	case <-entry.done:
+	case <-a.stopped:
 	}
-	delta := a.config.Now().Sub(time.Unix(seconds, 0))
-	if delta < -maxClockSkew || delta > maxClockSkew {
-		return false
-	}
-	message := make([]byte, 0, len(timestamp)+len(body))
-	message = append(message, timestamp...)
-	message = append(message, body...)
-	return ed25519.Verify(a.config.PublicKey, message, signature)
 }
 
-func (a *Adapter) removeToken(inputID string, entry *tokenEntry) {
+func (a *Adapter) finish(inputID string, entry *tokenEntry, job delivery) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if current := a.turns[inputID]; current != nil && current.token == entry {
-		current.token = nil
+		job.inputID = inputID
+		job.token = entry
+		if job.content == "" {
+			job.content = current.output.String()
+			job.truncated = current.truncated
+		}
+		a.queueLocked(job)
+		delete(a.turns, inputID)
+		entry.release()
+	}
+}
+
+func (a *Adapter) discard(inputID string, entry *tokenEntry) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if current := a.turns[inputID]; current != nil && current.token == entry {
+		delete(a.turns, inputID)
+		entry.release()
 	}
 }
 
@@ -381,15 +443,17 @@ func (a *Adapter) queueLocked(job delivery) {
 func (a *Adapter) deliver() {
 	defer close(a.done)
 	for job := range a.jobs {
-		<-job.token.ready
 		outcome := a.send(job)
-		_, _ = fmt.Fprintf(a.config.Audit, "channel=discord input=%s delivery=%s\n", job.inputID, outcome)
+		_, _ = fmt.Fprintf(a.config.Audit, "channel=discord input=%s status=%s delivery=%s\n", job.inputID, job.status, outcome)
 	}
 }
 
 func (a *Adapter) send(job delivery) string {
 	chunks := responseChunks(job.content, job.status, job.truncated)
 	for index, content := range chunks {
+		if !a.config.Now().Before(job.token.expiresAt) {
+			return "expired"
+		}
 		method := http.MethodPost
 		endpoint := a.apiBase + "/webhooks/" + url.PathEscape(a.config.ApplicationID) + "/" + url.PathEscape(job.token.token)
 		if index == 0 {
@@ -448,8 +512,9 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 	listener, err := net.Listen("tcp", config.Listen)
 	if err != nil {
 		adapter.Close()
-		return errors.New("cannot start Discord loopback listener")
+		return fmt.Errorf("cannot start Discord loopback listener at %s; choose an unused loopback port: %w", config.Listen, err)
 	}
+	_, _ = fmt.Fprintf(adapter.config.Audit, "channel=discord listener=ready address=%s path=%s\n", listener.Addr().String(), config.Path)
 	server := &http.Server{
 		Handler:           adapter.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -482,10 +547,10 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 		result = ctx.Err()
 	}
 	cancel()
-	adapter.Stop()
 	shutdown, stop := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = server.Shutdown(shutdown)
 	stop()
+	adapter.Stop()
 	if !gatewayFinished {
 		<-gatewayDone
 	}
@@ -586,7 +651,7 @@ func responseChunks(content, status string, truncated bool) []string {
 		default:
 			content = "Agent turn failed."
 		}
-	} else if status != "completed" {
+	} else if status == "failed" || status == "uncertain" {
 		content += "\n\nAgent turn " + status + "."
 	}
 	if truncated {
@@ -604,14 +669,17 @@ func responseChunks(content, status string, truncated bool) []string {
 
 func allowedMentions() map[string]any { return map[string]any{"parse": []string{}} }
 
-func immediateMessage(content string) map[string]any {
-	return map[string]any{"type": 4, "data": map[string]any{"content": content, "flags": 64, "allowed_mentions": allowedMentions()}}
+func rejectionText(status string) string {
+	if status == "queue_full" {
+		return "Agent queue is full. Try again later."
+	}
+	return "Agent command was rejected."
 }
 
-func writeJSON(response http.ResponseWriter, status int, value any) {
+func writeJSON(response http.ResponseWriter, status int, value any) error {
 	response.Header().Set("Content-Type", "application/json")
 	response.WriteHeader(status)
-	_ = json.NewEncoder(response).Encode(value)
+	return json.NewEncoder(response).Encode(value)
 }
 
 func readBounded(reader io.Reader) ([]byte, bool) {

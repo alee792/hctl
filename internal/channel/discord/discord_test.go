@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -63,8 +64,9 @@ func TestSignedInteractionsDriveOneFIFOConversation(t *testing.T) {
 	}
 	driver := &fakeDriver{started: make(chan string, 4), release: make(chan struct{})}
 	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		done <- gateway.RunSubmissions(context.Background(), p, driver, "discord", submissions, func(event gateway.Event) error { adapter.HandleEvent(event); return nil })
+		done <- gateway.RunSubmissions(ctx, p, driver, "discord", submissions, func(event gateway.Event) error { adapter.HandleEvent(event); return nil })
 	}()
 
 	first := signedCommand(t, adapter.Handler(), privateKey, "345678901234567890", "token-first", "first")
@@ -84,18 +86,16 @@ func TestSignedInteractionsDriveOneFIFOConversation(t *testing.T) {
 	if got := <-driver.started; got != "456789012345678901" {
 		t.Fatalf("second turn = %q", got)
 	}
-	close(submissions)
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	delivered := takeDelivered(t, requests, 4)
+	adapter.Stop()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("gateway stop = %v", err)
 	}
 	adapter.Close()
 
 	if !reflect.DeepEqual(driver.inputs, []string{"345678901234567890", "456789012345678901"}) {
 		t.Fatalf("turn order/deduplication = %v", driver.inputs)
-	}
-	var delivered []deliveredRequest
-	for len(requests) > 0 {
-		delivered = append(delivered, <-requests)
 	}
 	if len(delivered) != 4 {
 		t.Fatalf("delivery count = %d, want 4: %#v", len(delivered), delivered)
@@ -178,10 +178,117 @@ func TestInteractionAuthenticationAndValidation(t *testing.T) {
 	}
 }
 
+func TestDeferredAcknowledgementDoesNotWaitForGatewayAcceptance(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submissions := make(chan gateway.Submission)
+	adapter, err := New(Config{
+		ApplicationID: testApplication, AllowedUserID: testUser, PublicKey: publicKey,
+		Listen: "127.0.0.1:0", ExpiryAfter: time.Minute,
+		Now: func() time.Time { return time.Unix(2_000_000_000, 0) },
+	}, submissions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	response := signedCommand(t, adapter.Handler(), privateKey, "345678901234567890", "stalled-token", "wait")
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("deferred acknowledgement waited for gateway acceptance: %s", elapsed)
+	}
+	if response.Code != http.StatusOK || !response.Flushed || !strings.Contains(response.Body.String(), `"type":5`) {
+		t.Fatalf("immediate deferred acknowledgement = %d flushed=%v %s", response.Code, response.Flushed, response.Body.String())
+	}
+	// No receiver accepts the submission, so no harness/model turn can start.
+	adapter.Close()
+}
+
+func TestResponseWindowExpiryUpdatesDeferredResponseAndReleasesToken(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		delivered <- string(body)
+		_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
+	}))
+	defer upstream.Close()
+	submissions := make(chan gateway.Submission)
+	now := time.Now().Truncate(time.Second)
+	var audit bytes.Buffer
+	adapter, err := New(Config{
+		ApplicationID: testApplication, AllowedUserID: testUser, PublicKey: publicKey,
+		Listen: "127.0.0.1:0", APIBase: upstream.URL, ExpiryAfter: 25 * time.Millisecond,
+		Now: time.Now, Audit: &audit,
+	}, submissions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan struct{})
+	go func() {
+		submission := <-submissions
+		submission.Reply <- gateway.SubmissionResult{Status: "queued"}
+		close(accepted)
+	}()
+	response := signedInteraction(t, adapter.Handler(), privateKey, now, commandBody("345678901234567890", testApplication, testUser, "expiring-token", "long work"), nil)
+	if response.Code != http.StatusOK || !response.Flushed {
+		t.Fatalf("expiry acknowledgement = %d flushed=%v", response.Code, response.Flushed)
+	}
+	<-accepted
+	body := takeDelivered(t, delivered, 1)[0]
+	if !strings.Contains(body, "response window expired") || strings.Contains(body, "interrupted") {
+		t.Fatalf("expiry delivery = %s", body)
+	}
+	adapter.mu.Lock()
+	retained := len(adapter.turns)
+	adapter.mu.Unlock()
+	adapter.Close()
+	if retained != 0 || !strings.Contains(audit.String(), "status=expired delivery=completed") || strings.Contains(audit.String(), "expiring-token") {
+		t.Fatalf("expiry cleanup/audit = turns:%d audit:%q", retained, audit.String())
+	}
+}
+
+func TestQueueRejectionPatchesDeferredResponse(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		delivered <- string(body)
+		_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
+	}))
+	defer upstream.Close()
+	submissions := make(chan gateway.Submission)
+	adapter, err := New(Config{
+		ApplicationID: testApplication, AllowedUserID: testUser, PublicKey: publicKey,
+		Listen: "127.0.0.1:0", APIBase: upstream.URL,
+		Now: func() time.Time { return time.Unix(2_000_000_000, 0) },
+	}, submissions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		submission := <-submissions
+		submission.Reply <- gateway.SubmissionResult{Status: "queue_full"}
+	}()
+	response := signedCommand(t, adapter.Handler(), privateKey, "345678901234567890", "rejected-token", "too much")
+	if response.Code != http.StatusOK || !response.Flushed {
+		t.Fatalf("rejection acknowledgement = %d flushed=%v", response.Code, response.Flushed)
+	}
+	body := takeDelivered(t, delivered, 1)[0]
+	adapter.Close()
+	if !strings.Contains(body, "Agent queue is full") || strings.Contains(body, "queue_full") {
+		t.Fatalf("queue rejection delivery = %s", body)
+	}
+}
+
 func TestOutboundDeliveryFailureClassesAndBounds(t *testing.T) {
-	ready := make(chan struct{})
-	close(ready)
-	job := delivery{inputID: "345678901234567890", token: &tokenEntry{token: "opaque-token", ready: ready}, status: "completed", content: "done"}
+	job := delivery{inputID: "345678901234567890", token: &tokenEntry{token: "opaque-token", expiresAt: time.Now().Add(time.Minute), done: make(chan struct{})}, status: "completed", content: "done"}
 	tests := map[string]struct {
 		handler http.HandlerFunc
 		timeout time.Duration
@@ -295,18 +402,14 @@ func TestRecoveredInteractionDeliversUncertainWithoutRetry(t *testing.T) {
 	}
 	driver := &fakeDriver{started: make(chan string, 1), release: make(chan struct{})}
 	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		done <- gateway.RunSubmissions(context.Background(), p, driver, "discord", submissions, func(event gateway.Event) error { adapter.HandleEvent(event); return nil })
+		done <- gateway.RunSubmissions(ctx, p, driver, "discord", submissions, func(event gateway.Event) error { adapter.HandleEvent(event); return nil })
 	}()
 	response := signedCommand(t, adapter.Handler(), privateKey, interactionID, "replacement-token", "do not retry me")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"type":5`) {
 		t.Fatalf("uncertain acknowledgement = %d %s", response.Code, response.Body.String())
 	}
-	close(submissions)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	adapter.Close()
 	select {
 	case body := <-delivered:
 		if !strings.Contains(body, "uncertain") {
@@ -315,6 +418,12 @@ func TestRecoveredInteractionDeliversUncertainWithoutRetry(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("uncertain outcome was not delivered")
 	}
+	adapter.Stop()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("gateway stop = %v", err)
+	}
+	adapter.Close()
 	select {
 	case id := <-driver.started:
 		t.Fatalf("uncertain input was retried as turn %s", id)
@@ -368,29 +477,28 @@ func TestCompletedDurableDuplicateAfterAdapterRestartIsDelivered(t *testing.T) {
 	}
 	driver := &fakeDriver{started: make(chan string, 1)}
 	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		done <- gateway.RunSubmissions(context.Background(), p, driver, "discord", submissions, func(event gateway.Event) error { adapter.HandleEvent(event); return nil })
+		done <- gateway.RunSubmissions(ctx, p, driver, "discord", submissions, func(event gateway.Event) error { adapter.HandleEvent(event); return nil })
 	}()
 	response := signedCommand(t, adapter.Handler(), privateKey, interactionID, "replacement-token", "already completed")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"type":5`) {
 		t.Fatalf("completed duplicate acknowledgement = %d %s", response.Code, response.Body.String())
 	}
-	close(submissions)
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	body := takeDelivered(t, delivered, 1)[0]
+	adapter.Stop()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("gateway stop = %v", err)
 	}
 	adapter.Close()
-
 	select {
-	case body := <-delivered:
-		if !strings.Contains(body, "Agent turn completed") {
-			t.Fatalf("completed duplicate delivery = %s", body)
-		}
+	case body = <-delivered:
+		t.Fatalf("completed duplicate delivered more than once: %s", body)
 	default:
-		t.Fatal("completed durable duplicate was not delivered")
 	}
-	if len(delivered) != 0 {
-		t.Fatalf("completed duplicate delivered more than once: %d extra", len(delivered))
+	if !strings.Contains(body, "Agent turn completed") {
+		t.Fatalf("completed duplicate delivery = %s", body)
 	}
 	select {
 	case id := <-driver.started:
@@ -429,19 +537,22 @@ func TestFailedTurnIsDelivered(t *testing.T) {
 	}
 	driver := &fakeDriver{started: make(chan string, 1), status: "failed", output: ""}
 	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		done <- gateway.RunSubmissions(context.Background(), p, driver, "discord", submissions, func(event gateway.Event) error { adapter.HandleEvent(event); return nil })
+		done <- gateway.RunSubmissions(ctx, p, driver, "discord", submissions, func(event gateway.Event) error { adapter.HandleEvent(event); return nil })
 	}()
 	response := signedCommand(t, adapter.Handler(), privateKey, "345678901234567890", "failure-token", "fail")
 	if response.Code != http.StatusOK {
 		t.Fatalf("failed turn acknowledgement = %d", response.Code)
 	}
-	close(submissions)
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	body := takeDelivered(t, delivered, 1)[0]
+	adapter.Stop()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("gateway stop = %v", err)
 	}
 	adapter.Close()
-	if body := <-delivered; !strings.Contains(body, "Agent turn failed") {
+	if !strings.Contains(body, "Agent turn failed") {
 		t.Fatalf("failed turn delivery = %s", body)
 	}
 }
@@ -510,12 +621,113 @@ func TestRuntimeConfigurationRejectsExposedOrAmbiguousIdentity(t *testing.T) {
 	if _, err := ParsePublicKey(hex.EncodeToString(publicKey)); err != nil {
 		t.Fatal(err)
 	}
+	first := DefaultConversation(testApplication, testUser)
+	second := DefaultConversation(testApplication, "345678901234567890")
+	if first == second || !strings.Contains(first, testApplication) || !strings.Contains(first, testUser) {
+		t.Fatalf("scoped Discord conversations = %q, %q", first, second)
+	}
+	if err := gateway.ValidateConversation(first); err != nil {
+		t.Fatalf("default Discord conversation is invalid: %v", err)
+	}
+}
+
+func TestRunServesSignedInteractionOnLoopback(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	delivered := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		delivered <- string(body)
+		_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
+	}))
+	defer upstream.Close()
+	p := discordProject(t, "claude")
+	driver := &fakeDriver{started: make(chan string, 1), output: "loopback response"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	var audit bytes.Buffer
+	go func() {
+		done <- Run(ctx, p, driver, DefaultConversation(testApplication, testUser), Config{
+			ApplicationID: testApplication, AllowedUserID: testUser, PublicKey: publicKey,
+			Listen: address, Path: DefaultPath, APIBase: upstream.URL,
+			Now: func() time.Time { return time.Unix(2_000_000_000, 0) }, Audit: &audit,
+		})
+	}()
+
+	body, err := json.Marshal(commandBody("345678901234567890", testApplication, testUser, "loopback-token", "hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	timestamp := strconv.FormatInt(time.Unix(2_000_000_000, 0).Unix(), 10)
+	signature := hex.EncodeToString(ed25519.Sign(privateKey, append([]byte(timestamp), body...)))
+	client := &http.Client{Timeout: time.Second}
+	var response *http.Response
+	for attempt := 0; attempt < 50; attempt++ {
+		request, requestErr := http.NewRequest(http.MethodPost, "http://"+address+DefaultPath, bytes.NewReader(body))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		request.Header.Set("X-Signature-Timestamp", timestamp)
+		request.Header.Set("X-Signature-Ed25519", signature)
+		response, err = client.Do(request)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		cancel()
+		t.Fatalf("loopback interaction request failed: %v", err)
+	}
+	responseBody, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(responseBody), `"type":5`) {
+		cancel()
+		t.Fatalf("loopback acknowledgement = %d %s", response.StatusCode, responseBody)
+	}
+	if output := takeDelivered(t, delivered, 1)[0]; !strings.Contains(output, "loopback response") {
+		cancel()
+		t.Fatalf("loopback delivery = %s", output)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("loopback runner stop = %v", err)
+	}
+	if !strings.Contains(audit.String(), "listener=ready") || strings.Contains(audit.String(), "loopback-token") {
+		t.Fatalf("loopback audit = %q", audit.String())
+	}
 }
 
 type deliveredRequest struct {
 	Method string
 	Path   string
 	Body   []byte
+}
+
+func takeDelivered[T any](t *testing.T, values <-chan T, count int) []T {
+	t.Helper()
+	got := make([]T, 0, count)
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for len(got) < count {
+		select {
+		case value := <-values:
+			got = append(got, value)
+		case <-timer.C:
+			t.Fatalf("timed out after %d of %d deliveries", len(got), count)
+		}
+	}
+	return got
 }
 
 type fakeDriver struct {

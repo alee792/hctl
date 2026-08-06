@@ -64,7 +64,7 @@ func runChannel(args []string, output, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	harnessName := fs.String("harness", "", "target harness")
 	workspace := fs.String("workspace", "", "target workspace (defaults to AGENT)")
-	conversation := fs.String("conversation", "discord", "stable Discord conversation id")
+	conversation := fs.String("conversation", "", "conversation id (defaults to this Discord application and user)")
 	command := fs.String("command", "", "harness executable override")
 	applicationID := fs.String("application-id", "", "Discord application ID")
 	publicKeyValue := fs.String("public-key", "", "Discord Ed25519 public key")
@@ -84,6 +84,9 @@ func runChannel(args []string, output, stderr io.Writer) error {
 	if err := discord.ValidateRuntime(config); err != nil {
 		return err
 	}
+	if *conversation == "" {
+		*conversation = discord.DefaultConversation(*applicationID, *allowedUser)
+	}
 	if err := gateway.ValidateConversation(*conversation); err != nil {
 		return err
 	}
@@ -102,9 +105,6 @@ func runChannel(args []string, output, stderr io.Writer) error {
 		return err
 	}
 	if err := driver.Verify(context.Background()); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(output, "starting Discord channel on http://%s%s for one %s conversation; expose it only through your own TLS endpoint\n", *listen, discord.DefaultPath, driver.Name()); err != nil {
 		return err
 	}
 	config.Audit = stderr

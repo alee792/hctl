@@ -38,8 +38,9 @@ built-in Discord channel. `hctl channel discord` runs one loopback HTTP
 Interactions adapter for one selected harness and hctl conversation. It verifies
 Discord's Ed25519 signature and bounded timestamp, authorizes one configured
 application and user, maps the interaction ID to the existing durable gateway
-input ID, acknowledges immediately, then delivers bounded turn output through
-Discord's interaction response token.
+input ID, flushes a deferred acknowledgement before gateway acceptance, then
+asynchronously accepts or rejects the input and delivers bounded turn output
+through Discord's interaction response token.
 
 **Boundaries:** Follow Eve's `channels/`, path-derived identity, normalized
 input, continuation ownership, deferred response, and followup precedent. Use
@@ -49,7 +50,8 @@ registration, tunnel, TLS termination, public listener, deployment, component,
 modal, typing, or interruption support is part of this slice. Bind loopback by
 default and require explicit application ID, public key, and one allowed user
 at runtime; none belong in agent source or generated harness files. Apply makes
-no network request.
+no network request. Unless explicitly overridden, the conversation is derived
+from the application and allowed user.
 
 Refactor the gateway only enough to expose typed submission and events while
 keeping JSONL as its existing adapter and persistence authoritative. One channel
@@ -65,13 +67,15 @@ backend; a bot token would.
 **Evidence:** Credential-free tests with generated Ed25519 keys, fake
 harnesses, and fake Discord HTTP cover discovery/fingerprinting and invalid
 channel source for both harnesses; setup verification; safe listener/path and
-runtime identity validation; PING; valid deferred command; bad/missing/stale
-signature; wrong application; unauthorized user; bounded `message`; immediate
-acknowledgement before a blocked turn; interaction-ID deduplication; FIFO input
-while active; completion/failure/uncertain delivery; 2,000-character splitting
-with bounded followups and disabled mentions; rate limits; timeouts, redirects,
-response bounds, and ambiguous-delivery behavior; content-free state/log/audit;
-and no live Discord request, credential, registration, or exposed listener.
+runtime identity validation; PING; valid flushed defer before stalled gateway
+acceptance; asynchronous queue rejection; bad/missing/stale signature; wrong
+application; unauthorized user; bounded `message`; interaction-ID
+deduplication; FIFO input while active; completion/failure/uncertain delivery;
+14-minute token cleanup; six total 2,000-character messages with a retained
+truncation marker and disabled mentions; scoped default conversations; rate
+limits; timeouts, redirects, response bounds, and ambiguous-delivery behavior;
+an actual loopback runner; content-free state/log/audit; and no live Discord
+request, credential, registration, or exposed listener.
 `./scripts/check.sh` passes.
 
 **Context:** Eve's current
@@ -264,6 +268,23 @@ observed result, warnings, and any discrepancy from the fake-tested contract.
 Any product fix discovered live also needs a credential-free regression test.
 
 **Context:** [Codex live acceptance](codex-live-acceptance.md).
+
+### HCTL-013 — Run live Discord Interactions acceptance
+
+**Blocked by:** A disposable Discord application, a user-controlled public HTTPS
+endpoint forwarding only `/interactions` to the loopback runner, one registered
+application command, and explicit authorization to use them.
+
+**Outcome:** Repeat the credential-free journey against Discord: endpoint PING,
+one authorized `message` command, visible defer, bounded original edit and
+followup, an unauthorized-user rejection, and one controlled restart/recovery
+observation. Record the hctl revision, Discord application context, exact
+credential-safe procedure, timings, and discrepancies without retaining
+signatures, tokens, message bodies, or credentials. Any product correction also
+needs a credential-free regression test.
+
+**Context:** [Discord source example](../../examples/discord/README.md) and
+[ADR 0012](../adr/0012-use-signed-discord-http-interactions.md).
 
 ## Start only with human direction
 

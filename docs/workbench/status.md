@@ -138,9 +138,12 @@ a generated custom subagent, and session resume in a fresh external workspace.
 - The first Discord channel slice uses Eve's `channels/` and normalized-input
   precedent with Discord's signed HTTP Interactions transport. A bounded
   `channels/discord.md` description enables one loopback runner for one
-  configured application, user, conversation, and harness session. It defers
-  signed commands immediately and consumes the short-lived response token only
-  for bounded delivery; bot credentials and Gateway behavior remain deferred.
+  configured application, user, conversation, and harness session. Its default
+  conversation is scoped to that application and user. It flushes a signed
+  command's defer before asynchronous gateway submission, uses at most six
+  response messages, and expires still-pending in-memory tokens after 14
+  minutes without interrupting the harness; bot credentials and Gateway
+  behavior remain deferred.
 
 ## Retained product horizon
 
@@ -203,6 +206,10 @@ the first GitHub slice is anonymous. HCTL-010 and HCTL-011 are complete;
 schedules and sandbox/runtime conventions are the next design frontier. Do not
 implement proposal capture, image deployment, or broker code merely to
 exercise future seams.
+
+Live Discord acceptance remains waiting on a disposable application, a
+user-controlled public HTTPS handoff, command registration, and explicit human
+authorization. The shipped evidence is credential-free and loopback-only.
 
 The [maintainer task list](tasks.md) turns that frontier into a prioritized,
 permission-aware queue. It is the source for agent assignments; this section

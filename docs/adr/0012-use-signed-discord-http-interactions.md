@@ -19,14 +19,25 @@ existing gateway. The Discord interaction ID is the gateway input ID. The
 gateway remains authoritative for durable acceptance, FIFO ordering,
 deduplication, native-session continuation, and uncertain restart recovery.
 
-After durable acceptance, the adapter returns Discord's deferred response
-before waiting for the harness turn. It keeps the interaction token only in
-adapter memory, gathers bounded text deltas, and uses fixed Discord webhook
-response paths to update the original response and send at most seven 2,000-rune
-followups. Mentions are disabled. Requests time out, do not follow redirects,
-bound response bodies, and are never retried. Transport and malformed-success
-failures are ambiguous and audited as uncertain; explicit rate limits and
-non-success responses are classified without retaining upstream bodies.
+After signature, identity, authorization, and input validation, the adapter
+flushes Discord's deferred response immediately and submits to the gateway
+asynchronously. It does not wait for durable acceptance because Discord
+invalidates tokens whose initial response misses three seconds. A later
+queue-full or other gateway rejection edits the deferred original with stable
+text. The gateway still reports acceptance before it can start a model turn and
+remains authoritative for FIFO and deduplication.
+
+The adapter keeps the interaction token only in memory, gathers bounded text
+deltas, and uses fixed Discord webhook response paths to update the original
+response and send at most five 2,000-rune followups. Mentions are disabled.
+Discord documents a 15-minute token lifetime; hctl updates a still-pending
+response after 14 minutes from its signed timestamp, then releases the token,
+turn, and buffered output without interrupting the harness. HCTL-012 must
+separately decide runtime-turn timeout behavior. Requests time out, do not
+follow redirects, bound response bodies, and are never retried. Transport and
+malformed-success failures are ambiguous and audited as uncertain; explicit
+rate limits and non-success responses are classified without retaining
+upstream bodies.
 
 ## Why this does not select the credential broker
 
@@ -54,14 +65,17 @@ runtime.
 
 Discord HTTP Interactions provide a concrete signed inbound transport without a
 long-lived Gateway connection or bot credential. Discord requires an initial
-response within its acknowledgement window and permits later edits and
-followups with the interaction token. This matches the gateway's asynchronous
-turn shape while preserving hctl's managed boundary.
+response within three seconds, keeps interaction tokens valid for 15 minutes,
+and limits a user-installed app outside a server to five followups. Immediate
+defer, a 14-minute local expiry, and six total bounded messages fit those
+constraints while preserving hctl's managed boundary.
 
 ## Consequences
 
 - Agent authors add one readable Markdown file; there is no channel manifest or
   vendor configuration in source.
+- Unless the operator selects an existing conversation explicitly, the runner
+  derives a stable conversation from the application and allowed user.
 - Apply validates and fingerprints the channel but makes no network request and
   generates no additional harness file.
 - Operators must supply a public HTTPS endpoint and Discord command registration
@@ -72,6 +86,9 @@ turn shape while preserving hctl's managed boundary.
 - If the process ends, the interaction token is lost. Durable gateway work may
   recover as uncertain, but hctl neither persists the token nor retries an
   ambiguous Discord delivery.
+- A turn may outlive Discord's response window. The adapter reports that expiry
+  to Discord and releases channel state; it does not claim to interrupt the
+  native harness.
 
 ## Sources
 

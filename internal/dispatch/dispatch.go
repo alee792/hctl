@@ -64,6 +64,15 @@ type Event struct {
 	Status        string `json:"status,omitempty"`
 }
 
+func (e Event) Terminal() bool {
+	switch e.Type {
+	case "turn.completed", "turn.failed", "turn.cancelled", "turn.uncertain", "driver.process_failed":
+		return true
+	default:
+		return false
+	}
+}
+
 type eventSink struct {
 	emitEvent    func(Event) error
 	next         int
@@ -95,7 +104,14 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 // owns the input transport and must close submissions when it stops accepting
 // new input.
 func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error) error {
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0)
+	if err := validateDispatch(conversationID, emit); err != nil {
+		return err
+	}
+	store, err := openConversationStore(p.WorkspaceRoot)
+	if err != nil {
+		return err
+	}
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0, store)
 }
 
 // RunSubmissionsWithTurnTimeout drives a long-lived channel conversation while
@@ -104,41 +120,46 @@ func RunSubmissionsWithTurnTimeout(ctx context.Context, p *project.Project, driv
 	if timeout <= 0 {
 		return errors.New("turn timeout must be positive")
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout)
+	if err := validateDispatch(conversationID, emit); err != nil {
+		return err
+	}
+	store, err := openConversationStore(p.WorkspaceRoot)
+	if err != nil {
+		return err
+	}
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout, store)
 }
 
 // RunTask drives bounded task input while opening a fresh native harness
 // session for every accepted input. Durable dispatch outcomes still deduplicate
 // retries within the supplied conversation.
 func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submission Submission, emit func(Event) error) error {
+	if err := validateDispatch(conversationID, emit); err != nil {
+		return err
+	}
 	submissions := make(chan Submission, 1)
 	submissions <- submission
 	close(submissions)
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0)
+	store, err := openConversationStore(p.WorkspaceRoot)
+	if err != nil {
+		return err
+	}
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0, store)
 }
 
-func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout time.Duration) error {
-	if !conversationName.MatchString(conversationID) {
-		return errors.New("conversation must use only letters, digits, dot, underscore, and dash")
-	}
-	if emit == nil {
-		return errors.New("dispatch event receiver is required")
-	}
-	state, err := session.Load(p.WorkspaceRoot)
-	if err != nil {
+func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout time.Duration, store *conversationStore) error {
+	if err := validateDispatch(conversationID, emit); err != nil {
 		return err
 	}
-	conversation, err := state.GetOrCreate(p.AgentID, driver.Name(), conversationID, p.SourceFingerprint)
-	if err != nil {
-		return err
-	}
+	ref := conversationRef{agentID: p.AgentID, harness: driver.Name(), id: conversationID, fingerprint: p.SourceFingerprint}
 	sink := &eventSink{emitEvent: emit, next: 1, harness: driver.Name(), conversation: conversationID}
-	if uncertain := conversation.RecoverUncertain(); len(uncertain) > 0 {
-		if err := session.Save(p.WorkspaceRoot, state); err != nil {
-			return err
-		}
+	uncertain, recoveredSessionID, err := store.recover(ref)
+	if err != nil {
+		return err
+	}
+	if len(uncertain) > 0 {
 		for _, id := range uncertain {
-			sink.emit(Event{Type: "turn.uncertain", InputID: id, SessionID: conversation.SessionID, TurnID: id, Status: "dispatcher_restarted"})
+			sink.emit(Event{Type: "turn.uncertain", InputID: id, SessionID: recoveredSessionID, TurnID: id, Status: "dispatcher_restarted"})
 		}
 	}
 
@@ -158,37 +179,40 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 		if sink.err != nil {
 			return errors.New("cannot write dispatch events")
 		}
-		if active == nil && len(conversation.Queue) > 0 {
+		snapshot, err := store.snapshot(ref)
+		if err != nil {
+			return err
+		}
+		if active == nil && snapshot.queueLen > 0 {
 			if process == nil {
 				if freshSessions {
-					conversation.SessionID = ""
+					if err := store.setSessionID(ref, ""); err != nil {
+						return err
+					}
+					snapshot.sessionID = ""
 				}
-				process, err = driver.Open(ctx, p.WorkspaceRoot, conversation.SessionID)
+				process, err = driver.Open(ctx, p.WorkspaceRoot, snapshot.sessionID)
 				if err != nil {
-					sink.emit(Event{Type: "driver.process_failed", InputID: conversation.Queue[0].ID, SessionID: conversation.SessionID, Status: "startup_failure"})
+					sink.emit(Event{Type: "driver.process_failed", InputID: snapshot.firstID, SessionID: snapshot.sessionID, Status: "startup_failure"})
 					return err
 				}
 				for _, event := range process.InitialEvents() {
 					if event.SessionID != "" {
-						conversation.SessionID = event.SessionID
+						if err := store.setSessionID(ref, event.SessionID); err != nil {
+							return err
+						}
 					}
 					sink.emit(fromHarness(event, ""))
 				}
-				if err := session.Save(p.WorkspaceRoot, state); err != nil {
-					return err
-				}
 			}
-			next, err := conversation.StartNext()
+			next, err := store.startNext(ref)
 			if err != nil {
-				return err
-			}
-			if err := session.Save(p.WorkspaceRoot, state); err != nil {
 				return err
 			}
 			active = &next
 			go runTurn(ctx, process, next, turns, turnTimeout)
 		}
-		if !inputOpen && active == nil && len(conversation.Queue) == 0 {
+		if !inputOpen && active == nil && snapshot.queueLen == 0 {
 			if process != nil {
 				if err := process.Close(); err != nil {
 					return err
@@ -208,7 +232,8 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			if active != nil {
 				inputID = active.ID
 			}
-			sink.emit(Event{Type: "driver.process_failed", InputID: inputID, SessionID: conversation.SessionID, Status: status})
+			snapshot, _ := store.snapshot(ref)
+			sink.emit(Event{Type: "driver.process_failed", InputID: inputID, SessionID: snapshot.sessionID, Status: status})
 			return ctx.Err()
 		case result, ok := <-submissions:
 			if !ok {
@@ -230,7 +255,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 				sink.emit(Event{Type: "input.rejected", InputID: result.InputID, Bytes: result.bytes, Status: result.status})
 				continue
 			}
-			status, duplicate, err := conversation.Accept(result.InputID, result.Text)
+			status, duplicate, err := store.accept(ref, result.InputID, result.Text)
 			if err != nil {
 				replySubmission(ctx, result, SubmissionResult{Status: err.Error()})
 				sink.emit(Event{Type: "input.rejected", InputID: result.InputID, Bytes: result.bytes, Status: err.Error()})
@@ -241,9 +266,6 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 				sink.emit(Event{Type: "input.duplicate", InputID: result.InputID, Bytes: result.bytes, Status: status})
 				continue
 			}
-			if err := session.Save(p.WorkspaceRoot, state); err != nil {
-				return err
-			}
 			replySubmission(ctx, result, SubmissionResult{Status: status})
 			sink.emit(Event{Type: "input.accepted", InputID: result.InputID, Bytes: result.bytes})
 			sink.emit(Event{Type: "turn.queued", InputID: result.InputID})
@@ -252,9 +274,8 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 				return errors.New("received a harness event without an active input")
 			}
 			if message.event != nil {
-				if message.event.SessionID != "" && conversation.SessionID != message.event.SessionID {
-					conversation.SessionID = message.event.SessionID
-					if err := session.Save(p.WorkspaceRoot, state); err != nil {
+				if message.event.SessionID != "" {
+					if err := store.setSessionID(ref, message.event.SessionID); err != nil {
 						return err
 					}
 				}
@@ -265,21 +286,12 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 				continue
 			}
 			if message.err != nil {
-				sink.emit(Event{Type: "driver.process_failed", InputID: active.ID, SessionID: conversation.SessionID, Status: "process_failure"})
+				snapshot, _ := store.snapshot(ref)
+				sink.emit(Event{Type: "driver.process_failed", InputID: active.ID, SessionID: snapshot.sessionID, Status: "process_failure"})
 				return message.err
 			}
-			terminalSessionID := conversation.SessionID
-			if message.result.SessionID != "" {
-				terminalSessionID = message.result.SessionID
-				conversation.SessionID = message.result.SessionID
-			}
-			if err := conversation.Complete(active.ID, message.result.Status); err != nil {
-				return err
-			}
-			if freshSessions {
-				conversation.SessionID = ""
-			}
-			if err := session.Save(p.WorkspaceRoot, state); err != nil {
+			terminalSessionID, err := store.complete(ref, active.ID, message.result.Status, message.result.SessionID, freshSessions)
+			if err != nil {
 				return err
 			}
 			sink.emit(Event{Type: "turn." + message.result.Status, InputID: active.ID, SessionID: terminalSessionID, TurnID: message.result.TurnID})
@@ -292,6 +304,16 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			}
 		}
 	}
+}
+
+func validateDispatch(conversationID string, emit func(Event) error) error {
+	if !conversationName.MatchString(conversationID) {
+		return errors.New("conversation must use only letters, digits, dot, underscore, and dash")
+	}
+	if emit == nil {
+		return errors.New("dispatch event receiver is required")
+	}
+	return nil
 }
 
 func replySubmission(ctx context.Context, submission Submission, result SubmissionResult) {

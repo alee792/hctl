@@ -21,6 +21,23 @@ No task is ready without further direction.
 
 ## Completed
 
+### HCTL-005 — Spike human-reviewed improvement proposals
+
+**Outcome:** Keep proposals as inert, workspace-local directories at
+`.hctl/proposals/ID/`, separate from the portable agent source they suggest
+changing. Each record holds a human-readable explanation and provenance, an
+exact base-content hash, and one bounded diff for an existing instruction,
+skill, or managed-tool source file. A human manually accepts by changing source
+and reapplying, or rejects it in a retained review record; stale proposals are
+never automatically rebased or applied. Proposal evidence is immutable and may
+not contain credentials, secrets, raw tool outputs, or conversation transcripts.
+
+**Evidence:** [ADR 0008](../adr/0008-keep-agent-proposals-workspace-local-and-inert.md)
+settles storage across the source/workspace boundary, target scope, provenance,
+base binding, conflict and stale handling, explicit review, safe failure,
+retention, and the additive human-in-the-loop boundary for a future managed
+proposal tool. No mutation path, proposal command, or tool was implemented.
+
 ### HCTL-004 — Spike an optional post-run summary
 
 **Outcome:** Do not implement a summary. Hctl can durably report the parent
@@ -114,13 +131,6 @@ Any product fix discovered live also needs a credential-free regression test.
 **Context:** [Codex live acceptance](codex-live-acceptance.md).
 
 ## Start only with human direction
-
-### HCTL-005 — Spike human-reviewed improvement proposals
-
-Design the smallest inert proposal flow through which an agent can suggest a
-change to instructions, a skill, or a managed tool. Resolve storage, review,
-conflicts, provenance, and rejection before implementing mutation. Applying a
-proposal must remain an explicit human action.
 
 ### HCTL-006 — Select a credential-broker boundary
 

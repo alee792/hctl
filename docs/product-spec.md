@@ -265,14 +265,38 @@ Generated project instructions may encourage the harness to submit reusable
 discoveries through a future managed proposal tool. Instructions can influence
 this behavior but cannot enforce it or observe native filesystem writes.
 
-A proposal records a candidate improvement to instructions, a skill, a tool,
-or other agent feedback. It does not modify active authored source or a running
-harness setup. Human review and explicit acceptance are required before the
-change joins the agent project and is reapplied.
+A proposal is a local, inert record of a candidate improvement to one existing
+instruction, skill, or managed-tool source file. It does not modify active
+authored source, generated harness setup, or a running harness. Proposal files
+belong to the producing workspace at `.hctl/proposals/ID/`, not to the agent
+source that they name. `proposal.md` explains the suggestion and records its
+target, selected source and run provenance, and the target's SHA-256 content
+hash; `change.diff` is a bounded unified diff. `review.md` is added only after
+a human accepts or rejects it. After publication, `proposal.md` and
+`change.diff` are immutable evidence; `review.md` is the separate later human
+decision record. There is no manifest or proposal registry.
 
-Proposal schema, storage, review UX, conflict handling, sensitive-content
-policy, acceptance workflow, and tool-execution isolation require a dedicated
-product and security spike. They are outside the MVP and are not scaffolded.
+A proposal can target `instructions.md`, a UTF-8 text file in an existing
+skill, or an existing managed-tool source file. Binary skill resources are
+outside this unified-diff flow. A proposal cannot add, remove, move, or rename
+files, change a dependency file, or escape the agent source. A changed or
+missing target is stale and must never be applied or rebased automatically.
+The reviewer either manually makes a current change in the agent source and
+reapplies it, or rejects the proposal. Both accepted and rejected records are
+retained until a human removes them.
+
+Proposals must not contain credentials, secrets, raw tool outputs, or
+conversation transcripts. A future capture tool must tell callers this rule and
+bound the content it accepts. It must not claim that it reliably detects or
+removes secrets; owner-readable storage and human review do not make prohibited
+content safe to record.
+
+A future managed proposal tool may create this workspace-local record after
+validating its bounded target, base content, and provenance. It must remain
+additive: it cannot apply a diff, execute proposed code, reapply, delete a
+proposal, or control native filesystem activity. Proposal capture, source
+mutation, and review UX remain outside the MVP and are not scaffolded. See
+[ADR 0008](adr/0008-keep-agent-proposals-workspace-local-and-inert.md).
 
 ## Failure and safety behavior
 

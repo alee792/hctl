@@ -91,8 +91,11 @@ a generated custom subagent, and session resume in a fresh external workspace.
 - The project-visible harness setup contains only native harness files and one
   internal apply record needed for safe ownership and stale-source checks.
   Runtime caches are disposable and stay outside authored source.
-- Agent-proposed improvements are human-reviewed proposals. They never mutate
-  active authored files automatically.
+- Agent-proposed improvements are inert, workspace-local, human-reviewed
+  proposal directories. They bind one existing source file to its exact base
+  content, never mutate active authored files automatically, and retain
+  immutable proposal evidence plus a later human decision. They must not retain
+  credentials, secrets, raw tool outputs, or conversation transcripts.
 - A credential broker is required before the first secret-bearing managed tool
   or connection ships. Secrets must remain out of authored files, generated
   harness files, the harness environment, and model-visible input or output.
@@ -147,9 +150,9 @@ and HCTL-002 implemented a versioned `darwin-arm64` release archive for first
 installation; it deliberately leaves a relocatable package command out until a
 concrete need demonstrates one.
 
-Product naming, the concrete credential-broker backend, proposal storage and
-review UX, and specific vendor channel adapters are also intentionally
-unresolved. Do not infer answers from the current prototype.
+Product naming, the concrete credential-broker backend, proposal review UX,
+and specific vendor channel adapters are also intentionally unresolved. Do not
+infer answers from the current prototype.
 
 ## Current design frontier
 
@@ -158,9 +161,9 @@ subagents, and the Agent Skills compatibility contract are implemented and
 exercised through generated Claude and Codex configurations. The Codex native
 journey has live evidence, and the `darwin-arm64` clean-machine release archive
 journey is credential-free tested. Equivalent Claude acceptance remains. The
-next product decision is proposal capture, credential brokering, or another
-vision item. Do not add channels or image deployment merely to exercise those
-future seams.
+next product decision is credential brokering or another vision item. Do not
+implement proposal capture, channels, or image deployment merely to exercise
+those future seams.
 
 The [maintainer task list](tasks.md) turns that frontier into a prioritized,
 permission-aware queue. It is the source for agent assignments; this section

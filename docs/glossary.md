@@ -32,7 +32,7 @@ files, CLI guidance, or product documentation.
 | Native tool | A harness-provided tool that remains available but is not governed or observed by hctl. |
 | Gateway | The optional headless boundary that connects input to a resumable native-harness session. |
 | Session | One resumable interaction context owned by the native harness and mapped by the gateway when used headlessly. |
-| Proposal | A recorded candidate improvement to instructions, a skill, a tool, or other agent feedback. A proposal is inert until a human accepts it into the authored project. |
+| Proposal | A workspace-local, human-readable suggestion to change one existing UTF-8 instruction, skill, or managed-tool source file. Its immutable record holds provenance, the target's base content hash, and a diff; a later review record accepts or rejects it. It must not contain credentials, secrets, raw tool output, or conversation transcripts. |
 | Credential broker | An internal boundary that uses a credential for an authorized tool or connection without exposing the credential value to the agent session. |
 | Agent image | A possible future deployable package containing a harness, an agent project, and hctl. It composes the same source/workspace contract rather than redefining the agent project as a runtime. |
 

@@ -17,10 +17,6 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-None. HCTL-012 needs one product decision before implementation.
-
-## Needs direction
-
 ### HCTL-012 — Add portable schedule source and one-shot dispatch
 
 **Settled shape:** Follow Eve's Markdown convention at
@@ -35,18 +31,16 @@ missed-run replay, channel delivery, network request, credential use, or live
 model call in credential-free tests. TypeScript handlers, subagent schedules,
 and Eve's hosted auth/delivery runtime remain unsupported.
 
-**Decision needed:** Should every occurrence open a fresh native-harness task
-session, matching Eve, or resume one durable conversation per schedule?
-Recommend **fresh task sessions**: repeated jobs do not silently accumulate
-model context, source changes need no context migration, and retry/uncertain
-semantics stay tied to one occurrence. A resumed schedule is more stateful but
-would make prior executions hidden input to every later run.
+**Decision:** Every occurrence opens a fresh native-harness task session,
+matching Eve. Repeated jobs do not silently accumulate model context, source
+changes need no context migration, and retry/uncertain semantics stay tied to
+one occurrence. A stable input ID deduplicates that occurrence without turning
+the schedule itself into a resumed conversation.
 
 **Context:** Eve's current
 [`schedules` contract](https://github.com/vercel/eve/blob/84c3dfc1ff91e075444eee7c6d8e2ef55b2aaebe/docs/schedules.mdx),
 the [product specification](../product-spec.md), and current gateway/session
-state. No implementation is authorized until the occurrence-session decision
-is recorded.
+state.
 
 ## Ordered next
 

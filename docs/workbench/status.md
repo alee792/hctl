@@ -203,9 +203,10 @@ clean-machine release archive journey is credential-free tested. Equivalent
 Claude acceptance remains. The credential-broker execution boundary is settled
 in ADR 0009; its backend and credential-owner decision remain deferred because
 the first GitHub slice is anonymous. HCTL-010 and HCTL-011 are complete.
-HCTL-012's schedule source and one-shot dispatch are shaped but need a decision
-between fresh task sessions and a resumed per-schedule conversation. Per-turn
-gateway deadlines and a foreground local clock are separate follow-ups.
+HCTL-012's schedule source and one-shot dispatch are shaped and Ready. Each
+occurrence uses a fresh native-harness task session, while its stable input ID
+deduplicates retries of that occurrence. Per-turn gateway deadlines and a
+foreground local clock are separate follow-ups.
 Portable sandbox and image/runtime authoring are deferred: the native harnesses
 do not expose equivalent sandbox contracts, native lockfiles already cover
 authored-tool runtimes, and hctl does not own deployment. Do not implement

@@ -29,6 +29,7 @@ const (
 	maxOutputRunes   = 6*2000 - 64
 	maxChunks        = 6
 	defaultTurnLimit = 2 * time.Minute
+	defaultIdleLimit = dispatch.DefaultIdleTimeout
 )
 
 type Identity struct {
@@ -42,6 +43,7 @@ type Config struct {
 	Runtime     channelconfig.Profile
 	Token       string
 	TurnTimeout time.Duration
+	IdleTimeout time.Duration
 	Audit       io.Writer
 }
 
@@ -168,6 +170,12 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 	if config.TurnTimeout <= 0 || config.TurnTimeout > 30*time.Minute {
 		return nil, errors.New("discord turn timeout must be greater than zero and at most 30m")
 	}
+	if config.IdleTimeout == 0 {
+		config.IdleTimeout = defaultIdleLimit
+	}
+	if config.IdleTimeout <= 0 || config.IdleTimeout > 24*time.Hour {
+		return nil, errors.New("discord idle timeout must be greater than zero and at most 24h")
+	}
 	if config.Audit == nil {
 		config.Audit = io.Discard
 	}
@@ -181,7 +189,7 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 		project: p, driver: driver, config: config, session: s, ctx: ctx, cancel: cancel,
 		surfaces: map[string]*surface{}, byConversation: map[string]*surface{},
 	}
-	manager, err := dispatch.NewManager(ctx, p, driver, config.TurnTimeout, func(conversation string, event dispatch.Event) error {
+	manager, err := dispatch.NewManagerWithIdleTimeout(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, func(conversation string, event dispatch.Event) error {
 		runtime.handleDispatch(conversation, event)
 		return nil
 	})

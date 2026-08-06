@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"sync"
 
 	"hctl/internal/secureenv"
 )
@@ -16,7 +17,10 @@ type Process struct {
 	cmd     *exec.Cmd
 	input   io.WriteCloser
 	scanner *bufio.Scanner
-	done    bool
+	mu      sync.Mutex
+	closing bool
+	exited  chan struct{}
+	waitErr error
 }
 
 func StartProcess(ctx context.Context, dir, executable string, args ...string) (*Process, error) {
@@ -37,7 +41,7 @@ func StartProcess(ctx context.Context, dir, executable string, args ...string) (
 	}
 	scanner := bufio.NewScanner(output)
 	scanner.Buffer(make([]byte, 4096), maxHarnessLine)
-	return &Process{cmd: cmd, input: input, scanner: scanner}, nil
+	return &Process{cmd: cmd, input: input, scanner: scanner, exited: make(chan struct{})}, nil
 }
 
 func (p *Process) Input() io.Writer { return p.input }
@@ -52,27 +56,40 @@ func (p *Process) ScanError() error {
 }
 
 func (p *Process) Finish() error {
-	if p.done {
-		return nil
-	}
-	p.done = true
-	_ = p.input.Close()
-	if err := p.cmd.Wait(); err != nil {
+	p.startWait()
+	<-p.exited
+	p.mu.Lock()
+	err := p.waitErr
+	p.mu.Unlock()
+	if err != nil {
 		return errors.New("harness process exited unsuccessfully")
 	}
 	return nil
 }
 
 func (p *Process) Abort() {
-	if p.done {
-		return
-	}
-	p.done = true
-	_ = p.input.Close()
+	p.startWait()
 	if p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
 	}
-	_ = p.cmd.Wait()
+	<-p.exited
+}
+
+func (p *Process) startWait() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closing {
+		return
+	}
+	p.closing = true
+	_ = p.input.Close()
+	go func() {
+		err := p.cmd.Wait()
+		p.mu.Lock()
+		p.waitErr = err
+		close(p.exited)
+		p.mu.Unlock()
+	}()
 }
 
 type limitedWriter struct{ remaining int }

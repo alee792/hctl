@@ -15,13 +15,16 @@ var (
 	ErrConversationBusy = errors.New("conversation is busy")
 )
 
+const DefaultIdleTimeout = 15 * time.Minute
+
 type Lifecycle string
 
 const (
-	LifecycleInactive Lifecycle = "inactive"
-	LifecycleIdle     Lifecycle = "idle"
-	LifecycleQueued   Lifecycle = "queued"
-	LifecycleActive   Lifecycle = "active"
+	LifecycleInactive   Lifecycle = "inactive"
+	LifecycleIdle       Lifecycle = "idle"
+	LifecycleQueued     Lifecycle = "queued"
+	LifecycleActive     Lifecycle = "active"
+	LifecycleHibernated Lifecycle = "hibernated"
 )
 
 type ConversationStatus struct {
@@ -36,6 +39,8 @@ type Manager struct {
 	project     *project.Project
 	driver      harness.Driver
 	turnTimeout time.Duration
+	idleTimeout time.Duration
+	timers      idleTimerFactory
 	emit        func(string, Event) error
 	store       *conversationStore
 	ctx         context.Context
@@ -58,15 +63,27 @@ type managedConversation struct {
 	submitMu     sync.Mutex
 	admissions   int
 	closing      bool
+	resident     bool
 	err          error
 }
 
 func NewManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout time.Duration, emit func(string, Event) error) (*Manager, error) {
+	return NewManagerWithIdleTimeout(ctx, p, driver, turnTimeout, DefaultIdleTimeout, emit)
+}
+
+func NewManagerWithIdleTimeout(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error) (*Manager, error) {
+	return newManager(ctx, p, driver, turnTimeout, idleTimeout, emit, newIdleTimer)
+}
+
+func newManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error, timers idleTimerFactory) (*Manager, error) {
 	if p == nil || driver == nil {
 		return nil, errors.New("managed sessions require a project and harness driver")
 	}
 	if turnTimeout <= 0 {
 		return nil, errors.New("managed session turn timeout must be positive")
+	}
+	if idleTimeout <= 0 || timers == nil {
+		return nil, errors.New("managed session idle timeout must be positive")
 	}
 	if emit == nil {
 		return nil, errors.New("managed session event receiver is required")
@@ -77,7 +94,7 @@ func NewManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 	}
 	managerCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
-		project: p, driver: driver, turnTimeout: turnTimeout, emit: emit,
+		project: p, driver: driver, turnTimeout: turnTimeout, idleTimeout: idleTimeout, timers: timers, emit: emit,
 		store: store, ctx: managerCtx, cancel: cancel,
 		workers: map[string]*managedConversation{}, done: make(chan struct{}), stopped: make(chan struct{}),
 	}, nil
@@ -183,7 +200,7 @@ func (m *Manager) Status(conversation string) ConversationStatus {
 		if err != nil || !snapshot.exists {
 			return ConversationStatus{State: LifecycleInactive}
 		}
-		return statusFromSnapshot(snapshot, 0)
+		return statusFromSnapshot(snapshot, 0, false)
 	}
 	if worker.closing {
 		m.mu.Unlock()
@@ -201,18 +218,23 @@ func (m *Manager) Status(conversation string) ConversationStatus {
 		return ConversationStatus{State: LifecycleInactive}
 	}
 	admissions := worker.admissions
+	resident := worker.resident
 	m.mu.Unlock()
 
-	return statusFromSnapshot(snapshot, admissions)
+	return statusFromSnapshot(snapshot, admissions, resident)
 }
 
-func statusFromSnapshot(snapshot conversationSnapshot, admissions int) ConversationStatus {
+func statusFromSnapshot(snapshot conversationSnapshot, admissions int, resident bool) ConversationStatus {
 	pending := max(snapshot.queueLen, admissions)
 	status := ConversationStatus{State: LifecycleIdle, Pending: pending}
 	if snapshot.active {
 		status.State = LifecycleActive
 	} else if pending > 0 {
 		status.State = LifecycleQueued
+	} else if !resident && snapshot.sessionID != "" {
+		status.State = LifecycleHibernated
+	} else if !resident {
+		status.State = LifecycleInactive
 	}
 	return status
 }
@@ -333,8 +355,16 @@ func (m *Manager) Close() {
 
 func (m *Manager) run(worker *managedConversation) {
 	err := runSubmissions(m.ctx, m.project, m.driver, worker.conversation, worker.submissions, func(event Event) error {
+		m.mu.Lock()
+		switch event.Type {
+		case "driver.process_opened":
+			worker.resident = true
+		case "driver.process_hibernated":
+			worker.resident = false
+		}
+		m.mu.Unlock()
 		return m.emit(worker.conversation, event)
-	}, false, m.turnTimeout, m.store)
+	}, false, m.turnTimeout, m.idleTimeout, m.timers, m.store)
 	m.mu.Lock()
 	worker.err = err
 	close(worker.done)

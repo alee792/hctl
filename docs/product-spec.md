@@ -221,7 +221,11 @@ owner serializes durable updates across surfaces. Other users, channels, bots,
 and webhooks are ignored. Output is buffered until completion, exact
 `HCTL_NO_REPLY` is suppressed, and visible replies use bounded 2,000-character
 chunks with mentions disabled. `/new` resets an idle surface and `/status`
-returns its redacted lifecycle and queue state. Explicit `--input jsonl`
+returns its redacted lifecycle and queue state. After 15 idle minutes by
+default, the lifecycle closes the resident harness but retains the durable
+native session mapping; `--idle-timeout` configures a positive interval up to
+24 hours, and the next eligible message resumes that native conversation.
+Active or queued work is never hibernated. Explicit `--input jsonl`
 selects the existing headless stream instead; one-shot schedules retain their
 fresh-session semantics.
 

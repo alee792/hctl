@@ -168,6 +168,9 @@ the same channel, and stays silent when the agent returns exactly
 `HCTL_NO_REPLY`. `/new` resets an idle conversation and `/status` reports safe
 runtime status. Deployment may mount the same non-secret TOML configuration and
 inject `HCTL_DISCORD_TOKEN`; hctl removes that variable from every child process.
+An idle channel session releases its resident harness after 15 minutes by
+default while retaining its native conversation; use `--idle-timeout` to choose
+a different interval up to 24 hours. The next message resumes that conversation.
 
 ## Product boundary
 

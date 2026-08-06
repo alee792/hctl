@@ -286,7 +286,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 
 func runAgent(args []string, input io.Reader, output, stderr io.Writer, self string) error {
 	if len(args) == 1 && isHelp(args[0]) {
-		_, err := io.WriteString(output, "Usage: hctl run AGENT [--workspace DIR] --harness <claude|codex> [--input channels|jsonl] [--profile NAME] [--config PATH] [--conversation ID] [--command PATH] [--timeout DURATION] [--turn-timeout DURATION]\n")
+		_, err := io.WriteString(output, "Usage: hctl run AGENT [--workspace DIR] --harness <claude|codex> [--input channels|jsonl] [--profile NAME] [--config PATH] [--conversation ID] [--command PATH] [--timeout DURATION] [--turn-timeout DURATION] [--idle-timeout DURATION]\n")
 		return err
 	}
 	if len(args) == 0 {
@@ -303,13 +303,14 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 	configPath := fs.String("config", "", "hctl configuration path")
 	timeout := fs.Duration("timeout", 2*time.Minute, "bounded run process lifetime")
 	turnTimeout := fs.Duration("turn-timeout", 2*time.Minute, "bounded channel turn lifetime")
+	idleTimeout := fs.Duration("idle-timeout", dispatch.DefaultIdleTimeout, "idle channel session lifetime")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("unexpected run arguments")
 	}
-	if (*inputMode != "channels" && *inputMode != "jsonl") || *timeout <= 0 || *timeout > 30*time.Minute || *turnTimeout <= 0 || *turnTimeout > 30*time.Minute {
+	if (*inputMode != "channels" && *inputMode != "jsonl") || *timeout <= 0 || *timeout > 30*time.Minute || *turnTimeout <= 0 || *turnTimeout > 30*time.Minute || *idleTimeout <= 0 || *idleTimeout > 24*time.Hour {
 		return errors.New("run modes and timeouts are invalid")
 	}
 	if err := dispatch.ValidateConversation(*conversation); err != nil {
@@ -353,7 +354,7 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 	if err != nil {
 		return err
 	}
-	runtime, err := discord.New(p, driver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, Audit: stderr})
+	runtime, err := discord.New(p, driver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, Audit: stderr})
 	if err != nil {
 		return err
 	}

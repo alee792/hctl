@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -311,6 +312,201 @@ func TestManagerColdResetPreservesLegacyStateSemantics(t *testing.T) {
 	}
 }
 
+func TestManagerHibernatesAndResumesIdleHarnesses(t *testing.T) {
+	for _, harnessName := range []string{"claude", "codex"} {
+		t.Run(harnessName, func(t *testing.T) {
+			p := testProject(t)
+			driver := newNamedManagerDriver(harnessName)
+			clock := newFakeIdleClock()
+			events := make(chan managedEvent, 32)
+			manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
+				events <- managedEvent{conversation: conversation, event: event}
+				return nil
+			}, clock.NewTimer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(manager.Close)
+
+			if _, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-1", Text: "first"}); err != nil {
+				t.Fatal(err)
+			}
+			driver.waitStarted(t, "message-1")
+			driver.release("message-1")
+			waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "message-1"})
+			timer := clock.waitTimer(t)
+			timer.Fire()
+			waitManagedEvents(t, events, "driver.process_hibernated", map[string]string{"discord-guild": ""})
+
+			if status := manager.Status("discord-guild"); status.State != LifecycleHibernated || status.Pending != 0 {
+				t.Fatalf("hibernated status = %+v", status)
+			}
+			if got := driver.closeCount(); got != 1 {
+				t.Fatalf("closed processes = %d, want 1", got)
+			}
+			duplicate, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-1", Text: "first"})
+			if err != nil || !duplicate.Duplicate || duplicate.Status != "completed" {
+				t.Fatalf("hibernated duplicate = %+v, %v", duplicate, err)
+			}
+			if got := driver.openCount(); got != 1 {
+				t.Fatalf("duplicate reopened %d processes", got)
+			}
+
+			if _, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-2", Text: "second"}); err != nil {
+				t.Fatal(err)
+			}
+			driver.waitStarted(t, "message-2")
+			if got := driver.resumeIDs(); !reflect.DeepEqual(got, []string{"", "session-1"}) {
+				t.Fatalf("resume IDs = %v", got)
+			}
+			driver.release("message-2")
+			waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "message-2"})
+		})
+	}
+}
+
+func TestManagerDoesNotHibernateActiveOrQueuedWork(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	clock := newFakeIdleClock()
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(string, Event) error { return nil }, clock.NewTimer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	for _, id := range []string{"message-1", "message-2"} {
+		if _, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: id, Text: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	driver.waitStarted(t, "message-1")
+	clock.assertNoTimer(t)
+	driver.release("message-1")
+	driver.waitStarted(t, "message-2")
+	clock.assertNoTimer(t)
+	driver.release("message-2")
+	clock.waitTimer(t)
+}
+
+func TestManagerClassifiesHibernateCloseFailureWithoutLosingConversation(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	driver.closeErr = errors.New("close failed")
+	clock := newFakeIdleClock()
+	events := make(chan managedEvent, 32)
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	}, clock.NewTimer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	if _, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-1", Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "message-1")
+	driver.release("message-1")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "message-1"})
+	clock.waitTimer(t).Fire()
+	failure := waitManagedEvent(t, events, "driver.process_failed")
+	if failure.event.Status != "hibernate_failure" || failure.event.InputID != "" {
+		t.Fatalf("hibernate failure event = %+v", failure.event)
+	}
+	select {
+	case <-manager.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("manager did not stop after hibernate close failure")
+	}
+	if !errors.Is(manager.Err(), driver.closeErr) {
+		t.Fatalf("manager error = %v", manager.Err())
+	}
+
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := findConversation(state, "discord-guild")
+	if conversation == nil || conversation.SessionID != "session-1" || len(conversation.Queue) != 0 || conversation.Outcomes["message-1"] != "completed" {
+		t.Fatalf("durable conversation after hibernate failure = %#v", conversation)
+	}
+}
+
+func TestManagerBoundsBlockedHibernateClose(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	driver.blockProcessClose()
+	clock := newFakeIdleClock()
+	events := make(chan managedEvent, 32)
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	}, clock.NewTimer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	if _, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-1", Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "message-1")
+	driver.release("message-1")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "message-1"})
+	clock.waitTimer(t).Fire()
+	clock.waitTimer(t).Fire()
+	failure := waitManagedEvent(t, events, "driver.process_failed")
+	if failure.event.Status != "hibernate_failure" {
+		t.Fatalf("blocked close event = %+v", failure.event)
+	}
+	if got := driver.abortCount(); got != 1 {
+		t.Fatalf("abort count = %d, want 1", got)
+	}
+}
+
+func TestManagedRunBoundsBlockedCloseAfterAdmissionsStop(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	driver.blockProcessClose()
+	clock := newFakeIdleClock()
+	store, err := openConversationStore(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submissions := make(chan Submission, 1)
+	events := make(chan Event, 32)
+	done := make(chan error, 1)
+	go func() {
+		done <- runSubmissions(context.Background(), p, driver, "discord-guild", submissions, func(event Event) error {
+			events <- event
+			return nil
+		}, false, time.Minute, time.Hour, clock.NewTimer, store)
+	}()
+	reply := make(chan SubmissionResult, 1)
+	submissions <- Submission{InputID: "message-1", Text: "first", Reply: reply}
+	if result := <-reply; result.Status != "queued" {
+		t.Fatalf("submission = %+v", result)
+	}
+	driver.waitStarted(t, "message-1")
+	driver.release("message-1")
+	waitDispatchEvent(t, events, "turn.completed")
+	close(submissions)
+	clock.waitTimerAfter(t, harnessCloseTimeout).Fire()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "hibernation deadline") {
+			t.Fatalf("managed close error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("managed run did not bound blocked close")
+	}
+	if got := driver.abortCount(); got != 1 {
+		t.Fatalf("abort count = %d, want 1", got)
+	}
+}
+
 func TestManagerDeduplicatesWithoutInflatingStatus(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
@@ -415,6 +611,38 @@ type managedEvent struct {
 	event        Event
 }
 
+func waitDispatchEvent(t *testing.T, events <-chan Event, eventType string) Event {
+	t.Helper()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case event := <-events:
+			if event.Type == eventType {
+				return event
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s", eventType)
+		}
+	}
+}
+
+func waitManagedEvent(t *testing.T, events <-chan managedEvent, eventType string) managedEvent {
+	t.Helper()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case event := <-events:
+			if event.event.Type == eventType {
+				return event
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s", eventType)
+		}
+	}
+}
+
 func waitManagedEvents(t *testing.T, events <-chan managedEvent, eventType string, expected map[string]string) {
 	t.Helper()
 	timer := time.NewTimer(2 * time.Second)
@@ -436,18 +664,29 @@ func waitManagedEvents(t *testing.T, events <-chan managedEvent, eventType strin
 }
 
 type managerDriver struct {
-	mu       sync.Mutex
-	next     int
-	opened   int
-	started  chan string
-	releases map[string]chan struct{}
+	mu        sync.Mutex
+	name      string
+	next      int
+	opened    int
+	closed    int
+	resumed   []string
+	closeErr  error
+	closeWait chan struct{}
+	abortOnce sync.Once
+	aborted   int
+	started   chan string
+	releases  map[string]chan struct{}
 }
 
 func newManagerDriver() *managerDriver {
-	return &managerDriver{started: make(chan string, 16), releases: map[string]chan struct{}{}}
+	return newNamedManagerDriver("claude")
 }
 
-func (d *managerDriver) Name() string                 { return "claude" }
+func newNamedManagerDriver(name string) *managerDriver {
+	return &managerDriver{name: name, started: make(chan string, 16), releases: map[string]chan struct{}{}}
+}
+
+func (d *managerDriver) Name() string                 { return d.name }
 func (d *managerDriver) Executable() string           { return "/fake/claude" }
 func (d *managerDriver) Verify(context.Context) error { return nil }
 func (d *managerDriver) Open(_ context.Context, _ string, resumeID string) (harness.Session, error) {
@@ -455,6 +694,7 @@ func (d *managerDriver) Open(_ context.Context, _ string, resumeID string) (harn
 	defer d.mu.Unlock()
 	d.opened++
 	d.next++
+	d.resumed = append(d.resumed, resumeID)
 	sessionID := resumeID
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("session-%d", d.next)
@@ -498,6 +738,30 @@ func (d *managerDriver) openCount() int {
 	return d.opened
 }
 
+func (d *managerDriver) closeCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closed
+}
+
+func (d *managerDriver) resumeIDs() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.resumed...)
+}
+
+func (d *managerDriver) blockProcessClose() {
+	d.mu.Lock()
+	d.closeWait = make(chan struct{})
+	d.mu.Unlock()
+}
+
+func (d *managerDriver) abortCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.aborted
+}
+
 type managerSession struct {
 	driver    *managerDriver
 	sessionID string
@@ -523,12 +787,88 @@ func (s *managerSession) RunTurn(ctx context.Context, input harness.Input, emit 
 	return harness.TurnResult{SessionID: s.sessionID, TurnID: input.ID, Status: "completed"}, nil
 }
 
-func (s *managerSession) Close() error { return nil }
-func (s *managerSession) Abort()       {}
+func (s *managerSession) Close() error {
+	s.driver.mu.Lock()
+	s.driver.closed++
+	err := s.driver.closeErr
+	wait := s.driver.closeWait
+	s.driver.mu.Unlock()
+	if wait != nil {
+		<-wait
+	}
+	return err
+}
+func (s *managerSession) Abort() {
+	s.driver.abortOnce.Do(func() {
+		s.driver.mu.Lock()
+		s.driver.aborted++
+		wait := s.driver.closeWait
+		s.driver.mu.Unlock()
+		if wait != nil {
+			close(wait)
+		}
+	})
+}
+
+type fakeIdleClock struct {
+	created chan *fakeIdleTimer
+}
+
+func newFakeIdleClock() *fakeIdleClock {
+	return &fakeIdleClock{created: make(chan *fakeIdleTimer, 16)}
+}
+
+func (c *fakeIdleClock) NewTimer(after time.Duration) idleTimer {
+	timer := &fakeIdleTimer{after: after, fired: make(chan time.Time, 1)}
+	c.created <- timer
+	return timer
+}
+
+func (c *fakeIdleClock) waitTimerAfter(t *testing.T, after time.Duration) *fakeIdleTimer {
+	t.Helper()
+	for {
+		timer := c.waitTimer(t)
+		if timer.after == after {
+			return timer
+		}
+	}
+}
+
+func (c *fakeIdleClock) waitTimer(t *testing.T) *fakeIdleTimer {
+	t.Helper()
+	select {
+	case timer := <-c.created:
+		return timer
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for idle timer")
+		return nil
+	}
+}
+
+func (c *fakeIdleClock) assertNoTimer(t *testing.T) {
+	t.Helper()
+	select {
+	case <-c.created:
+		t.Fatal("idle timer started while work remained")
+	default:
+	}
+}
+
+type fakeIdleTimer struct {
+	after time.Duration
+	fired chan time.Time
+	once  sync.Once
+}
+
+func (t *fakeIdleTimer) C() <-chan time.Time { return t.fired }
+func (t *fakeIdleTimer) Stop() bool          { return true }
+func (t *fakeIdleTimer) Fire() {
+	t.once.Do(func() { t.fired <- time.Time{} })
+}
 
 func TestManagerStatusValuesStayBounded(t *testing.T) {
-	values := []Lifecycle{LifecycleInactive, LifecycleIdle, LifecycleQueued, LifecycleActive}
-	if !reflect.DeepEqual(values, []Lifecycle{"inactive", "idle", "queued", "active"}) {
+	values := []Lifecycle{LifecycleInactive, LifecycleIdle, LifecycleQueued, LifecycleActive, LifecycleHibernated}
+	if !reflect.DeepEqual(values, []Lifecycle{"inactive", "idle", "queued", "active", "hibernated"}) {
 		t.Fatalf("lifecycle values = %v", values)
 	}
 }

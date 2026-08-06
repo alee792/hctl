@@ -176,6 +176,13 @@ func TestStatusMessageUsesOnlySafeLifecycleState(t *testing.T) {
 	}
 }
 
+func TestStatusMessageReportsHibernatedWithoutRuntimeIdentity(t *testing.T) {
+	message := statusMessage("maintainer", "claude", "dm", dispatch.ConversationStatus{State: dispatch.LifecycleHibernated})
+	if message != "hctl is online: agent=maintainer harness=claude surface=dm state=hibernated pending=0" {
+		t.Fatalf("status = %q", message)
+	}
+}
+
 type fakeManagedSubmission struct {
 	conversation string
 	submission   dispatch.Submission

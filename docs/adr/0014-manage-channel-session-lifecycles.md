@@ -11,6 +11,13 @@ harness process. Channel adapters submit input, observe bounded events, query a
 redacted lifecycle status, and reset only idle conversations; they do not own
 dispatcher goroutines or native processes themselves.
 
+When a managed conversation has no active or queued work, its resident harness
+process is closed after a configurable idle interval (15 minutes by default).
+The durable conversation and native session ID remain authoritative, so the
+next accepted message reopens the harness with that ID. Hibernation never
+retries work. A close failure is a classified lifecycle failure and leaves the
+durable conversation intact for explicit recovery.
+
 All managed conversations in one runtime share one serialized owner for the
 workspace's durable dispatch state. Conversation turns may run concurrently,
 but accepting, starting, completing, recovering, and updating native session
@@ -31,7 +38,7 @@ separate, but spread lifecycle ownership into the transport adapter and loaded
 an independent in-memory copy of the same durable state file for each surface.
 Concurrent saves could therefore discard another surface's progress.
 
-The planned idle hibernation, global admission limits, and isolated writable
+Idle hibernation, global admission limits, and isolated writable
 worktrees also need one transport-independent place to observe and control
 conversation lifecycle without introducing a supervisor agent.
 
@@ -39,9 +46,9 @@ conversation lifecycle without introducing a supervisor agent.
 
 - The Discord adapter retains only authorization, message classification,
   response buffering, and delivery concerns.
-- Safe status can distinguish inactive, idle, queued, and active lifecycle
+- Safe status can distinguish inactive, idle, hibernated, queued, and active lifecycle
   states without paths or runtime identifiers.
 - One conversation failure still terminates the channel runtime consistently;
   recovery never silently retries ambiguous work.
-- Idle hibernation, capacity limits, read-only execution, and writable
-  worktrees remain separate changes built through this lifecycle interface.
+- Capacity limits, read-only execution, and writable worktrees remain separate
+  changes built through this lifecycle interface.

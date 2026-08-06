@@ -13,7 +13,7 @@ func TestHeadlessCommandIsNamedRun(t *testing.T) {
 	if err := Run([]string{"run", "--help"}, strings.NewReader(""), &output, &stderr, ""); err != nil {
 		t.Fatal(err)
 	}
-	if got := output.String(); !strings.Contains(got, "Usage: hctl run AGENT") || strings.Contains(got, "gateway") {
+	if got := output.String(); !strings.Contains(got, "Usage: hctl run AGENT") || !strings.Contains(got, "--idle-timeout DURATION") || strings.Contains(got, "gateway") {
 		t.Fatalf("run help = %q", got)
 	}
 

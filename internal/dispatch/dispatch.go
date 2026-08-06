@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	maxInputBytes = 32 << 10
-	maxInputLine  = maxInputBytes + 4096
+	maxInputBytes       = 32 << 10
+	maxInputLine        = maxInputBytes + 4096
+	harnessCloseTimeout = 5 * time.Second
 )
 
 var (
@@ -48,6 +49,20 @@ type turnMessage struct {
 	err    error
 	done   bool
 }
+
+type idleTimer interface {
+	C() <-chan time.Time
+	Stop() bool
+}
+
+type realIdleTimer struct{ timer *time.Timer }
+
+func (t realIdleTimer) C() <-chan time.Time { return t.timer.C }
+func (t realIdleTimer) Stop() bool          { return t.timer.Stop() }
+
+type idleTimerFactory func(time.Duration) idleTimer
+
+func newIdleTimer(after time.Duration) idleTimer { return realIdleTimer{timer: time.NewTimer(after)} }
 
 type Event struct {
 	SchemaVersion int    `json:"schema_version"`
@@ -111,7 +126,7 @@ func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0, store)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0, 0, nil, store)
 }
 
 // RunSubmissionsWithTurnTimeout drives a long-lived channel conversation while
@@ -127,7 +142,7 @@ func RunSubmissionsWithTurnTimeout(ctx context.Context, p *project.Project, driv
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout, store)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout, 0, nil, store)
 }
 
 // RunTask drives bounded task input while opening a fresh native harness
@@ -144,10 +159,10 @@ func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, con
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0, store)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0, 0, nil, store)
 }
 
-func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout time.Duration, store *conversationStore) error {
+func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout, idleTimeout time.Duration, timers idleTimerFactory, store *conversationStore) error {
 	if err := validateDispatch(conversationID, emit); err != nil {
 		return err
 	}
@@ -166,7 +181,14 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	inputOpen := true
 	var active *session.Input
 	var process harness.Session
+	var idle idleTimer
+	var idleC <-chan time.Time
 	turns := make(chan turnMessage, 64)
+	defer func() {
+		if idle != nil {
+			idle.Stop()
+		}
+	}()
 
 	abort := func() {
 		if process != nil {
@@ -184,6 +206,11 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			return err
 		}
 		if active == nil && snapshot.queueLen > 0 {
+			if idle != nil {
+				idle.Stop()
+				idle = nil
+				idleC = nil
+			}
 			if process == nil {
 				if freshSessions {
 					if err := store.setSessionID(ref, ""); err != nil {
@@ -195,6 +222,9 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 				if err != nil {
 					sink.emit(Event{Type: "driver.process_failed", InputID: snapshot.firstID, SessionID: snapshot.sessionID, Status: "startup_failure"})
 					return err
+				}
+				if idleTimeout > 0 {
+					sink.emit(Event{Type: "driver.process_opened", SessionID: snapshot.sessionID})
 				}
 				for _, event := range process.InitialEvents() {
 					if event.SessionID != "" {
@@ -212,10 +242,24 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			active = &next
 			go runTurn(ctx, process, next, turns, turnTimeout)
 		}
+		if inputOpen && active == nil && snapshot.queueLen == 0 && process != nil && idleTimeout > 0 && idle == nil {
+			idle = timers(idleTimeout)
+			idleC = idle.C()
+		}
 		if !inputOpen && active == nil && snapshot.queueLen == 0 {
 			if process != nil {
-				if err := process.Close(); err != nil {
-					return err
+				if idle != nil {
+					idle.Stop()
+					idle = nil
+				}
+				var closeErr error
+				if idleTimeout > 0 {
+					closeErr = closeHarness(process, harnessCloseTimeout, timers)
+				} else {
+					closeErr = process.Close()
+				}
+				if closeErr != nil {
+					return closeErr
 				}
 				process = nil
 			}
@@ -235,6 +279,25 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			snapshot, _ := store.snapshot(ref)
 			sink.emit(Event{Type: "driver.process_failed", InputID: inputID, SessionID: snapshot.sessionID, Status: status})
 			return ctx.Err()
+		case <-idleC:
+			idle = nil
+			idleC = nil
+			if active != nil || process == nil {
+				continue
+			}
+			snapshot, err := store.snapshot(ref)
+			if err != nil {
+				return err
+			}
+			if snapshot.queueLen != 0 {
+				continue
+			}
+			if err := closeHarness(process, harnessCloseTimeout, timers); err != nil {
+				sink.emit(Event{Type: "driver.process_failed", SessionID: snapshot.sessionID, Status: "hibernate_failure"})
+				return err
+			}
+			process = nil
+			sink.emit(Event{Type: "driver.process_hibernated", SessionID: snapshot.sessionID, Status: "idle_timeout"})
 		case result, ok := <-submissions:
 			if !ok {
 				inputOpen = false
@@ -303,6 +366,20 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 				process = nil
 			}
 		}
+	}
+}
+
+func closeHarness(process harness.Session, timeout time.Duration, timers idleTimerFactory) error {
+	closed := make(chan error, 1)
+	go func() { closed <- process.Close() }()
+	timer := timers(timeout)
+	select {
+	case err := <-closed:
+		timer.Stop()
+		return err
+	case <-timer.C():
+		process.Abort()
+		return errors.New("harness process did not close before the hibernation deadline")
 	}
 }
 

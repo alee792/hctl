@@ -241,13 +241,17 @@ func handleEvent(message rpcEnvelope, sessionID, turnID string, emit func(harnes
 		}
 	case "turn/completed":
 		var params struct {
-			Turn struct {
+			ThreadID string `json:"threadId"`
+			Turn     struct {
 				ID     string `json:"id"`
 				Status string `json:"status"`
 			} `json:"turn"`
 		}
-		if json.Unmarshal(message.Params, &params) != nil || (params.Turn.ID != "" && params.Turn.ID != turnID) {
+		if json.Unmarshal(message.Params, &params) != nil {
 			return "uncertain"
+		}
+		if (params.ThreadID != "" && params.ThreadID != sessionID) || (params.Turn.ID != "" && params.Turn.ID != turnID) {
+			return terminal
 		}
 		switch params.Turn.Status {
 		case "completed":

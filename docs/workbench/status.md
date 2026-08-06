@@ -126,6 +126,10 @@ These are later product promises, not MVP implementation work:
 - A later deployment path may compose a harness, an agent project, and hctl in
   an image. This is a packaging and operations layer over the same portable
   source contract, not a reason to couple source to its storage repository.
+- A future post-run summary may include the parent outcome and child activity
+  when a harness exposes stable runtime IDs. It should reference native harness
+  logs rather than duplicate transcripts, and remain optional observability
+  rather than part of portable completion semantics.
 
 ## Open questions
 

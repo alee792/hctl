@@ -39,6 +39,8 @@ while IFS= read -r line; do
       turn=$((turn + 1))
       turn_id="01922222-2222-7222-8222-22222222222$turn"
       printf '{"id":%s,"result":{"turn":{"id":"%s","items":[],"status":"inProgress"}}}\n' "$id" "$turn_id"
+      printf '{"method":"item/agentMessage/delta","params":{"threadId":"01933333-3333-7333-8333-333333333333","turnId":"01944444-4444-7444-8444-444444444444","itemId":"child-item","delta":"child"}}\n'
+      printf '{"method":"turn/completed","params":{"threadId":"01933333-3333-7333-8333-333333333333","turn":{"id":"01944444-4444-7444-8444-444444444444","items":[],"status":"completed"}}}\n'
       printf '{"method":"item/agentMessage/delta","params":{"threadId":"01911111-1111-7111-8111-111111111111","turnId":"%s","itemId":"item-1","delta":"ok"}}\n' "$turn_id"
       printf '{"method":"turn/completed","params":{"threadId":"01911111-1111-7111-8111-111111111111","turn":{"id":"%s","items":[],"status":"completed"}}}\n' "$turn_id"
       ;;

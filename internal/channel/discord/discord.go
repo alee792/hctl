@@ -88,6 +88,7 @@ type Runtime struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	manager conversationManager
+	deliver func(string, *discordgo.MessageSend) error
 
 	mu             sync.Mutex
 	surfaces       map[string]*surface
@@ -192,6 +193,10 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 	runtime := &Runtime{
 		project: p, driver: driver, config: config, session: s, ctx: ctx, cancel: cancel,
 		surfaces: map[string]*surface{}, byConversation: map[string]*surface{},
+	}
+	runtime.deliver = func(channelID string, message *discordgo.MessageSend) error {
+		_, err := s.ChannelMessageSendComplex(channelID, message)
+		return err
 	}
 	emit := func(conversation string, event dispatch.Event) error {
 		runtime.handleDispatch(conversation, event)
@@ -404,7 +409,7 @@ func (r *Runtime) handleDispatch(conversation string, event dispatch.Event) {
 	content := strings.TrimSpace(combinedOutput(turn))
 	parts := outputParts(turn)
 	truncated := turn.truncated
-	if suppressedControl(content) == RequestWriteAccess && !strings.HasSuffix(event.InputID, ":write") {
+	if event.Type == "turn.completed" && suppressedControl(content) == RequestWriteAccess && !strings.HasSuffix(event.InputID, ":write") {
 		delete(current.turns, event.InputID)
 		continuationID := event.InputID + ":write"
 		current.turns[continuationID] = &pendingTurn{channelID: turn.channelID, messageID: turn.messageID}
@@ -439,7 +444,7 @@ func (r *Runtime) sendTurn(inputID string, turn *pendingTurn, parts []string, tr
 			failIfMissing := false
 			message.Reference = &discordgo.MessageReference{MessageID: turn.messageID, ChannelID: turn.channelID, FailIfNotExists: &failIfMissing}
 		}
-		if _, err := r.session.ChannelMessageSendComplex(turn.channelID, message); err != nil {
+		if err := r.deliver(turn.channelID, message); err != nil {
 			_, _ = fmt.Fprintf(r.config.Audit, "Discord delivery failed input_id=%s class=uncertain\n", inputID)
 			return
 		}

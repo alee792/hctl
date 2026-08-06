@@ -395,6 +395,14 @@ func TestManagerElevatesOnceAndReusesDurableWritableWorkspace(t *testing.T) {
 	if err != nil || result.Status != "queued" {
 		t.Fatalf("elevation = %+v, %v", result, err)
 	}
+	atomicState, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	atomicConversation := findConversation(atomicState, "discord-guild")
+	if atomicConversation == nil || atomicConversation.WorkspaceRoot != elevatedRoot || len(atomicConversation.Queue) != 1 || atomicConversation.Queue[0].ID != "message-1:write" {
+		t.Fatalf("workspace and continuation were not persisted together: %#v", atomicConversation)
+	}
 	driver.waitStarted(t, "message-1:write")
 	if provider.provisions != 1 {
 		t.Fatalf("workspace provisions = %d", provider.provisions)

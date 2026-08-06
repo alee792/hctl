@@ -120,6 +120,9 @@ func (m *Manager) Elevate(ctx context.Context, conversation string, continuation
 	if err := ValidateConversation(conversation); err != nil {
 		return SubmissionResult{}, err
 	}
+	if status := validateInput(continuation); status != "" {
+		return SubmissionResult{Status: status}, nil
+	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -148,24 +151,51 @@ func (m *Manager) Elevate(ctx context.Context, conversation string, continuation
 	if err != nil {
 		return SubmissionResult{}, err
 	}
-	if snapshot.workspace == "" {
-		_, assignment, err := m.workspaces.Provision(ctx, conversation)
+	assignment := worktree.Assignment{Root: snapshot.workspace, Branch: snapshot.branch}
+	created := false
+	if assignment.Root == "" {
+		_, provisioned, provisionErr := m.workspaces.Provision(ctx, conversation)
+		assignment, err = provisioned, provisionErr
 		if err != nil {
 			return SubmissionResult{}, err
 		}
-		if err := m.store.assignWorkspace(m.reference(conversation), assignment.Root, assignment.Branch); err != nil {
-			m.workspaces.Remove(ctx, assignment)
-			return SubmissionResult{}, err
-		}
+		created = true
 	}
-	return m.submit(ctx, conversation, continuation, true)
+	status, duplicate, err := m.store.assignWorkspaceAndAccept(m.reference(conversation), assignment.Root, assignment.Branch, continuation.InputID, continuation.Text)
+	if err != nil {
+		if created {
+			m.workspaces.Remove(ctx, assignment)
+		}
+		return SubmissionResult{}, err
+	}
+	if status != "queued" && status != "active" {
+		return SubmissionResult{Status: status, Duplicate: duplicate}, nil
+	}
+	if err := m.startDurableWorker(conversation); err != nil {
+		return SubmissionResult{}, err
+	}
+	return SubmissionResult{Status: status, Duplicate: duplicate}, nil
+}
+
+func (m *Manager) startDurableWorker(conversation string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		if m.err != nil {
+			return m.err
+		}
+		return ErrManagerClosed
+	}
+	if m.workers[conversation] != nil {
+		return nil
+	}
+	worker := &managedConversation{conversation: conversation, submissions: make(chan Submission, 32), done: make(chan struct{})}
+	m.workers[conversation] = worker
+	go m.run(worker)
+	return nil
 }
 
 func (m *Manager) Submit(ctx context.Context, conversation string, submission Submission) (SubmissionResult, error) {
-	return m.submit(ctx, conversation, submission, false)
-}
-
-func (m *Manager) submit(ctx context.Context, conversation string, submission Submission, duringElevation bool) (SubmissionResult, error) {
 	if err := ValidateConversation(conversation); err != nil {
 		return SubmissionResult{}, err
 	}
@@ -181,7 +211,7 @@ func (m *Manager) submit(ctx context.Context, conversation string, submission Su
 		}
 		return SubmissionResult{}, ErrManagerClosed
 	}
-	if m.elevating[conversation] && !duringElevation {
+	if m.elevating[conversation] {
 		m.mu.Unlock()
 		return SubmissionResult{}, ErrConversationBusy
 	}

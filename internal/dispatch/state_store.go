@@ -75,19 +75,39 @@ func (s *conversationStore) snapshot(ref conversationRef) (conversationSnapshot,
 	return snapshot, nil
 }
 
-func (s *conversationStore) assignWorkspace(ref conversationRef, workspace, branch string) error {
+func (s *conversationStore) assignWorkspaceAndAccept(ref conversationRef, workspace, branch, inputID, text string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	conversation, err := s.conversation(ref)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	if conversation.WorkspaceRoot != "" && (conversation.WorkspaceRoot != workspace || conversation.WorktreeBranch != branch) {
-		return errors.New("conversation already belongs to a different writable workspace")
+		return "", false, errors.New("conversation already belongs to a different writable workspace")
+	}
+	priorWorkspace, priorBranch := conversation.WorkspaceRoot, conversation.WorktreeBranch
+	priorQueue := append([]session.Input(nil), conversation.Queue...)
+	priorOutcomes := make(map[string]string, len(conversation.Outcomes))
+	for id, outcome := range conversation.Outcomes {
+		priorOutcomes[id] = outcome
+	}
+	priorOrder := append([]string(nil), conversation.OutcomeOrder...)
+	rollback := func() {
+		conversation.WorkspaceRoot, conversation.WorktreeBranch = priorWorkspace, priorBranch
+		conversation.Queue, conversation.Outcomes, conversation.OutcomeOrder = priorQueue, priorOutcomes, priorOrder
 	}
 	conversation.WorkspaceRoot = workspace
 	conversation.WorktreeBranch = branch
-	return session.Save(s.root, s.state)
+	status, duplicate, err := conversation.Accept(inputID, text)
+	if err != nil {
+		rollback()
+		return "", false, err
+	}
+	if err := session.Save(s.root, s.state); err != nil {
+		rollback()
+		return "", false, err
+	}
+	return status, duplicate, nil
 }
 
 func (s *conversationStore) lookup(ref conversationRef) (*session.Conversation, error) {

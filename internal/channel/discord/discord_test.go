@@ -209,6 +209,34 @@ func TestExactWriteRequestIsSuppressedAndContinuedOnce(t *testing.T) {
 	}
 }
 
+func TestFailedTurnCannotRequestWriteAccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := newFakeConversationManager()
+	current := &surface{id: "555", conversation: "discord-conversation", turns: map[string]*pendingTurn{
+		"message-1": {channelID: "555", messageID: "message-1"},
+	}}
+	var delivered []string
+	runtime := &Runtime{
+		config: Config{Audit: io.Discard}, ctx: ctx, cancel: cancel, manager: manager,
+		surfaces: map[string]*surface{"555": current}, byConversation: map[string]*surface{current.conversation: current},
+		deliver: func(_ string, message *discordgo.MessageSend) error {
+			delivered = append(delivered, message.Content)
+			return nil
+		},
+	}
+	runtime.handleDispatch(current.conversation, dispatch.Event{Type: "agent.output.delta", InputID: "message-1", ItemID: "output", Delta: RequestWriteAccess})
+	runtime.handleDispatch(current.conversation, dispatch.Event{Type: "turn.failed", InputID: "message-1"})
+	select {
+	case got := <-manager.elevated:
+		t.Fatalf("failed turn elevated: %#v", got)
+	default:
+	}
+	if len(delivered) != 1 || delivered[0] == RequestWriteAccess {
+		t.Fatalf("failed turn delivery = %#v", delivered)
+	}
+}
+
 func TestStatusMessageUsesOnlySafeLifecycleState(t *testing.T) {
 	message := statusMessage("maintainer", "codex", "guild", dispatch.ConversationStatus{State: dispatch.LifecycleQueued, Pending: 2})
 	if message != "hctl is online: agent=maintainer harness=codex surface=guild state=queued pending=2" {

@@ -102,7 +102,7 @@ func (m *Manager) prepare(ctx context.Context, assignment Assignment) (*project.
 	if err != nil {
 		return nil, errors.New("conversation worktree does not contain the selected agent source")
 	}
-	if err := setup.Verify(p); err == nil {
+	if err := setup.VerifyWritableChannel(p); err == nil {
 		return p, nil
 	}
 	prepareCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -110,7 +110,7 @@ func (m *Manager) prepare(ctx context.Context, assignment Assignment) (*project.
 	if err := tool.Prepare(prepareCtx, p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools); err != nil {
 		return nil, err
 	}
-	if _, err := setup.Apply(p, m.executable); err != nil {
+	if _, err := setup.ApplyWritableChannel(p, m.executable); err != nil {
 		return nil, err
 	}
 	return p, nil

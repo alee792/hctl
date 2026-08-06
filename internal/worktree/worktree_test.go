@@ -30,7 +30,7 @@ func TestProvisionCreatesAndResolvesIsolatedBranchWorktree(t *testing.T) {
 	if filepath.Dir(assignment.Root) == repo || !strings.HasPrefix(assignment.Branch, "hctl/"+base.AgentID+"/") {
 		t.Fatalf("unsafe assignment = %#v", assignment)
 	}
-	if err := setup.Verify(prepared); err != nil {
+	if err := setup.VerifyWritableChannel(prepared); err != nil {
 		t.Fatalf("generated setup was not prepared: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(repo, "CLAUDE.md")); !os.IsNotExist(err) {

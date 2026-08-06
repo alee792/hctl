@@ -234,8 +234,12 @@ under workspace-write policy, and continues the request once. Unassigned
 conversations remain read-only. Global resident-session and active-turn limits
 now bound the runtime with documented defaults, durable saturation queues,
 fair cross-conversation turn admission, and idle hibernation under resident
-pressure. Simultaneous writable-conversation isolation remains the next ordered
-slice tracked by the concurrent-session epic.
+pressure. Guild and DM mutations can now overlap in distinct writable
+worktrees and native sessions, complete out of order without crossing response
+surfaces, hibernate and resume independently, and restore both assignments
+after restart. Ordinary worktree, harness, and deadline failures retire only
+the affected conversation worker; loss of dispatcher-event delivery remains a
+runtime-wide failure. Credential-free fake acceptance covers Claude and Codex.
 
 Live Discord acceptance remains pending enrollment of a user-controlled bot and
 authorized guild/channel. The automated evidence uses credential-free tests;

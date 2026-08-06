@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -40,6 +41,55 @@ func TestProvisionCreatesAndResolvesIsolatedBranchWorktree(t *testing.T) {
 	resolved, err := manager.Resolve(context.Background(), "discord-conversation", assignment)
 	if err != nil || resolved.WorkspaceRoot != assignment.Root || resolved.AgentID != base.AgentID {
 		t.Fatalf("resolved project = %#v, %v", resolved, err)
+	}
+}
+
+func TestProvisionConcurrentConversationsCreatesIsolatedWorktrees(t *testing.T) {
+	_, base := gitProject(t)
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		conversation string
+		project      *project.Project
+		assignment   Assignment
+		err          error
+	}
+	results := make(chan result, 2)
+	for _, conversation := range []string{"discord-guild", "discord-dm"} {
+		go func() {
+			prepared, assignment, provisionErr := manager.Provision(context.Background(), conversation)
+			results <- result{conversation: conversation, project: prepared, assignment: assignment, err: provisionErr}
+		}()
+	}
+	created := map[string]result{}
+	for range 2 {
+		got := <-results
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		created[got.conversation] = got
+		t.Cleanup(func() { manager.Remove(context.Background(), got.assignment) })
+	}
+	guild, dm := created["discord-guild"], created["discord-dm"]
+	if guild.assignment == dm.assignment || guild.assignment.Root == dm.assignment.Root || guild.assignment.Branch == dm.assignment.Branch {
+		t.Fatalf("conversation assignments are not distinct: guild=%#v dm=%#v", guild.assignment, dm.assignment)
+	}
+	if err := os.WriteFile(filepath.Join(guild.assignment.Root, "guild-only.txt"), []byte("guild mutation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dm.assignment.Root, "guild-only.txt")); !os.IsNotExist(err) {
+		t.Fatalf("guild mutation visible from DM worktree: %v", err)
+	}
+	for conversation, got := range created {
+		resolved, err := manager.Resolve(context.Background(), conversation, got.assignment)
+		if err != nil || resolved.WorkspaceRoot != got.assignment.Root {
+			t.Fatalf("resolve %s = %#v, %v", conversation, resolved, err)
+		}
+	}
+	if reflect.DeepEqual(guild.project, dm.project) {
+		t.Fatal("isolated worktrees resolved to identical projects")
 	}
 }
 

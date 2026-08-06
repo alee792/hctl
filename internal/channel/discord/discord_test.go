@@ -2,7 +2,9 @@ package discord
 
 import (
 	"context"
+	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -178,6 +180,39 @@ func TestDiscordSurfaceSubmitsThroughManagedConversation(t *testing.T) {
 	}
 }
 
+func TestConversationLocalSubmissionFailureDoesNotCancelDiscordRuntime(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := newFakeConversationManager()
+	manager.submitErr = errors.New("assigned worktree cannot be resolved")
+	var delivered []*discordgo.MessageSend
+	runtime := &Runtime{
+		config: Config{Runtime: channelconfig.Profile{
+			ApplicationID: "111", BotUserID: "222", AllowedUserID: "333",
+			AllowedGuildID: "444", AllowedChannelID: "555",
+		}},
+		ctx: ctx, cancel: cancel, manager: manager,
+		surfaces: map[string]*surface{}, byConversation: map[string]*surface{},
+		deliver: func(_ string, message *discordgo.MessageSend) error {
+			delivered = append(delivered, message)
+			return nil
+		},
+	}
+	incoming := &discordgo.MessageCreate{Message: &discordgo.Message{
+		ID: "message-1", Content: "please change it", ChannelID: "555", GuildID: "444",
+		Author: &discordgo.User{ID: "333"},
+	}}
+	runtime.handleMessage(nil, incoming)
+	select {
+	case <-ctx.Done():
+		t.Fatal("conversation-local failure cancelled Discord runtime")
+	default:
+	}
+	if len(delivered) != 1 || delivered[0].Reference == nil || delivered[0].Reference.MessageID != incoming.ID || !strings.Contains(delivered[0].Content, "this conversation") {
+		t.Fatalf("local failure delivery = %#v", delivered)
+	}
+}
+
 func TestExactWriteRequestIsSuppressedAndContinuedOnce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -237,6 +272,46 @@ func TestFailedTurnCannotRequestWriteAccess(t *testing.T) {
 	}
 }
 
+func TestConcurrentSurfaceRepliesStayWithTriggeringChannelOutOfOrder(t *testing.T) {
+	guild := &surface{id: "guild-channel", conversation: "discord-guild", turns: map[string]*pendingTurn{
+		"guild-message": {channelID: "guild-channel", messageID: "guild-message"},
+	}}
+	dm := &surface{id: "dm-channel", conversation: "discord-dm", turns: map[string]*pendingTurn{
+		"dm-message": {channelID: "dm-channel", messageID: "dm-message"},
+	}}
+	type delivery struct {
+		channel   string
+		content   string
+		reference string
+	}
+	var delivered []delivery
+	runtime := &Runtime{
+		config:         Config{Audit: io.Discard},
+		surfaces:       map[string]*surface{"guild-channel": guild, "dm-channel": dm},
+		byConversation: map[string]*surface{"discord-guild": guild, "discord-dm": dm},
+		deliver: func(channel string, message *discordgo.MessageSend) error {
+			reference := ""
+			if message.Reference != nil {
+				reference = message.Reference.MessageID
+			}
+			delivered = append(delivered, delivery{channel: channel, content: message.Content, reference: reference})
+			return nil
+		},
+	}
+	appendBounded(dm.turns["dm-message"], "dm-output", "DM result")
+	appendBounded(guild.turns["guild-message"], "guild-output", "Guild result")
+	runtime.handleDispatch("discord-dm", dispatch.Event{Type: "turn.completed", InputID: "dm-message"})
+	runtime.handleDispatch("discord-guild", dispatch.Event{Type: "turn.completed", InputID: "guild-message"})
+
+	want := []delivery{
+		{channel: "dm-channel", content: "DM result", reference: "dm-message"},
+		{channel: "guild-channel", content: "Guild result", reference: "guild-message"},
+	}
+	if !reflect.DeepEqual(delivered, want) {
+		t.Fatalf("out-of-order deliveries = %#v, want %#v", delivered, want)
+	}
+}
+
 func TestStatusMessageUsesOnlySafeLifecycleState(t *testing.T) {
 	message := statusMessage("maintainer", "codex", "guild", dispatch.ConversationStatus{State: dispatch.LifecycleQueued, Pending: 2}, dispatch.CapacityStatus{Active: 1, ActiveLimit: 2, Resident: 2, ResidentLimit: 4, Queued: 3})
 	if message != "hctl is online: agent=maintainer harness=codex surface=guild state=queued pending=2 active=1/2 resident=2/4 queued=3" {
@@ -267,6 +342,7 @@ type fakeConversationManager struct {
 	statuses  map[string]dispatch.ConversationStatus
 	done      chan struct{}
 	elevated  chan fakeManagedSubmission
+	submitErr error
 }
 
 func newFakeConversationManager() *fakeConversationManager {
@@ -277,6 +353,9 @@ func (m *fakeConversationManager) Submit(_ context.Context, conversation string,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.submitted = append(m.submitted, fakeManagedSubmission{conversation: conversation, submission: submission})
+	if m.submitErr != nil {
+		return dispatch.SubmissionResult{}, m.submitErr
+	}
 	return dispatch.SubmissionResult{Status: "queued"}, nil
 }
 

@@ -43,6 +43,9 @@ would make a prompt responsible for runtime security and recovery.
 
 - A mutating conversation has a stable checkout and native session across
   later messages, idle hibernation, and hctl restarts.
+- Multiple mutating conversations may run concurrently, but each retains its
+  own checkout, queue, native session, lifecycle, and originating response
+  surface. Ordinary per-conversation failures do not cancel peer lifecycles.
 - Creation and setup happen before writable harness execution. A mismatch or
   preparation failure leaves the shared checkout unchanged and produces a
   classified channel failure without retrying the user turn.

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"hctl/internal/project"
@@ -23,6 +24,7 @@ type Assignment struct {
 }
 
 type Manager struct {
+	mu         sync.Mutex
 	base       *project.Project
 	executable string
 	repo       string
@@ -46,6 +48,8 @@ func New(ctx context.Context, base *project.Project, executable string) (*Manage
 }
 
 func (m *Manager) Provision(ctx context.Context, conversation string) (*project.Project, Assignment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	assignment := m.expected(conversation)
 	if err := ensurePrivateDirectory(m.parent); err != nil {
 		return nil, Assignment{}, err

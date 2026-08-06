@@ -49,7 +49,10 @@ capacity coordinator built at this seam.
   response buffering, and delivery concerns.
 - Safe status can distinguish inactive, idle, hibernated, queued, and active lifecycle
   states without paths or runtime identifiers.
-- One conversation failure still terminates the channel runtime consistently;
+- Ordinary harness, worktree, close, and deadline failures retire only the
+  affected conversation worker while preserving its durable recovery state
+  and peer lifecycles. Failure to deliver dispatcher events still terminates
+  the channel runtime because outcomes can no longer be accounted for safely;
   recovery never silently retries ambiguous work.
 - Capacity limits are defined by ADR 0017 and writable worktrees by ADR 0016.
   Read-only channel execution is defined by ADR 0015.

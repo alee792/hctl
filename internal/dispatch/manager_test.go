@@ -382,6 +382,328 @@ func TestManagerConsumesSynchronousCapacityHandoffBeforeReopening(t *testing.T) 
 	waitManagedEvents(t, events, "turn.completed", map[string]string{conversation: "one-2"})
 }
 
+func TestManagerRunsConcurrentWritableSurfacesInIsolationForHarnesses(t *testing.T) {
+	for _, harnessName := range []string{"claude", "codex"} {
+		t.Run(harnessName, func(t *testing.T) {
+			p := testProject(t)
+			guildRoot, dmRoot := t.TempDir(), t.TempDir()
+			provider := &multiWorkspaceProvider{
+				base: p,
+				assignments: map[string]worktree.Assignment{
+					"discord-guild": {Root: guildRoot, Branch: "hctl/test/guild"},
+					"discord-dm":    {Root: dmRoot, Branch: "hctl/test/dm"},
+				},
+			}
+			driver := newNamedManagerDriver(harnessName)
+			events := make(chan managedEvent, 128)
+			manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, 2, 2, func(conversation string, event Event) error {
+				events <- managedEvent{conversation: conversation, event: event}
+				return nil
+			}, newFakeIdleClock().NewTimer, provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, item := range []struct{ conversation, input string }{{"discord-guild", "guild-read"}, {"discord-dm", "dm-read"}} {
+				if _, err := manager.Submit(context.Background(), item.conversation, Submission{InputID: item.input, Text: "prepare mutation"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			started := map[string]bool{driver.waitAnyStarted(t): true, driver.waitAnyStarted(t): true}
+			if !started["guild-read"] || !started["dm-read"] {
+				t.Fatalf("read-only turns started = %v", started)
+			}
+			driver.release("guild-read")
+			driver.release("dm-read")
+			waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "guild-read", "discord-dm": "dm-read"})
+
+			for _, item := range []struct{ conversation, input string }{{"discord-guild", "guild-write"}, {"discord-dm", "dm-write"}} {
+				result, err := manager.Elevate(context.Background(), item.conversation, Submission{InputID: item.input, Text: "continue with write access"})
+				if err != nil || result.Status != "queued" {
+					t.Fatalf("elevate %s = %+v, %v", item.conversation, result, err)
+				}
+			}
+			started = map[string]bool{driver.waitAnyStarted(t): true, driver.waitAnyStarted(t): true}
+			if !started["guild-write"] || !started["dm-write"] {
+				t.Fatalf("writable turns started = %v", started)
+			}
+			if got := driver.rootForInput("guild-write"); got != guildRoot {
+				t.Fatalf("guild writable root = %q, want %q", got, guildRoot)
+			}
+			if got := driver.rootForInput("dm-write"); got != dmRoot {
+				t.Fatalf("DM writable root = %q, want %q", got, dmRoot)
+			}
+			if capacity := manager.Capacity(); capacity.Active != 2 || capacity.Resident != 2 {
+				t.Fatalf("concurrent writable capacity = %+v", capacity)
+			}
+
+			// Complete out of order and require each terminal event to retain its surface.
+			driver.release("dm-write")
+			dmCompleted := waitManagedEvent(t, events, "turn.completed")
+			if dmCompleted.conversation != "discord-dm" || dmCompleted.event.InputID != "dm-write" {
+				t.Fatalf("first writable completion = %+v", dmCompleted)
+			}
+			driver.release("guild-write")
+			waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "guild-write"})
+
+			state, err := session.Load(p.WorkspaceRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			guildState, dmState := findConversation(state, "discord-guild"), findConversation(state, "discord-dm")
+			if guildState == nil || dmState == nil || guildState.WorkspaceRoot != guildRoot || dmState.WorkspaceRoot != dmRoot || guildState.WorktreeBranch == dmState.WorktreeBranch {
+				t.Fatalf("durable isolated conversations: guild=%#v dm=%#v", guildState, dmState)
+			}
+			guildSession, dmSession := guildState.SessionID, dmState.SessionID
+			manager.Close()
+
+			restartedDriver := newNamedManagerDriver(harnessName)
+			restarted, err := newManager(context.Background(), p, restartedDriver, time.Minute, time.Hour, 2, 2, func(string, Event) error { return nil }, newFakeIdleClock().NewTimer, provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(restarted.Close)
+			for _, item := range []struct{ conversation, input string }{{"discord-guild", "guild-next"}, {"discord-dm", "dm-next"}} {
+				if _, err := restarted.Submit(context.Background(), item.conversation, Submission{InputID: item.input, Text: "resume"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			started = map[string]bool{restartedDriver.waitAnyStarted(t): true, restartedDriver.waitAnyStarted(t): true}
+			if !started["guild-next"] || !started["dm-next"] {
+				t.Fatalf("restart turns started = %v", started)
+			}
+			if restartedDriver.rootForInput("guild-next") != guildRoot || restartedDriver.sessionForInput("guild-next") != guildSession {
+				t.Fatalf("guild restart root/session = %q/%q", restartedDriver.rootForInput("guild-next"), restartedDriver.sessionForInput("guild-next"))
+			}
+			if restartedDriver.rootForInput("dm-next") != dmRoot || restartedDriver.sessionForInput("dm-next") != dmSession {
+				t.Fatalf("DM restart root/session = %q/%q", restartedDriver.rootForInput("dm-next"), restartedDriver.sessionForInput("dm-next"))
+			}
+			restartedDriver.release("guild-next")
+			restartedDriver.release("dm-next")
+		})
+	}
+}
+
+func TestManagerContainsHarnessFailureToOneWritableConversation(t *testing.T) {
+	p := testProject(t)
+	provider := &multiWorkspaceProvider{base: p, assignments: map[string]worktree.Assignment{
+		"discord-guild": {Root: t.TempDir(), Branch: "hctl/test/guild"},
+		"discord-dm":    {Root: t.TempDir(), Branch: "hctl/test/dm"},
+	}}
+	driver := newManagerDriver()
+	driver.failures["guild-write"] = errors.New("guild harness failed")
+	events := make(chan managedEvent, 128)
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, 2, 2, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	}, newFakeIdleClock().NewTimer, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	for _, conversation := range []string{"discord-guild", "discord-dm"} {
+		if _, err := manager.Submit(context.Background(), conversation, Submission{InputID: conversation + "-read", Text: "prepare"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		driver.release(driver.waitAnyStarted(t))
+	}
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "discord-guild-read", "discord-dm": "discord-dm-read"})
+	if _, err := manager.Elevate(context.Background(), "discord-guild", Submission{InputID: "guild-write", Text: "write"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Elevate(context.Background(), "discord-dm", Submission{InputID: "dm-write", Text: "write"}); err != nil {
+		t.Fatal(err)
+	}
+	started := map[string]bool{driver.waitAnyStarted(t): true, driver.waitAnyStarted(t): true}
+	if !started["guild-write"] || !started["dm-write"] {
+		t.Fatalf("writable turns started = %v", started)
+	}
+	driver.release("guild-write")
+	failure := waitManagedEvent(t, events, "driver.process_failed")
+	if failure.conversation != "discord-guild" || failure.event.InputID != "guild-write" {
+		t.Fatalf("isolated failure = %+v", failure)
+	}
+	select {
+	case <-manager.Done():
+		t.Fatal("guild harness failure stopped the DM conversation")
+	default:
+	}
+	driver.release("dm-write")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-dm": "dm-write"})
+	if status := manager.Status("discord-dm"); status.State != LifecycleIdle || status.Pending != 0 {
+		t.Fatalf("DM state after guild failure = %+v", status)
+	}
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dm := findConversation(state, "discord-dm")
+	if dm == nil || dm.Outcomes["dm-write"] != "completed" || dm.WorkspaceRoot != provider.assignments["discord-dm"].Root {
+		t.Fatalf("DM durable state after guild failure = %#v", dm)
+	}
+}
+
+func TestManagerReportsAndContainsWritableResolutionFailure(t *testing.T) {
+	p := testProject(t)
+	provider := &multiWorkspaceProvider{
+		base: p,
+		assignments: map[string]worktree.Assignment{
+			"discord-guild": {Root: t.TempDir(), Branch: "hctl/test/guild"},
+			"discord-dm":    {Root: t.TempDir(), Branch: "hctl/test/dm"},
+		},
+		resolveFailures: map[string]error{"discord-guild": errors.New("guild worktree is invalid")},
+	}
+	store, err := openConversationStore(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct{ conversation, input string }{{"discord-guild", "guild-write"}, {"discord-dm", "dm-write"}} {
+		assignment := provider.assignments[item.conversation]
+		ref := conversationRef{agentID: p.AgentID, harness: "claude", id: item.conversation, fingerprint: p.SourceFingerprint}
+		if _, _, err := store.assignWorkspaceAndAccept(ref, assignment.Root, assignment.Branch, item.input, "persisted writable turn"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	driver := newManagerDriver()
+	events := make(chan managedEvent, 64)
+	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, 2, 2, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	}, newFakeIdleClock().NewTimer, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	for _, item := range []struct{ conversation, input string }{{"discord-guild", "guild-write"}, {"discord-dm", "dm-write"}} {
+		result, err := manager.Submit(context.Background(), item.conversation, Submission{InputID: item.input, Text: "redelivery"})
+		if err != nil || !result.Duplicate || result.Status != "queued" {
+			t.Fatalf("start %s = %+v, %v", item.conversation, result, err)
+		}
+	}
+	failure := waitManagedEvent(t, events, "driver.process_failed")
+	if failure.conversation != "discord-guild" || failure.event.InputID != "guild-write" || failure.event.Status != "workspace_failure" {
+		t.Fatalf("workspace failure event = %+v", failure)
+	}
+	driver.waitStarted(t, "dm-write")
+	select {
+	case <-manager.Done():
+		t.Fatal("guild worktree failure stopped DM work")
+	default:
+	}
+	driver.release("dm-write")
+	waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-dm": "dm-write"})
+	if status := manager.Status("discord-guild"); status.State != LifecycleQueued || status.Pending != 1 {
+		t.Fatalf("failed guild durable status = %+v", status)
+	}
+}
+
+func TestManagerHibernatesAndResumesWritableConversationsIndependently(t *testing.T) {
+	for _, harnessName := range []string{"claude", "codex"} {
+		t.Run(harnessName, func(t *testing.T) {
+			p := testProject(t)
+			provider := &multiWorkspaceProvider{base: p, assignments: map[string]worktree.Assignment{
+				"discord-guild": {Root: t.TempDir(), Branch: "hctl/test/guild"},
+				"discord-dm":    {Root: t.TempDir(), Branch: "hctl/test/dm"},
+			}}
+			store, err := openConversationStore(p.WorkspaceRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, item := range []struct{ conversation, input string }{{"discord-guild", "guild-one"}, {"discord-dm", "dm-one"}} {
+				assignment := provider.assignments[item.conversation]
+				ref := conversationRef{agentID: p.AgentID, harness: harnessName, id: item.conversation, fingerprint: p.SourceFingerprint}
+				if _, _, err := store.assignWorkspaceAndAccept(ref, assignment.Root, assignment.Branch, item.input, "persisted writable turn"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			driver := newNamedManagerDriver(harnessName)
+			clock := newFakeIdleClock()
+			events := make(chan managedEvent, 128)
+			manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, 2, 2, func(conversation string, event Event) error {
+				events <- managedEvent{conversation: conversation, event: event}
+				return nil
+			}, clock.NewTimer, provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(manager.Close)
+			for _, item := range []struct{ conversation, input string }{{"discord-guild", "guild-one"}, {"discord-dm", "dm-one"}} {
+				result, err := manager.Submit(context.Background(), item.conversation, Submission{InputID: item.input, Text: "redelivery"})
+				if err != nil || !result.Duplicate || result.Status != "queued" {
+					t.Fatalf("start durable %s = %+v, %v", item.conversation, result, err)
+				}
+			}
+			started := map[string]bool{driver.waitAnyStarted(t): true, driver.waitAnyStarted(t): true}
+			if !started["guild-one"] || !started["dm-one"] {
+				t.Fatalf("initial writable turns = %v", started)
+			}
+			driver.release("guild-one")
+			waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "guild-one"})
+			guildIdle := clock.waitTimer(t)
+			driver.release("dm-one")
+			waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-dm": "dm-one"})
+			_ = clock.waitTimer(t)
+
+			guildIdle.Fire()
+			hibernated := waitManagedEvent(t, events, "driver.process_hibernated")
+			if hibernated.conversation != "discord-guild" {
+				t.Fatalf("hibernated conversation = %+v", hibernated)
+			}
+			if status := manager.Status("discord-dm"); status.State != LifecycleIdle {
+				t.Fatalf("DM changed when guild hibernated: %+v", status)
+			}
+			if _, err := manager.Submit(context.Background(), "discord-dm", Submission{InputID: "dm-two", Text: "continue DM"}); err != nil {
+				t.Fatal(err)
+			}
+			driver.waitStarted(t, "dm-two")
+			if got := driver.openCount(); got != 2 {
+				t.Fatalf("DM reopened after guild hibernation: opens=%d", got)
+			}
+			driver.release("dm-two")
+			waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-dm": "dm-two"})
+			if _, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "guild-two", Text: "resume guild"}); err != nil {
+				t.Fatal(err)
+			}
+			driver.waitStarted(t, "guild-two")
+			if got := driver.openCount(); got != 3 {
+				t.Fatalf("guild did not reopen independently: opens=%d", got)
+			}
+			if driver.rootForInput("guild-two") != provider.assignments["discord-guild"].Root {
+				t.Fatalf("guild resumed in %q", driver.rootForInput("guild-two"))
+			}
+			driver.release("guild-two")
+		})
+	}
+}
+
+func TestManagerStopsRuntimeWhenDispatchEventDeliveryFails(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	deliveryErr := errors.New("event transport failed")
+	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(string, Event) error { return deliveryErr })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	result, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-1", Text: "hello"})
+	if err != nil || result.Status != "queued" {
+		t.Fatalf("submission = %+v, %v", result, err)
+	}
+	select {
+	case <-manager.Done():
+		if !errors.Is(manager.Err(), errDispatchEventDelivery) {
+			t.Fatalf("manager error = %v", manager.Err())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch event delivery failure did not stop runtime")
+	}
+}
+
 func TestManagerResetRequiresIdleConversation(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
@@ -810,10 +1132,10 @@ func TestManagerClassifiesHibernateCloseFailureWithoutLosingConversation(t *test
 	}
 	select {
 	case <-manager.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("manager did not stop after hibernate close failure")
+		t.Fatal("one conversation's hibernate failure stopped the manager")
+	default:
 	}
-	if !errors.Is(manager.Err(), driver.closeErr) {
+	if manager.Err() != nil {
 		t.Fatalf("manager error = %v", manager.Err())
 	}
 
@@ -854,8 +1176,8 @@ func TestManagerClassifiesReadOnlyPolicyStartupFailure(t *testing.T) {
 	}
 	select {
 	case <-manager.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("manager did not finish after startup failure")
+		t.Fatal("one conversation's startup failure stopped the manager")
+	default:
 	}
 	if capacity := manager.Capacity(); capacity.Active != 0 || capacity.Resident != 0 {
 		t.Fatalf("startup failure leaked capacity: %+v", capacity)
@@ -1015,7 +1337,11 @@ func TestManagerAdmissionDoesNotBlockLifecycleStatusAtCapacity(t *testing.T) {
 func TestManagerTurnTimeoutAndShutdownRemainBounded(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
-	manager, err := NewManager(context.Background(), p, driver, 10*time.Millisecond, func(string, Event) error { return nil })
+	events := make(chan managedEvent, 16)
+	manager, err := NewManager(context.Background(), p, driver, 10*time.Millisecond, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1023,13 +1349,14 @@ func TestManagerTurnTimeoutAndShutdownRemainBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	driver.waitStarted(t, "message-1")
+	failure := waitManagedEvent(t, events, "driver.process_failed")
+	if failure.conversation != "discord-guild" || failure.event.InputID != "message-1" {
+		t.Fatalf("timeout failure = %+v", failure)
+	}
 	select {
 	case <-manager.Done():
-		if !errors.Is(manager.Err(), context.DeadlineExceeded) {
-			t.Fatalf("timeout error = %v", manager.Err())
-		}
-	case <-time.After(time.Second):
-		t.Fatal("turn timeout did not stop managed runtime")
+		t.Fatal("one conversation's turn timeout stopped the manager")
+	default:
 	}
 	manager.Close()
 }
@@ -1092,21 +1419,24 @@ func waitManagedEvents(t *testing.T, events <-chan managedEvent, eventType strin
 }
 
 type managerDriver struct {
-	mu        sync.Mutex
-	name      string
-	next      int
-	opened    int
-	closed    int
-	resumed   []string
-	policies  []harness.ExecutionPolicy
-	roots     []string
-	openErr   error
-	closeErr  error
-	closeWait chan struct{}
-	abortOnce sync.Once
-	aborted   int
-	started   chan string
-	releases  map[string]chan struct{}
+	mu            sync.Mutex
+	name          string
+	next          int
+	opened        int
+	closed        int
+	resumed       []string
+	policies      []harness.ExecutionPolicy
+	roots         []string
+	inputRoots    map[string]string
+	inputSessions map[string]string
+	failures      map[string]error
+	openErr       error
+	closeErr      error
+	closeWait     chan struct{}
+	abortOnce     sync.Once
+	aborted       int
+	started       chan string
+	releases      map[string]chan struct{}
 }
 
 func newManagerDriver() *managerDriver {
@@ -1114,7 +1444,7 @@ func newManagerDriver() *managerDriver {
 }
 
 func newNamedManagerDriver(name string) *managerDriver {
-	return &managerDriver{name: name, started: make(chan string, 16), releases: map[string]chan struct{}{}}
+	return &managerDriver{name: name, started: make(chan string, 16), releases: map[string]chan struct{}{}, inputRoots: map[string]string{}, inputSessions: map[string]string{}, failures: map[string]error{}}
 }
 
 func (d *managerDriver) Name() string                 { return d.name }
@@ -1135,7 +1465,7 @@ func (d *managerDriver) Open(_ context.Context, request harness.OpenRequest) (ha
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("session-%d", d.next)
 	}
-	return &managerSession{driver: d, sessionID: sessionID}, nil
+	return &managerSession{driver: d, sessionID: sessionID, root: request.Root}, nil
 }
 
 func (d *managerDriver) waitStarted(t *testing.T, id string) {
@@ -1198,6 +1528,18 @@ func (d *managerDriver) openRoots() []string {
 	return append([]string(nil), d.roots...)
 }
 
+func (d *managerDriver) rootForInput(inputID string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.inputRoots[inputID]
+}
+
+func (d *managerDriver) sessionForInput(inputID string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.inputSessions[inputID]
+}
+
 type fakeWorkspaceProvider struct {
 	project      *project.Project
 	assignment   worktree.Assignment
@@ -1206,6 +1548,37 @@ type fakeWorkspaceProvider struct {
 	resolves     int
 	removed      int
 }
+
+type multiWorkspaceProvider struct {
+	mu              sync.Mutex
+	base            *project.Project
+	assignments     map[string]worktree.Assignment
+	resolveFailures map[string]error
+}
+
+func (p *multiWorkspaceProvider) Provision(_ context.Context, conversation string) (*project.Project, worktree.Assignment, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	assignment, ok := p.assignments[conversation]
+	if !ok {
+		return nil, worktree.Assignment{}, errors.New("missing test workspace assignment")
+	}
+	return projectAtWorkspace(p.base, assignment.Root), assignment, nil
+}
+
+func (p *multiWorkspaceProvider) Resolve(_ context.Context, conversation string, assignment worktree.Assignment) (*project.Project, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.resolveFailures[conversation]; err != nil {
+		return nil, err
+	}
+	if p.assignments[conversation] != assignment {
+		return nil, errors.New("unexpected test workspace assignment")
+	}
+	return projectAtWorkspace(p.base, assignment.Root), nil
+}
+
+func (*multiWorkspaceProvider) Remove(context.Context, worktree.Assignment) {}
 
 func (p *fakeWorkspaceProvider) Provision(context.Context, string) (*project.Project, worktree.Assignment, error) {
 	p.provisions++
@@ -1246,6 +1619,7 @@ func (d *managerDriver) abortCount() int {
 type managerSession struct {
 	driver    *managerDriver
 	sessionID string
+	root      string
 }
 
 func (s *managerSession) InitialEvents() []harness.Event {
@@ -1256,6 +1630,9 @@ func (s *managerSession) RunTurn(ctx context.Context, input harness.Input, emit 
 	release := make(chan struct{})
 	s.driver.mu.Lock()
 	s.driver.releases[input.ID] = release
+	s.driver.inputRoots[input.ID] = s.root
+	s.driver.inputSessions[input.ID] = s.sessionID
+	failure := s.driver.failures[input.ID]
 	s.driver.mu.Unlock()
 	emit(harness.Event{Type: "turn.started", SessionID: s.sessionID, TurnID: input.ID})
 	s.driver.started <- input.ID
@@ -1263,6 +1640,9 @@ func (s *managerSession) RunTurn(ctx context.Context, input harness.Input, emit 
 	case <-release:
 	case <-ctx.Done():
 		return harness.TurnResult{}, ctx.Err()
+	}
+	if failure != nil {
+		return harness.TurnResult{}, failure
 	}
 	emit(harness.Event{Type: "agent.output.delta", SessionID: s.sessionID, TurnID: input.ID, Delta: "ok"})
 	return harness.TurnResult{SessionID: s.sessionID, TurnID: input.ID, Status: "completed"}, nil

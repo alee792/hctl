@@ -92,6 +92,7 @@ type Runtime struct {
 	cancel  context.CancelFunc
 	manager conversationManager
 	deliver func(string, *discordgo.MessageSend) error
+	typing  func(string) error
 
 	mu             sync.Mutex
 	surfaces       map[string]*surface
@@ -210,6 +211,7 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 		_, err := s.ChannelMessageSendComplex(channelID, message)
 		return err
 	}
+	runtime.typing = func(channelID string) error { return s.ChannelTyping(channelID) }
 	emit := func(conversation string, event dispatch.Event) error {
 		runtime.handleDispatch(conversation, event)
 		return nil
@@ -313,7 +315,7 @@ func (r *Runtime) handleMessage(_ *discordgo.Session, incoming *discordgo.Messag
 	if err != nil {
 		r.drop(current, incoming.ID)
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, dispatch.ErrManagerClosed) {
-			r.cancel()
+			r.sendTurn(incoming.ID, &pendingTurn{channelID: incoming.ChannelID, messageID: incoming.ID}, []string{"I couldn't handle that request in this conversation. Please try again."}, false)
 		}
 		return
 	}
@@ -409,8 +411,8 @@ func (r *Runtime) handleDispatch(conversation string, event dispatch.Event) {
 		appendBounded(turn, event.ItemID, event.Delta)
 		showTyping := visibleReplyDecided(combinedOutput(turn))
 		r.mu.Unlock()
-		if showTyping {
-			_ = r.session.ChannelTyping(turn.channelID)
+		if showTyping && r.typing != nil {
+			_ = r.typing(turn.channelID)
 		}
 		return
 	}

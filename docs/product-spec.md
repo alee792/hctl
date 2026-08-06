@@ -265,6 +265,14 @@ identity mismatch, unsafe assignment, or modified generated file fails without
 changing the shared checkout or ambiguously retrying the turn. `/new` starts a
 fresh native session while retaining an existing isolated workspace.
 
+Writable conversations remain independent when they overlap: each keeps its
+own branch, worktree, durable queue, native session, and response surface while
+sharing the runtime-wide admission limits. A harness, worktree-resolution, or
+turn-deadline failure retires only that conversation's current worker and
+preserves the other conversations' state and execution. Failure to deliver
+dispatcher events is runtime-wide and still stops admission because the
+channel can no longer account for outcomes safely.
+
 The optional root `schedules/` directory contains nested Markdown task files.
 The bounded, valid UTF-8 path beneath `schedules/`, without `.md`, is the
 schedule name. At most 32 schedules are discovered. Each file is bounded UTF-8
@@ -561,6 +569,10 @@ The MVP is complete when credential-free tests prove:
 17. Runtime-wide resident-session and active-turn limits keep accepted work
     durable under saturation, hibernate eligible idle capacity, and advance
     turns fairly across conversations without a model scheduler.
+18. Concurrent guild and DM mutations use distinct worktrees and native
+    sessions for both Claude and Codex, survive independent hibernation and
+    restart, deliver out-of-order results only to their originating surfaces,
+    and contain ordinary harness or worktree failures to one conversation.
 
 ## Explicit non-goals
 

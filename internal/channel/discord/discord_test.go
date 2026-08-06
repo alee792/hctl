@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -41,7 +42,7 @@ func TestSignedInteractionsDriveOneFIFOConversation(t *testing.T) {
 		body, _ := io.ReadAll(request.Body)
 		requests <- deliveredRequest{Method: request.Method, Path: request.URL.Path, Body: body}
 		response.Header().Set("Content-Type", "application/json")
-		_, _ = response.Write([]byte(`{}`))
+		_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
 	}))
 	defer upstream.Close()
 
@@ -67,7 +68,7 @@ func TestSignedInteractionsDriveOneFIFOConversation(t *testing.T) {
 	}()
 
 	first := signedCommand(t, adapter.Handler(), privateKey, "345678901234567890", "token-first", "first")
-	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"type":5`) {
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"type":5`) || !strings.Contains(first.Body.String(), `"allowed_mentions":{"parse":[]}`) {
 		t.Fatalf("deferred response = %d %s", first.Code, first.Body.String())
 	}
 	if got := <-driver.started; got != "345678901234567890" {
@@ -194,9 +195,12 @@ func TestOutboundDeliveryFailureClassesAndBounds(t *testing.T) {
 		"oversized response": {func(response http.ResponseWriter, _ *http.Request) {
 			_, _ = response.Write(bytes.Repeat([]byte("x"), maxResponseBytes+1))
 		}, time.Second, "uncertain"},
+		"malformed success": {func(response http.ResponseWriter, _ *http.Request) {
+			_, _ = response.Write([]byte(`{}`))
+		}, time.Second, "uncertain"},
 		"timeout": {func(response http.ResponseWriter, _ *http.Request) {
 			time.Sleep(50 * time.Millisecond)
-			_, _ = response.Write([]byte(`{}`))
+			_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
 		}, time.Millisecond, "uncertain"},
 	}
 	for name, test := range tests {
@@ -233,6 +237,21 @@ func TestFailureAndUncertainMessagesAreBounded(t *testing.T) {
 	}
 }
 
+func TestTerminalEventWithoutTokenDoesNotRetainTurnContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	adapter := outboundAdapter(t, server.URL, time.Second)
+	adapter.HandleEvent(gateway.Event{Type: "agent.output.delta", InputID: "345678901234567890", Delta: "bounded model output"})
+	adapter.HandleEvent(gateway.Event{Type: "turn.uncertain", InputID: "345678901234567890"})
+	adapter.mu.Lock()
+	retained := len(adapter.turns)
+	adapter.mu.Unlock()
+	adapter.Close()
+	if retained != 0 {
+		t.Fatalf("terminal turn retained without response token: %d", retained)
+	}
+}
+
 func TestRecoveredInteractionDeliversUncertainWithoutRetry(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -242,7 +261,7 @@ func TestRecoveredInteractionDeliversUncertainWithoutRetry(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
 		delivered <- string(body)
-		_, _ = response.Write([]byte(`{}`))
+		_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
 	}))
 	defer upstream.Close()
 	p := discordProject(t, "claude")
@@ -312,7 +331,7 @@ func TestFailedTurnIsDelivered(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
 		delivered <- string(body)
-		_, _ = response.Write([]byte(`{}`))
+		_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
 	}))
 	defer upstream.Close()
 	p := discordProject(t, "claude")
@@ -341,6 +360,46 @@ func TestFailedTurnIsDelivered(t *testing.T) {
 	adapter.Close()
 	if body := <-delivered; !strings.Contains(body, "Agent turn failed") {
 		t.Fatalf("failed turn delivery = %s", body)
+	}
+}
+
+func TestHarnessStartupFailureIsDelivered(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		delivered <- string(body)
+		_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
+	}))
+	defer upstream.Close()
+	p := discordProject(t, "claude")
+	submissions := make(chan gateway.Submission, 1)
+	adapter, err := New(Config{
+		ApplicationID: testApplication, AllowedUserID: testUser, PublicKey: publicKey,
+		Listen: "127.0.0.1:0", APIBase: upstream.URL,
+		Now: func() time.Time { return time.Unix(2_000_000_000, 0) },
+	}, submissions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := &fakeDriver{openErr: errors.New("fake startup failure")}
+	done := make(chan error, 1)
+	go func() {
+		done <- gateway.RunSubmissions(context.Background(), p, driver, "discord", submissions, func(event gateway.Event) error { adapter.HandleEvent(event); return nil })
+	}()
+	response := signedCommand(t, adapter.Handler(), privateKey, "345678901234567890", "failure-token", "fail")
+	if response.Code != http.StatusOK {
+		t.Fatalf("startup-failure acknowledgement = %d", response.Code)
+	}
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "fake startup failure") {
+		t.Fatalf("gateway startup error = %v", err)
+	}
+	adapter.Close()
+	if body := <-delivered; !strings.Contains(body, "Agent turn failed") {
+		t.Fatalf("startup failure delivery = %s", body)
 	}
 }
 
@@ -382,6 +441,7 @@ type fakeDriver struct {
 	inputs  []string
 	status  string
 	output  string
+	openErr error
 	mu      sync.Mutex
 }
 
@@ -389,6 +449,9 @@ func (d *fakeDriver) Name() string                 { return "claude" }
 func (d *fakeDriver) Executable() string           { return "/fake/claude" }
 func (d *fakeDriver) Verify(context.Context) error { return nil }
 func (d *fakeDriver) Open(context.Context, string, string) (harness.Session, error) {
+	if d.openErr != nil {
+		return nil, d.openErr
+	}
 	return &fakeSession{driver: d}, nil
 }
 

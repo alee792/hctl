@@ -226,10 +226,9 @@ func (a *Adapter) HandleEvent(event gateway.Event) {
 		return
 	}
 	a.remember(event.InputID, status)
-	if current.token == nil {
-		return
+	if current.token != nil {
+		a.queueLocked(delivery{inputID: event.InputID, token: current.token, content: current.output.String(), status: status, truncated: current.truncated})
 	}
-	a.queueLocked(delivery{inputID: event.InputID, token: current.token, content: current.output.String(), status: status, truncated: current.truncated})
 	delete(a.turns, event.InputID)
 }
 
@@ -339,7 +338,7 @@ func (a *Adapter) handle(response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusOK, immediateMessage("The agent could not accept that command."))
 		return
 	}
-	writeJSON(response, http.StatusOK, map[string]any{"type": 5, "data": allowedMentions()})
+	writeJSON(response, http.StatusOK, map[string]any{"type": 5, "data": map[string]any{"allowed_mentions": allowedMentions()}})
 	entry.markReady()
 	if result.Duplicate && known != "" {
 		a.mu.Lock()
@@ -432,6 +431,12 @@ func (a *Adapter) send(job delivery) string {
 			return "failed"
 		}
 		if tooLarge || body == nil {
+			return "uncertain"
+		}
+		var message struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(body, &message) != nil || !validSnowflake(message.ID) {
 			return "uncertain"
 		}
 	}

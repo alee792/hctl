@@ -137,7 +137,7 @@ func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			if process == nil {
 				process, err = driver.Open(ctx, p.WorkspaceRoot, conversation.SessionID)
 				if err != nil {
-					sink.emit(Event{Type: "driver.process_failed", SessionID: conversation.SessionID, Status: "startup_failure"})
+					sink.emit(Event{Type: "driver.process_failed", InputID: conversation.Queue[0].ID, SessionID: conversation.SessionID, Status: "startup_failure"})
 					return err
 				}
 				for _, event := range process.InitialEvents() {
@@ -176,7 +176,11 @@ func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				status = "deadline_exceeded"
 			}
-			sink.emit(Event{Type: "driver.process_failed", SessionID: conversation.SessionID, Status: status})
+			inputID := ""
+			if active != nil {
+				inputID = active.ID
+			}
+			sink.emit(Event{Type: "driver.process_failed", InputID: inputID, SessionID: conversation.SessionID, Status: status})
 			return ctx.Err()
 		case result, ok := <-submissions:
 			if !ok {

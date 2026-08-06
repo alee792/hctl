@@ -36,8 +36,10 @@ that:
 - discovers a bounded `connections/github.md` description and exposes three
   fixed anonymous public GitHub repository and issue operations through the
   same managed MCP server without contacting GitHub during apply;
-- discovers a bounded `channels/discord.md` description and runs one signed,
-  loopback Discord Interactions adapter over the existing durable turn dispatcher;
+- discovers a bounded `channels/discord.md` participation policy and runs one
+  outbound conversational Discord Gateway adapter over the durable turn
+  dispatcher, with independent managed session lifecycles for the authorized
+  guild channel and DM;
 - discovers nested Markdown schedules, validates and fingerprints their
   five-field cron metadata, and explicitly triggers fresh-session task
   occurrences through the durable turn dispatcher without emitting model text;
@@ -143,7 +145,10 @@ a generated custom subagent, and session resume in a fresh external workspace.
   application and identity to one authorized user, guild channel, and DM;
   credentials remain in the OS credential store. `hctl run` auto-applies stale
   setup, buffers responses for exact no-reply suppression, and exposes `/new`
-  and `/status` without requiring a public listener or tunnel.
+  and `/status` without requiring a public listener or tunnel. A deterministic
+  session manager owns one dispatcher worker and at most one resident harness
+  process per conversation, and serializes durable state updates across
+  surfaces.
 - Root-agent Markdown schedules follow Eve's nested `schedules/` convention:
   strict frontmatter contains one valid standard five-field cron string and the
   body is the task prompt. Apply starts no clock. `hctl schedule trigger`
@@ -217,6 +222,12 @@ do not expose equivalent sandbox contracts, native lockfiles already cover
 authored-tool runtimes, and hctl does not own deployment. Do not implement
 proposal capture, image deployment, sandbox source, or broker code merely to
 exercise future seams.
+
+The channel runtime now owns explicit independent managed session lifecycles
+for its configured Discord guild and DM surfaces. Idle process hibernation,
+global resident-session and active-turn limits, read-only admission, and
+conversation-specific writable worktrees remain the ordered follow-up slices
+tracked by the concurrent-session epic.
 
 Live Discord acceptance remains pending enrollment of a user-controlled bot and
 authorized guild/channel. The automated evidence uses credential-free tests;

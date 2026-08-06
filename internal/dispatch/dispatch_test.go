@@ -120,6 +120,20 @@ func TestDispatcherRunsHarnessAndStateInSelectedWorkspace(t *testing.T) {
 	}
 }
 
+func TestDispatcherValidatesProtocolBeforeOpeningWorkspaceState(t *testing.T) {
+	p := &project.Project{WorkspaceRoot: filepath.Join(t.TempDir(), "missing")}
+	submissions := make(chan Submission)
+	close(submissions)
+	err := RunSubmissions(context.Background(), p, &fakeDriver{}, "not valid", submissions, func(Event) error { return nil })
+	if err == nil || err.Error() != "conversation must use only letters, digits, dot, underscore, and dash" {
+		t.Fatalf("invalid conversation error = %v", err)
+	}
+	err = RunSubmissions(context.Background(), p, &fakeDriver{}, "valid", submissions, nil)
+	if err == nil || err.Error() != "dispatch event receiver is required" {
+		t.Fatalf("missing receiver error = %v", err)
+	}
+}
+
 func TestTaskInputsUseFreshSessionsAndDeduplicate(t *testing.T) {
 	p := testProject(t)
 	driver := &taskDriver{}

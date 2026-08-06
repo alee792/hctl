@@ -22,7 +22,6 @@ import (
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
 	"hctl/internal/project"
-	"hctl/internal/session"
 )
 
 const (
@@ -63,10 +62,16 @@ type bufferedOutput struct {
 type surface struct {
 	id           string
 	conversation string
-	submissions  chan dispatch.Submission
-	done         chan error
-	pending      int
 	turns        map[string]*pendingTurn
+}
+
+type conversationManager interface {
+	Submit(context.Context, string, dispatch.Submission) (dispatch.SubmissionResult, error)
+	Status(string) dispatch.ConversationStatus
+	Reset(string) error
+	Done() <-chan struct{}
+	Err() error
+	Close()
 }
 
 type Runtime struct {
@@ -76,11 +81,13 @@ type Runtime struct {
 	session *discordgo.Session
 	ctx     context.Context
 	cancel  context.CancelFunc
+	manager conversationManager
 
-	mu       sync.Mutex
-	surfaces map[string]*surface
-	closed   bool
-	lock     *flock.Flock
+	mu             sync.Mutex
+	surfaces       map[string]*surface
+	byConversation map[string]*surface
+	closed         bool
+	lock           *flock.Flock
 }
 
 func ValidateIdentity(ctx context.Context, token string) (Identity, error) {
@@ -170,7 +177,19 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 	}
 	s.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentsMessageContent
 	ctx, cancel := context.WithCancel(context.Background())
-	runtime := &Runtime{project: p, driver: driver, config: config, session: s, ctx: ctx, cancel: cancel, surfaces: map[string]*surface{}}
+	runtime := &Runtime{
+		project: p, driver: driver, config: config, session: s, ctx: ctx, cancel: cancel,
+		surfaces: map[string]*surface{}, byConversation: map[string]*surface{},
+	}
+	manager, err := dispatch.NewManager(ctx, p, driver, config.TurnTimeout, func(conversation string, event dispatch.Event) error {
+		runtime.handleDispatch(conversation, event)
+		return nil
+	})
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	runtime.manager = manager
 	s.AddHandler(runtime.handleMessage)
 	s.AddHandler(runtime.handleInteraction)
 	return runtime, nil
@@ -207,6 +226,8 @@ func (r *Runtime) Run(ctx context.Context) error {
 		return nil
 	case <-r.ctx.Done():
 		return nil
+	case <-r.manager.Done():
+		return r.manager.Err()
 	}
 }
 
@@ -217,17 +238,10 @@ func (r *Runtime) Close() {
 		return
 	}
 	r.closed = true
-	surfaces := make([]*surface, 0, len(r.surfaces))
-	for _, current := range r.surfaces {
-		surfaces = append(surfaces, current)
-	}
 	r.mu.Unlock()
 	r.cancel()
 	_ = r.session.Close()
-	for _, current := range surfaces {
-		close(current.submissions)
-		<-current.done
-	}
+	r.manager.Close()
 }
 
 func (r *Runtime) handleMessage(_ *discordgo.Session, incoming *discordgo.MessageCreate) {
@@ -257,22 +271,18 @@ func (r *Runtime) handleMessage(_ *discordgo.Session, incoming *discordgo.Messag
 		r.mu.Unlock()
 		return
 	}
-	current.pending++
 	current.turns[incoming.ID] = &pendingTurn{channelID: incoming.ChannelID, messageID: incoming.ID}
 	r.mu.Unlock()
-	reply := make(chan dispatch.SubmissionResult, 1)
-	select {
-	case current.submissions <- dispatch.Submission{InputID: incoming.ID, Text: "Discord message (JSON):\n" + string(text), Reply: reply}:
-	case <-r.ctx.Done():
+	result, err := r.manager.Submit(r.ctx, current.conversation, dispatch.Submission{InputID: incoming.ID, Text: "Discord message (JSON):\n" + string(text)})
+	if err != nil {
 		r.drop(current, incoming.ID)
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, dispatch.ErrManagerClosed) {
+			r.cancel()
+		}
 		return
 	}
-	select {
-	case result := <-reply:
-		if result.Status != "queued" && result.Status != "active" && result.Status != "completed" {
-			r.drop(current, incoming.ID)
-		}
-	case <-r.ctx.Done():
+	if result.Status != "queued" && result.Status != "active" && result.Status != "completed" {
+		r.drop(current, incoming.ID)
 	}
 }
 
@@ -323,13 +333,8 @@ func (r *Runtime) handleInteraction(_ *discordgo.Session, incoming *discordgo.In
 		if incoming.GuildID == "" {
 			surfaceKind = "dm"
 		}
-		r.mu.Lock()
-		queued := 0
-		if current := r.surfaces[incoming.ChannelID]; current != nil {
-			queued = current.pending
-		}
-		r.mu.Unlock()
-		r.respond(incoming.Interaction, fmt.Sprintf("hctl is online: agent=%s harness=%s surface=%s pending=%d", r.project.Name, r.driver.Name(), surfaceKind, queued))
+		status := r.manager.Status(conversationID(r.config.Runtime.ApplicationID, incoming.ChannelID))
+		r.respond(incoming.Interaction, statusMessage(r.project.Name, r.driver.Name(), surfaceKind, status))
 	case "new":
 		if err := r.resetSurface(incoming.ChannelID); err != nil {
 			r.respond(incoming.Interaction, "The conversation is busy. Try again after current work finishes.")
@@ -346,26 +351,19 @@ func (r *Runtime) surface(id string) (*surface, error) {
 		return current, nil
 	}
 	conversation := conversationID(r.config.Runtime.ApplicationID, id)
-	current := &surface{id: id, conversation: conversation, submissions: make(chan dispatch.Submission, 32), done: make(chan error, 1), turns: map[string]*pendingTurn{}}
+	current := &surface{id: id, conversation: conversation, turns: map[string]*pendingTurn{}}
 	r.surfaces[id] = current
-	go func() {
-		err := dispatch.RunSubmissionsWithTurnTimeout(r.ctx, r.project, r.driver, conversation, current.submissions, func(event dispatch.Event) error {
-			r.handleDispatch(current, event)
-			return nil
-		}, r.config.TurnTimeout)
-		current.done <- err
-		r.mu.Lock()
-		stillActive := r.surfaces[id] == current
-		r.mu.Unlock()
-		if err != nil && stillActive {
-			r.cancel()
-		}
-	}()
+	r.byConversation[conversation] = current
 	return current, nil
 }
 
-func (r *Runtime) handleDispatch(current *surface, event dispatch.Event) {
+func (r *Runtime) handleDispatch(conversation string, event dispatch.Event) {
 	r.mu.Lock()
+	current := r.byConversation[conversation]
+	if current == nil {
+		r.mu.Unlock()
+		return
+	}
 	turn := current.turns[event.InputID]
 	if turn == nil {
 		r.mu.Unlock()
@@ -380,14 +378,11 @@ func (r *Runtime) handleDispatch(current *surface, event dispatch.Event) {
 		}
 		return
 	}
-	if !terminalDispatchEvent(event.Type) {
+	if !event.Terminal() {
 		r.mu.Unlock()
 		return
 	}
 	delete(current.turns, event.InputID)
-	if current.pending > 0 {
-		current.pending--
-	}
 	content := strings.TrimSpace(combinedOutput(turn))
 	parts := outputParts(turn)
 	truncated := turn.truncated
@@ -428,51 +423,39 @@ func discordTerminalMessage(eventType string) string {
 	}
 }
 
-func terminalDispatchEvent(eventType string) bool {
-	switch eventType {
-	case "turn.completed", "turn.failed", "turn.cancelled", "turn.uncertain", "driver.process_failed":
-		return true
-	default:
-		return false
-	}
-}
-
 func visibleReplyDecided(output string) bool {
 	candidate := strings.TrimLeftFunc(output, unicode.IsSpace)
 	return candidate != "" && !strings.HasPrefix(NoReply, candidate)
 }
 
+func statusMessage(agent, harnessName, surfaceKind string, status dispatch.ConversationStatus) string {
+	return fmt.Sprintf("hctl is online: agent=%s harness=%s surface=%s state=%s pending=%d", agent, harnessName, surfaceKind, status.State, status.Pending)
+}
+
 func (r *Runtime) resetSurface(id string) error {
 	r.mu.Lock()
 	current := r.surfaces[id]
-	if current != nil && current.pending != 0 {
+	if current != nil && len(current.turns) != 0 {
 		r.mu.Unlock()
 		return errors.New("busy")
 	}
-	if current != nil {
-		delete(r.surfaces, id)
-		close(current.submissions)
-	}
 	r.mu.Unlock()
-	if current != nil {
-		if err := <-current.done; err != nil && !errors.Is(err, context.Canceled) {
-			return err
-		}
-	}
-	state, err := session.Load(r.project.WorkspaceRoot)
-	if err != nil {
+	conversation := conversationID(r.config.Runtime.ApplicationID, id)
+	if err := r.manager.Reset(conversation); err != nil {
 		return err
 	}
-	state.Reset(r.project.AgentID, r.driver.Name(), conversationID(r.config.Runtime.ApplicationID, id), r.project.SourceFingerprint)
-	return session.Save(r.project.WorkspaceRoot, state)
+	r.mu.Lock()
+	if r.surfaces[id] == current {
+		delete(r.surfaces, id)
+		delete(r.byConversation, conversation)
+	}
+	r.mu.Unlock()
+	return nil
 }
 
 func (r *Runtime) drop(current *surface, inputID string) {
 	r.mu.Lock()
 	delete(current.turns, inputID)
-	if current.pending > 0 {
-		current.pending--
-	}
 	r.mu.Unlock()
 }
 

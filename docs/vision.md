@@ -22,7 +22,9 @@ routed through its managed boundary.
 Interactive users work directly in Claude Code or Codex after hctl prepares
 the harness setup. Headless users may place the turn dispatcher between an input source
 and a local harness process. The turn dispatcher does not become another chat UI or
-model loop.
+model loop. A long-lived channel runtime may manage several independent
+conversation lifecycles over that dispatcher, but it remains deterministic
+runtime coordination rather than an agent orchestrator.
 
 Harness-native tools remain valid but unmanaged. The tool never claims that it
 can enforce instructions, inspect every native effect, or make model behavior

@@ -215,11 +215,15 @@ and removes the token from every child-process environment.
 
 `hctl run` auto-applies missing or stale setup, then serves the authorized user
 in one guild channel and DM. Each surface has independent durable dispatcher
-state. Other users, channels, bots, and webhooks are ignored. Output is buffered
-until completion, exact `HCTL_NO_REPLY` is suppressed, and visible replies use
-bounded 2,000-character chunks with mentions disabled. `/new` resets an idle
-surface and `/status` returns redacted runtime state. Explicit `--input jsonl`
-selects the existing headless stream instead.
+state. One deterministic managed-session lifecycle owns each surface's queue,
+native session mapping, and resident harness process, while a shared state
+owner serializes durable updates across surfaces. Other users, channels, bots,
+and webhooks are ignored. Output is buffered until completion, exact
+`HCTL_NO_REPLY` is suppressed, and visible replies use bounded 2,000-character
+chunks with mentions disabled. `/new` resets an idle surface and `/status`
+returns its redacted lifecycle and queue state. Explicit `--input jsonl`
+selects the existing headless stream instead; one-shot schedules retain their
+fresh-session semantics.
 
 The optional root `schedules/` directory contains nested Markdown task files.
 The bounded, valid UTF-8 path beneath `schedules/`, without `.md`, is the

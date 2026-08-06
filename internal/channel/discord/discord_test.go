@@ -210,12 +210,24 @@ func TestResponseWindowExpiryUpdatesDeferredResponseAndReleasesToken(t *testing.
 		t.Fatal(err)
 	}
 	delivered := make(chan string, 1)
+	blockedStarted := make(chan struct{})
+	releaseBlocked := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBlocked) }) }
+	t.Cleanup(release)
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if strings.Contains(request.URL.Path, "blocked-token") {
+			close(blockedStarted)
+			<-releaseBlocked
+			_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
+			return
+		}
 		body, _ := io.ReadAll(request.Body)
 		delivered <- string(body)
 		_, _ = response.Write([]byte(`{"id":"567890123456789012"}`))
 	}))
 	defer upstream.Close()
+	defer release()
 	submissions := make(chan gateway.Submission)
 	now := time.Now().Truncate(time.Second)
 	var audit bytes.Buffer
@@ -227,6 +239,11 @@ func TestResponseWindowExpiryUpdatesDeferredResponseAndReleasesToken(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	adapter.dispatch(delivery{
+		inputID: "blocked", status: "completed", content: "blocked",
+		token: &tokenEntry{token: "blocked-token", expiresAt: time.Now().Add(time.Minute), done: make(chan struct{})},
+	})
+	<-blockedStarted
 	accepted := make(chan struct{})
 	go func() {
 		submission := <-submissions
@@ -245,9 +262,42 @@ func TestResponseWindowExpiryUpdatesDeferredResponseAndReleasesToken(t *testing.
 	adapter.mu.Lock()
 	retained := len(adapter.turns)
 	adapter.mu.Unlock()
+	release()
 	adapter.Close()
 	if retained != 0 || !strings.Contains(audit.String(), "status=expired delivery=completed") || strings.Contains(audit.String(), "expiring-token") {
 		t.Fatalf("expiry cleanup/audit = turns:%d audit:%q", retained, audit.String())
+	}
+}
+
+func TestPendingInteractionAdmissionIsBounded(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := New(Config{
+		ApplicationID: testApplication, AllowedUserID: testUser, PublicKey: publicKey,
+		Listen: "127.0.0.1:0",
+		Now:    func() time.Time { return time.Unix(2_000_000_000, 0) },
+	}, make(chan gateway.Submission))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	for index := 0; index < maxPendingTurns; index++ {
+		adapter.turns["pending-"+strconv.Itoa(index)] = &turn{token: &tokenEntry{token: "pending", done: make(chan struct{})}}
+	}
+	adapter.mu.Unlock()
+
+	response := signedCommand(t, adapter.Handler(), privateKey, "345678901234567890", "overflow-token", "too many")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"type":4`) {
+		t.Fatalf("overload response = %d %s", response.Code, response.Body.String())
+	}
+	adapter.mu.Lock()
+	retained := len(adapter.turns)
+	adapter.mu.Unlock()
+	adapter.Close()
+	if retained != maxPendingTurns || !strings.Contains(response.Body.String(), "Agent queue is full") {
+		t.Fatalf("bounded admission = turns:%d body:%s", retained, response.Body.String())
 	}
 }
 
@@ -609,6 +659,8 @@ func TestRuntimeConfigurationRejectsExposedOrAmbiguousIdentity(t *testing.T) {
 		"unclean path":      withConfig(base, func(config *Config) { config.Path = "/a/../interactions" }),
 		"missing app":       withConfig(base, func(config *Config) { config.ApplicationID = "" }),
 		"missing user":      withConfig(base, func(config *Config) { config.AllowedUserID = "" }),
+		"overflow app":      withConfig(base, func(config *Config) { config.ApplicationID = "18446744073709551616" }),
+		"overflow user":     withConfig(base, func(config *Config) { config.AllowedUserID = "18446744073709551616" }),
 		"bad key":           withConfig(base, func(config *Config) { config.PublicKey = []byte("short") }),
 	}
 	for name, config := range tests {
@@ -617,6 +669,10 @@ func TestRuntimeConfigurationRejectsExposedOrAmbiguousIdentity(t *testing.T) {
 				t.Fatal("unsafe runtime configuration was accepted")
 			}
 		})
+	}
+	tooLate := withConfig(base, func(config *Config) { config.ExpiryAfter = 14*time.Minute + time.Second })
+	if _, err := New(tooLate, make(chan gateway.Submission)); err == nil {
+		t.Fatal("response expiry without the full Discord delivery margin was accepted")
 	}
 	if _, err := ParsePublicKey(hex.EncodeToString(publicKey)); err != nil {
 		t.Fatal(err)
@@ -655,12 +711,12 @@ func TestRunServesSignedInteractionOnLoopback(t *testing.T) {
 	driver := &fakeDriver{started: make(chan string, 1), output: "loopback response"}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	var audit bytes.Buffer
+	var audit, diagnostics bytes.Buffer
 	go func() {
 		done <- Run(ctx, p, driver, DefaultConversation(testApplication, testUser), Config{
 			ApplicationID: testApplication, AllowedUserID: testUser, PublicKey: publicKey,
 			Listen: address, Path: DefaultPath, APIBase: upstream.URL,
-			Now: func() time.Time { return time.Unix(2_000_000_000, 0) }, Audit: &audit,
+			Now: func() time.Time { return time.Unix(2_000_000_000, 0) }, Audit: &audit, Diagnostics: &diagnostics,
 		})
 	}()
 
@@ -703,7 +759,10 @@ func TestRunServesSignedInteractionOnLoopback(t *testing.T) {
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("loopback runner stop = %v", err)
 	}
-	if !strings.Contains(audit.String(), "listener=ready") || strings.Contains(audit.String(), "loopback-token") {
+	if !strings.Contains(diagnostics.String(), "Discord channel ready") || strings.Contains(diagnostics.String(), "loopback-token") {
+		t.Fatalf("loopback diagnostics = %q", diagnostics.String())
+	}
+	if strings.Contains(audit.String(), "listener") || strings.Contains(audit.String(), "loopback-token") {
 		t.Fatalf("loopback audit = %q", audit.String())
 	}
 }

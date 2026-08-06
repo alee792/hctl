@@ -25,7 +25,10 @@ asynchronously. It does not wait for durable acceptance because Discord
 invalidates tokens whose initial response misses three seconds. A later
 queue-full or other gateway rejection edits the deferred original with stable
 text. The gateway still reports acceptance before it can start a model turn and
-remains authoritative for FIFO and deduplication.
+remains authoritative for FIFO and deduplication. The adapter retains no more
+than 32 pre-acceptance interactions; overflow receives an immediate ephemeral
+queue-full response without token retention, outbound delivery, or a harness
+turn.
 
 The adapter keeps the interaction token only in memory, gathers bounded text
 deltas, and uses fixed Discord webhook response paths to update the original
@@ -33,7 +36,9 @@ response and send at most five 2,000-rune followups. Mentions are disabled.
 Discord documents a 15-minute token lifetime; hctl updates a still-pending
 response after 14 minutes from its signed timestamp, then releases the token,
 turn, and buffered output without interrupting the harness. HCTL-012 must
-separately decide runtime-turn timeout behavior. Requests time out, do not
+separately decide runtime-turn timeout behavior. Expiry updates bypass the
+ordinary output queue, and state is released before outbound delivery. Requests
+time out, do not
 follow redirects, bound response bodies, and are never retried. Transport and
 malformed-success failures are ambiguous and audited as uncertain; explicit
 rate limits and non-success responses are classified without retaining

@@ -108,6 +108,7 @@ func runChannel(args []string, output, stderr io.Writer) error {
 		return err
 	}
 	config.Audit = stderr
+	config.Diagnostics = stderr
 	return discord.Run(context.Background(), p, driver, *conversation, config)
 }
 

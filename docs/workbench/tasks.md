@@ -71,11 +71,13 @@ runtime identity validation; PING; valid flushed defer before stalled gateway
 acceptance; asynchronous queue rejection; bad/missing/stale signature; wrong
 application; unauthorized user; bounded `message`; interaction-ID
 deduplication; FIFO input while active; completion/failure/uncertain delivery;
-14-minute token cleanup; six total 2,000-character messages with a retained
+bounded pre-acceptance admission; 14-minute token cleanup independent of a
+blocked normal delivery; six total 2,000-character messages with a retained
 truncation marker and disabled mentions; scoped default conversations; rate
 limits; timeouts, redirects, response bounds, and ambiguous-delivery behavior;
-an actual loopback runner; content-free state/log/audit; and no live Discord
-request, credential, registration, or exposed listener.
+an actual loopback runner; separated readiness diagnostics; content-free
+state/log/audit; and no live Discord request, credential, registration, or
+exposed listener.
 `./scripts/check.sh` passes.
 
 **Context:** Eve's current

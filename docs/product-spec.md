@@ -224,7 +224,11 @@ the HTTP handler does not wait for durable gateway acceptance. Submission then
 runs asynchronously. Queue-full or other gateway rejection edits the deferred
 original with stable bounded text, while accepted input keeps the gateway's
 existing durable FIFO and deduplication semantics. A model turn cannot start
-before the gateway reports acceptance.
+before the gateway reports acceptance. Before that acceptance, the adapter
+retains at most 32 pending interactions, matching the durable gateway queue;
+additional valid commands receive an immediate ephemeral queue-full response
+without retaining a token, making an outbound request, or starting a harness
+turn.
 
 The adapter retains the short-lived interaction token only in process memory,
 aggregates bounded text deltas, and updates the fixed original-response
@@ -234,7 +238,9 @@ chunk retains any truncation marker. Discord documents a three-second initial
 response deadline and a 15-minute interaction-token lifetime. Hctl defers
 immediately and, after 14 minutes from the signed timestamp, updates a still
 pending response with stable expiry text and releases its token, output, and
-turn memory. This cleanup does not interrupt or claim to stop the harness.
+turn memory. Expiry delivery does not wait behind ordinary output delivery, and
+state release does not wait on any outbound HTTP request. This cleanup does not
+interrupt or claim to stop the harness.
 HCTL-012 must revisit the separate runtime-turn timeout implied by this limit.
 
 Completed, failed, and recovered-uncertain outcomes have bounded fallback text.
@@ -243,7 +249,8 @@ of response, and never retries. A transport failure or invalid successful
 response is recorded as uncertain; an explicit rate limit or other non-success
 response is classified as rate-limited or failed without its response body.
 Audit contains only channel, input ID, status class, and classified delivery
-outcome.
+outcome. Listener readiness is a separate operator diagnostic, not an audit
+event.
 
 This slice follows Eve's `channels/`, path-derived identity, normalized input,
 continuation, deferred-response, and followup concepts while leaving the native

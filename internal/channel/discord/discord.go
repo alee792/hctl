@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,12 +36,11 @@ const (
 	maxChunkRunes    = 2_000
 	maxOutputRunes   = maxChunks*maxChunkRunes - 64
 	maxTokenBytes    = 512
+	maxPendingTurns  = 32
 	maxClockSkew     = 5 * time.Minute
 	tokenLifetime    = 15 * time.Minute
 	defaultExpiry    = 14 * time.Minute
 )
-
-var snowflake = regexp.MustCompile(`^[0-9]{1,20}$`)
 
 type Config struct {
 	ApplicationID string
@@ -55,6 +53,7 @@ type Config struct {
 	Now           func() time.Time
 	ExpiryAfter   time.Duration
 	Audit         io.Writer
+	Diagnostics   io.Writer
 }
 
 type interaction struct {
@@ -115,11 +114,10 @@ type Adapter struct {
 
 	mu      sync.Mutex
 	turns   map[string]*turn
-	jobs    chan delivery
-	done    chan struct{}
 	stopped chan struct{}
 	stop    sync.Once
 	workers sync.WaitGroup
+	auditMu sync.Mutex
 }
 
 func New(config Config, submissions chan<- gateway.Submission) (*Adapter, error) {
@@ -135,11 +133,14 @@ func New(config Config, submissions chan<- gateway.Submission) (*Adapter, error)
 	if config.ExpiryAfter == 0 {
 		config.ExpiryAfter = defaultExpiry
 	}
-	if config.ExpiryAfter < 0 || config.ExpiryAfter >= tokenLifetime {
-		return nil, errors.New("discord response expiry must be positive and shorter than 15 minutes")
+	if config.ExpiryAfter < 0 || config.ExpiryAfter > defaultExpiry {
+		return nil, errors.New("discord response expiry must be positive and at most 14 minutes")
 	}
 	if config.Audit == nil {
 		config.Audit = io.Discard
+	}
+	if config.Diagnostics == nil {
+		config.Diagnostics = io.Discard
 	}
 	if config.APIBase == "" {
 		config.APIBase = DiscordAPI
@@ -163,11 +164,8 @@ func New(config Config, submissions chan<- gateway.Submission) (*Adapter, error)
 		client:      client,
 		apiBase:     strings.TrimSuffix(base.String(), "/"),
 		turns:       map[string]*turn{},
-		jobs:        make(chan delivery, 32),
-		done:        make(chan struct{}),
 		stopped:     make(chan struct{}),
 	}
-	go a.deliver()
 	return a, nil
 }
 
@@ -238,19 +236,16 @@ func (a *Adapter) HandleEvent(event gateway.Event) {
 		a.mu.Unlock()
 		return
 	}
-	if current.token != nil {
-		a.queueLocked(delivery{inputID: event.InputID, token: current.token, content: current.output.String(), status: status, truncated: current.truncated})
-		current.token.release()
-	}
+	job := delivery{inputID: event.InputID, token: current.token, content: current.output.String(), status: status, truncated: current.truncated}
+	current.token.release()
 	delete(a.turns, event.InputID)
 	a.mu.Unlock()
+	a.dispatch(job)
 }
 
 func (a *Adapter) Close() {
 	a.Stop()
 	a.workers.Wait()
-	close(a.jobs)
-	<-a.done
 }
 
 func (a *Adapter) Stop() {
@@ -324,15 +319,25 @@ func (a *Adapter) handle(response http.ResponseWriter, request *http.Request) {
 	entry := &tokenEntry{token: incoming.Token, expiresAt: signedAt.Add(tokenLifetime), done: make(chan struct{})}
 	a.mu.Lock()
 	current := a.turns[incoming.ID]
-	if current == nil {
-		current = &turn{}
-		a.turns[incoming.ID] = current
+	overloaded := current == nil && len(a.turns) >= maxPendingTurns
+	if overloaded {
+		a.mu.Unlock()
+	} else {
+		if current == nil {
+			current = &turn{}
+			a.turns[incoming.ID] = current
+		}
+		if current.token != nil {
+			current.token.release()
+		}
+		current.token = entry
+		a.mu.Unlock()
 	}
-	if current.token != nil {
-		current.token.release()
+	if overloaded {
+		entry.release()
+		_ = writeJSON(response, http.StatusOK, immediateMessage(rejectionText("queue_full")))
+		return
 	}
-	current.token = entry
-	a.mu.Unlock()
 
 	if err := writeJSON(response, http.StatusOK, map[string]any{"type": 5, "data": map[string]any{"allowed_mentions": allowedMentions()}}); err != nil {
 		a.discard(incoming.ID, entry)
@@ -378,12 +383,16 @@ func (a *Adapter) submit(inputID, message string, entry *tokenEntry) {
 	reply := make(chan gateway.SubmissionResult, 1)
 	select {
 	case a.submissions <- gateway.Submission{InputID: inputID, Text: message, Reply: reply}:
+	case <-entry.done:
+		return
 	case <-a.stopped:
 		return
 	}
 	var result gateway.SubmissionResult
 	select {
 	case result = <-reply:
+	case <-entry.done:
+		return
 	case <-a.stopped:
 		return
 	}
@@ -404,13 +413,21 @@ func (a *Adapter) expireAfter(inputID string, entry *tokenEntry, delay time.Dura
 	defer timer.Stop()
 	select {
 	case <-timer.C:
-		a.finish(inputID, entry, delivery{content: "Discord response window expired; the agent may still be running.", status: "expired"})
+		if job, ok := a.detach(inputID, entry, delivery{content: "Discord response window expired; the agent may still be running.", status: "expired"}); ok {
+			a.record(job, a.send(job))
+		}
 	case <-entry.done:
 	case <-a.stopped:
 	}
 }
 
 func (a *Adapter) finish(inputID string, entry *tokenEntry, job delivery) {
+	if job, ok := a.detach(inputID, entry, job); ok {
+		a.dispatch(job)
+	}
+}
+
+func (a *Adapter) detach(inputID string, entry *tokenEntry, job delivery) (delivery, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if current := a.turns[inputID]; current != nil && current.token == entry {
@@ -420,10 +437,11 @@ func (a *Adapter) finish(inputID string, entry *tokenEntry, job delivery) {
 			job.content = current.output.String()
 			job.truncated = current.truncated
 		}
-		a.queueLocked(job)
 		delete(a.turns, inputID)
 		entry.release()
+		return job, true
 	}
+	return delivery{}, false
 }
 
 func (a *Adapter) discard(inputID string, entry *tokenEntry) {
@@ -435,17 +453,23 @@ func (a *Adapter) discard(inputID string, entry *tokenEntry) {
 	}
 }
 
-func (a *Adapter) queueLocked(job delivery) {
-	// The gateway queue and Discord input validation bound pending jobs.
-	a.jobs <- job
+func (a *Adapter) dispatch(job delivery) {
+	select {
+	case <-a.stopped:
+		return
+	default:
+	}
+	a.workers.Add(1)
+	go func() {
+		defer a.workers.Done()
+		a.record(job, a.send(job))
+	}()
 }
 
-func (a *Adapter) deliver() {
-	defer close(a.done)
-	for job := range a.jobs {
-		outcome := a.send(job)
-		_, _ = fmt.Fprintf(a.config.Audit, "channel=discord input=%s status=%s delivery=%s\n", job.inputID, job.status, outcome)
-	}
+func (a *Adapter) record(job delivery, outcome string) {
+	a.auditMu.Lock()
+	defer a.auditMu.Unlock()
+	_, _ = fmt.Fprintf(a.config.Audit, "channel=discord input=%s status=%s delivery=%s\n", job.inputID, job.status, outcome)
 }
 
 func (a *Adapter) send(job delivery) string {
@@ -514,7 +538,7 @@ func Run(ctx context.Context, p *project.Project, driver harness.Driver, convers
 		adapter.Close()
 		return fmt.Errorf("cannot start Discord loopback listener at %s; choose an unused loopback port: %w", config.Listen, err)
 	}
-	_, _ = fmt.Fprintf(adapter.config.Audit, "channel=discord listener=ready address=%s path=%s\n", listener.Addr().String(), config.Path)
+	_, _ = fmt.Fprintf(adapter.config.Diagnostics, "Discord channel ready at http://%s%s\n", listener.Addr().String(), config.Path)
 	server := &http.Server{
 		Handler:           adapter.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -574,7 +598,11 @@ func commandMessage(incoming interaction) (string, bool) {
 }
 
 func validSnowflake(value string) bool {
-	return snowflake.MatchString(value) && strings.Trim(value, "0") != ""
+	if len(value) == 0 || len(value) > 20 {
+		return false
+	}
+	number, err := strconv.ParseUint(value, 10, 64)
+	return err == nil && number != 0
 }
 
 func validToken(value string) bool {
@@ -668,6 +696,10 @@ func responseChunks(content, status string, truncated bool) []string {
 }
 
 func allowedMentions() map[string]any { return map[string]any{"parse": []string{}} }
+
+func immediateMessage(content string) map[string]any {
+	return map[string]any{"type": 4, "data": map[string]any{"content": content, "flags": 64, "allowed_mentions": allowedMentions()}}
+}
 
 func rejectionText(status string) string {
 	if status == "queue_full" {

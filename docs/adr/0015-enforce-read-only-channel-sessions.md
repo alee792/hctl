@@ -34,10 +34,8 @@ complete-output rule.
 
 Conversational sessions can inspect a shared checkout concurrently, but letting
 them mutate it would couple unrelated conversations and create races. Prompt
-instructions are not an enforcement boundary. The next implementation slice
-will respond to the exact write-access result by assigning an isolated Git
-worktree; until that boundary exists, the result is recorded and withheld from
-the channel without granting access or retrying the turn.
+instructions are not an enforcement boundary. ADR 0016 defines how the exact
+write-access result promotes one conversation into an isolated Git worktree.
 
 ## Consequences
 
@@ -48,5 +46,5 @@ the channel without granting access or retrying the turn.
 - Unsupported policy setup fails before a turn starts and is reported through
   the existing credential-free startup-failure classification.
 - The execution-policy marker contains no credential, path, or runtime identity.
-- Writable continuation, worktree assignment, and cleanup remain separate
-  lifecycle changes built on the exact control result.
+- Writable continuation and durable worktree assignment are defined by ADR
+  0016; eventual retirement cleanup remains separate.

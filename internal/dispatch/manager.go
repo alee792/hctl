@@ -8,6 +8,7 @@ import (
 
 	"hctl/internal/harness"
 	"hctl/internal/project"
+	"hctl/internal/worktree"
 )
 
 var (
@@ -41,6 +42,7 @@ type Manager struct {
 	turnTimeout time.Duration
 	idleTimeout time.Duration
 	timers      idleTimerFactory
+	workspaces  WorkspaceProvider
 	emit        func(string, Event) error
 	store       *conversationStore
 	ctx         context.Context
@@ -48,12 +50,19 @@ type Manager struct {
 
 	mu        sync.Mutex
 	workers   map[string]*managedConversation
+	elevating map[string]bool
 	closed    bool
 	err       error
 	done      chan struct{}
 	doneOnce  sync.Once
 	stopped   chan struct{}
 	closeOnce sync.Once
+}
+
+type WorkspaceProvider interface {
+	Provision(context.Context, string) (*project.Project, worktree.Assignment, error)
+	Resolve(context.Context, string, worktree.Assignment) (*project.Project, error)
+	Remove(context.Context, worktree.Assignment)
 }
 
 type managedConversation struct {
@@ -72,10 +81,17 @@ func NewManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 }
 
 func NewManagerWithIdleTimeout(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error) (*Manager, error) {
-	return newManager(ctx, p, driver, turnTimeout, idleTimeout, emit, newIdleTimer)
+	return newManager(ctx, p, driver, turnTimeout, idleTimeout, emit, newIdleTimer, nil)
 }
 
-func newManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error, timers idleTimerFactory) (*Manager, error) {
+func NewManagerWithWorkspace(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error, workspaces WorkspaceProvider) (*Manager, error) {
+	if workspaces == nil {
+		return nil, errors.New("managed writable workspace provider is required")
+	}
+	return newManager(ctx, p, driver, turnTimeout, idleTimeout, emit, newIdleTimer, workspaces)
+}
+
+func newManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error, timers idleTimerFactory, workspaces WorkspaceProvider) (*Manager, error) {
 	if p == nil || driver == nil {
 		return nil, errors.New("managed sessions require a project and harness driver")
 	}
@@ -94,13 +110,62 @@ func newManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 	}
 	managerCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
-		project: p, driver: driver, turnTimeout: turnTimeout, idleTimeout: idleTimeout, timers: timers, emit: emit,
+		project: p, driver: driver, turnTimeout: turnTimeout, idleTimeout: idleTimeout, timers: timers, workspaces: workspaces, emit: emit,
 		store: store, ctx: managerCtx, cancel: cancel,
-		workers: map[string]*managedConversation{}, done: make(chan struct{}), stopped: make(chan struct{}),
+		workers: map[string]*managedConversation{}, elevating: map[string]bool{}, done: make(chan struct{}), stopped: make(chan struct{}),
 	}, nil
 }
 
+func (m *Manager) Elevate(ctx context.Context, conversation string, continuation Submission) (SubmissionResult, error) {
+	if err := ValidateConversation(conversation); err != nil {
+		return SubmissionResult{}, err
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return SubmissionResult{}, ErrManagerClosed
+	}
+	if m.workspaces == nil {
+		m.mu.Unlock()
+		return SubmissionResult{}, errors.New("writable conversation workspaces are unavailable")
+	}
+	if m.elevating[conversation] {
+		m.mu.Unlock()
+		return SubmissionResult{}, ErrConversationBusy
+	}
+	m.elevating[conversation] = true
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.elevating, conversation)
+		m.mu.Unlock()
+	}()
+
+	if err := m.stopIdleWorker(conversation); err != nil {
+		return SubmissionResult{}, err
+	}
+	snapshot, err := m.store.snapshot(m.reference(conversation))
+	if err != nil {
+		return SubmissionResult{}, err
+	}
+	if snapshot.workspace == "" {
+		_, assignment, err := m.workspaces.Provision(ctx, conversation)
+		if err != nil {
+			return SubmissionResult{}, err
+		}
+		if err := m.store.assignWorkspace(m.reference(conversation), assignment.Root, assignment.Branch); err != nil {
+			m.workspaces.Remove(ctx, assignment)
+			return SubmissionResult{}, err
+		}
+	}
+	return m.submit(ctx, conversation, continuation, true)
+}
+
 func (m *Manager) Submit(ctx context.Context, conversation string, submission Submission) (SubmissionResult, error) {
+	return m.submit(ctx, conversation, submission, false)
+}
+
+func (m *Manager) submit(ctx context.Context, conversation string, submission Submission, duringElevation bool) (SubmissionResult, error) {
 	if err := ValidateConversation(conversation); err != nil {
 		return SubmissionResult{}, err
 	}
@@ -115,6 +180,10 @@ func (m *Manager) Submit(ctx context.Context, conversation string, submission Su
 			return SubmissionResult{}, err
 		}
 		return SubmissionResult{}, ErrManagerClosed
+	}
+	if m.elevating[conversation] && !duringElevation {
+		m.mu.Unlock()
+		return SubmissionResult{}, ErrConversationBusy
 	}
 	worker := m.workers[conversation]
 	if worker == nil {
@@ -239,6 +308,53 @@ func statusFromSnapshot(snapshot conversationSnapshot, admissions int, resident 
 	return status
 }
 
+func (m *Manager) stopIdleWorker(conversation string) error {
+	m.mu.Lock()
+	worker := m.workers[conversation]
+	if worker == nil {
+		m.mu.Unlock()
+		snapshot, err := m.store.snapshot(m.reference(conversation))
+		if err != nil {
+			return err
+		}
+		if snapshot.queueLen != 0 {
+			return ErrConversationBusy
+		}
+		return nil
+	}
+	if worker.admissions != 0 || worker.closing {
+		m.mu.Unlock()
+		return ErrConversationBusy
+	}
+	worker.closing = true
+	m.mu.Unlock()
+	snapshot, err := m.store.snapshot(m.reference(conversation))
+	if err != nil || snapshot.queueLen != 0 {
+		m.mu.Lock()
+		if m.workers[conversation] == worker && !m.closed {
+			worker.closing = false
+		}
+		m.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		return ErrConversationBusy
+	}
+	worker.submitMu.Lock()
+	close(worker.submissions)
+	worker.submitMu.Unlock()
+	<-worker.done
+	if worker.err != nil {
+		return worker.err
+	}
+	m.mu.Lock()
+	if m.workers[conversation] == worker {
+		delete(m.workers, conversation)
+	}
+	m.mu.Unlock()
+	return nil
+}
+
 func (m *Manager) Reset(conversation string) error {
 	if err := ValidateConversation(conversation); err != nil {
 		return err
@@ -354,17 +470,30 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) run(worker *managedConversation) {
-	err := runSubmissions(m.ctx, m.project, m.driver, worker.conversation, worker.submissions, func(event Event) error {
-		m.mu.Lock()
-		switch event.Type {
-		case "driver.process_opened":
-			worker.resident = true
-		case "driver.process_hibernated":
-			worker.resident = false
+	p := m.project
+	policy := harness.PolicyReadOnly
+	snapshot, err := m.store.snapshot(m.reference(worker.conversation))
+	if err == nil && snapshot.workspace != "" {
+		if m.workspaces == nil {
+			err = errors.New("durable writable workspace cannot be resolved")
+		} else {
+			p, err = m.workspaces.Resolve(m.ctx, worker.conversation, worktree.Assignment{Root: snapshot.workspace, Branch: snapshot.branch})
+			policy = harness.PolicyWorkspaceWrite
 		}
-		m.mu.Unlock()
-		return m.emit(worker.conversation, event)
-	}, false, m.turnTimeout, m.idleTimeout, m.timers, harness.PolicyReadOnly, m.store)
+	}
+	if err == nil {
+		err = runSubmissions(m.ctx, p, m.driver, worker.conversation, worker.submissions, func(event Event) error {
+			m.mu.Lock()
+			switch event.Type {
+			case "driver.process_opened":
+				worker.resident = true
+			case "driver.process_hibernated":
+				worker.resident = false
+			}
+			m.mu.Unlock()
+			return m.emit(worker.conversation, event)
+		}, false, m.turnTimeout, m.idleTimeout, m.timers, policy, m.store)
+	}
 	m.mu.Lock()
 	worker.err = err
 	close(worker.done)

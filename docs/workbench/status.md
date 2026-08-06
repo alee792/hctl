@@ -228,8 +228,11 @@ for its configured Discord guild and DM surfaces. Idle lifecycles release their
 resident harness after a bounded interval and resume the retained native
 session on the next message. New and resumed channel harnesses are enforced
 read-only in the shared checkout and can return an exact internal write-access
-result. Global resident-session and active-turn limits and conversation-specific writable worktrees remain the ordered follow-up slices
-tracked by the concurrent-session epic.
+result. That result now promotes the requesting conversation into a validated,
+durably assigned branch-backed Git worktree, resumes the same native session
+under workspace-write policy, and continues the request once. Unassigned
+conversations remain read-only. Global resident-session and active-turn limits
+remain the next ordered slice tracked by the concurrent-session epic.
 
 Live Discord acceptance remains pending enrollment of a user-controlled bot and
 authorized guild/channel. The automated evidence uses credential-free tests;

@@ -28,7 +28,7 @@ func StartProcess(ctx context.Context, dir, executable string, args ...string) (
 }
 
 func StartProcessWithPolicy(ctx context.Context, dir, executable string, policy ExecutionPolicy, args ...string) (*Process, error) {
-	if policy != PolicyDefault && policy != PolicyReadOnly {
+	if policy != PolicyDefault && policy != PolicyReadOnly && policy != PolicyWorkspaceWrite {
 		return nil, errors.New("unsupported harness execution policy")
 	}
 	cmd := exec.CommandContext(ctx, executable, args...)

@@ -120,6 +120,28 @@ type Project struct {
 // Load reads an agent project. If workspace is omitted, the agent source is
 // also its workspace.
 func Load(source, harness string, workspace ...string) (*Project, error) {
+	return load(source, harness, "", workspace...)
+}
+
+// LoadRelocated loads the same portable agent source from an isolated
+// workspace while preserving the logical identity selected by the caller.
+// The source fingerprint must still match exactly.
+func LoadRelocated(source, harness, workspace string, selected *Project) (*Project, error) {
+	if selected == nil || selected.Harness != harness {
+		return nil, errors.New("relocated project identity is invalid")
+	}
+	p, err := load(source, harness, selected.Name, workspace)
+	if err != nil {
+		return nil, err
+	}
+	if p.SourceFingerprint != selected.SourceFingerprint {
+		return nil, errors.New("relocated project source does not match selected agent")
+	}
+	p.AgentID = selected.AgentID
+	return p, nil
+}
+
+func load(source, harness, logicalName string, workspace ...string) (*Project, error) {
 	if harness != "claude" && harness != "codex" {
 		return nil, errors.New("harness must be claude or codex")
 	}
@@ -138,7 +160,10 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 		}
 	}
 
-	name := nameFromRoot(sourceRoot)
+	name := logicalName
+	if name == "" {
+		name = nameFromRoot(sourceRoot)
+	}
 	instructionPath := "instructions.md"
 	instructionSource, err := rootfs.ReadSource(sourceRoot, instructionPath, maxSourceBytes)
 	if err != nil {

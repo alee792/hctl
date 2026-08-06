@@ -16,6 +16,7 @@ const maxConfigBytes = 64 << 10
 const (
 	NoReplyResult            = "HCTL_NO_REPLY"
 	RequestWriteAccessResult = "HCTL_REQUEST_WRITE_ACCESS"
+	WriteContinuationPrompt  = "Write access is now available in this conversation's isolated worktree. Continue the original user request now."
 )
 
 var profileName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)

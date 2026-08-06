@@ -38,7 +38,7 @@ func (d *Driver) Verify(ctx context.Context) error {
 }
 
 func (d *Driver) Open(ctx context.Context, request harness.OpenRequest) (harness.Session, error) {
-	if request.Policy != harness.PolicyDefault && request.Policy != harness.PolicyReadOnly {
+	if request.Policy != harness.PolicyDefault && request.Policy != harness.PolicyReadOnly && request.Policy != harness.PolicyWorkspaceWrite {
 		return nil, errors.New("codex does not support the requested execution policy")
 	}
 	process, err := harness.StartProcessWithPolicy(ctx, request.Root, d.executable, request.Policy, "app-server", "--stdio")
@@ -57,17 +57,11 @@ func (d *Driver) Open(ctx context.Context, request harness.OpenRequest) (harness
 	}
 	method := "thread/start"
 	params := map[string]any{"cwd": request.Root}
-	if request.Policy == harness.PolicyReadOnly {
-		params["sandbox"] = "read-only"
-		params["approvalPolicy"] = "never"
-	}
+	applyPolicy(params, request.Policy)
 	if request.ResumeID != "" {
 		method = "thread/resume"
 		params = map[string]any{"threadId": request.ResumeID, "cwd": request.Root}
-		if request.Policy == harness.PolicyReadOnly {
-			params["sandbox"] = "read-only"
-			params["approvalPolicy"] = "never"
-		}
+		applyPolicy(params, request.Policy)
 	}
 	threadResult, _, err := client.request(2, method, params)
 	if err != nil {
@@ -98,9 +92,23 @@ func (d *Driver) Open(ctx context.Context, request harness.OpenRequest) (harness
 	return &session{process: process, client: client, sessionID: response.Thread.ID, resumed: request.ResumeID != "", requestID: 3}, nil
 }
 
+func applyPolicy(params map[string]any, policy harness.ExecutionPolicy) {
+	switch policy {
+	case harness.PolicyReadOnly:
+		params["sandbox"] = "read-only"
+		params["approvalPolicy"] = "never"
+	case harness.PolicyWorkspaceWrite:
+		params["sandbox"] = "workspace-write"
+		params["approvalPolicy"] = "never"
+	}
+}
+
 func validateEffectivePolicy(policy harness.ExecutionPolicy, sandboxType, approvalPolicy string) error {
 	if policy == harness.PolicyReadOnly && (sandboxType != "readOnly" || approvalPolicy != "never") {
 		return errors.New("codex did not enforce the requested read-only policy")
+	}
+	if policy == harness.PolicyWorkspaceWrite && (sandboxType != "workspaceWrite" || approvalPolicy != "never") {
+		return errors.New("codex did not enforce the requested workspace-write policy")
 	}
 	return nil
 }

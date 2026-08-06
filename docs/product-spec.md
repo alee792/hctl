@@ -240,6 +240,18 @@ trimmed response exactly matches and is never delivered as ordinary output.
 This policy does not change apply, explicit JSONL, schedules, or interactive
 native-harness use.
 
+When a read-only turn returns that exact write-access result, hctl creates a
+conversation-specific branch-backed Git worktree in a private sibling
+directory, applies the selected agent there, resumes the same native session
+with workspace-write access, and submits one internal continuation of the
+original request. The control result and continuation are never Discord
+messages. The owner-only dispatch state records only the validated worktree
+root and branch. Later turns and restarts reuse that assignment; other
+conversations remain read-only in the shared checkout. A non-Git workspace,
+identity mismatch, unsafe assignment, or modified generated file fails without
+changing the shared checkout or ambiguously retrying the turn. `/new` starts a
+fresh native session while retaining an existing isolated workspace.
+
 The optional root `schedules/` directory contains nested Markdown task files.
 The bounded, valid UTF-8 path beneath `schedules/`, without `.md`, is the
 schedule name. At most 32 schedules are discovered. Each file is bounded UTF-8
@@ -529,6 +541,10 @@ The MVP is complete when credential-free tests prove:
     harnesses, and a one-shot trigger deduplicates stable occurrence IDs while
     opening a fresh native session for each accepted occurrence and discarding
     model text.
+16. An exact Discord write-access result promotes only that conversation into
+    a validated branch-backed Git worktree, resumes the same Claude or Codex
+    session under workspace-write policy, and continues the original request
+    once without exposing internal control text.
 
 ## Explicit non-goals
 

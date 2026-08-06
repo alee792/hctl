@@ -2,8 +2,11 @@ package discord
 
 import (
 	"context"
+	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -175,6 +178,37 @@ func TestDiscordSurfaceSubmitsThroughManagedConversation(t *testing.T) {
 	}
 }
 
+func TestExactWriteRequestIsSuppressedAndContinuedOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := newFakeConversationManager()
+	current := &surface{id: "555", conversation: "discord-conversation", turns: map[string]*pendingTurn{
+		"message-1": {channelID: "555", messageID: "message-1"},
+	}}
+	runtime := &Runtime{
+		config: Config{Audit: io.Discard}, ctx: ctx, cancel: cancel, manager: manager,
+		surfaces: map[string]*surface{"555": current}, byConversation: map[string]*surface{current.conversation: current},
+	}
+
+	runtime.handleDispatch(current.conversation, dispatch.Event{Type: "agent.output.delta", InputID: "message-1", ItemID: "output", Delta: RequestWriteAccess})
+	runtime.handleDispatch(current.conversation, dispatch.Event{Type: "turn.completed", InputID: "message-1"})
+
+	select {
+	case got := <-manager.elevated:
+		if got.conversation != current.conversation || got.submission.InputID != "message-1:write" || got.submission.Text != channelconfig.WriteContinuationPrompt {
+			t.Fatalf("elevation submission = %#v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("write continuation was not submitted")
+	}
+	manager.mu.Lock()
+	count := len(manager.submitted)
+	manager.mu.Unlock()
+	if count != 1 {
+		t.Fatalf("continuations = %d, want 1", count)
+	}
+}
+
 func TestStatusMessageUsesOnlySafeLifecycleState(t *testing.T) {
 	message := statusMessage("maintainer", "codex", "guild", dispatch.ConversationStatus{State: dispatch.LifecycleQueued, Pending: 2})
 	if message != "hctl is online: agent=maintainer harness=codex surface=guild state=queued pending=2" {
@@ -200,17 +234,29 @@ type fakeManagedSubmission struct {
 }
 
 type fakeConversationManager struct {
+	mu        sync.Mutex
 	submitted []fakeManagedSubmission
 	statuses  map[string]dispatch.ConversationStatus
 	done      chan struct{}
+	elevated  chan fakeManagedSubmission
 }
 
 func newFakeConversationManager() *fakeConversationManager {
-	return &fakeConversationManager{statuses: map[string]dispatch.ConversationStatus{}, done: make(chan struct{})}
+	return &fakeConversationManager{statuses: map[string]dispatch.ConversationStatus{}, done: make(chan struct{}), elevated: make(chan fakeManagedSubmission, 1)}
 }
 
 func (m *fakeConversationManager) Submit(_ context.Context, conversation string, submission dispatch.Submission) (dispatch.SubmissionResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.submitted = append(m.submitted, fakeManagedSubmission{conversation: conversation, submission: submission})
+	return dispatch.SubmissionResult{Status: "queued"}, nil
+}
+
+func (m *fakeConversationManager) Elevate(_ context.Context, conversation string, submission dispatch.Submission) (dispatch.SubmissionResult, error) {
+	m.mu.Lock()
+	m.submitted = append(m.submitted, fakeManagedSubmission{conversation: conversation, submission: submission})
+	m.mu.Unlock()
+	m.elevated <- fakeManagedSubmission{conversation: conversation, submission: submission}
 	return dispatch.SubmissionResult{Status: "queued"}, nil
 }
 

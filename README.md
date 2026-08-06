@@ -30,6 +30,8 @@ my-agent/
   subagents/
     researcher/
       instructions.md
+  connections/
+    github.md
   harnesses/
     claude/
       .claude/
@@ -76,8 +78,14 @@ that are intentionally not portable can be mirrored under
 harness receives them. Hctl copies those files literally and owns their
 workspace copies, but does not merge, validate, or promise that the harness
 honors their contents. Generated skills, subagents, and MCP configuration stay
-reserved for hctl. Do not put credentials in authored harness files. See the
-[minimal example](examples/minimal) and the
+reserved for hctl. Do not put credentials in authored harness files. A bounded
+Markdown description at `connections/github.md` adds anonymous, public,
+read-only GitHub repository and issue access through the same managed MCP
+server in either harness. It exposes `github__get-repository`,
+`github__list-issues`, and `github__get-issue`; apply never contacts GitHub.
+Private repositories, credentials, writes, generic OpenAPI loading, and remote
+MCP proxying are not part of this first connection. See the
+[minimal example](examples/minimal), [public GitHub example](examples/github), and the
 [mixed-language example](spikes/polyglot-tools/fixture).
 
 ## Current journey

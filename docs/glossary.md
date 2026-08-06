@@ -19,7 +19,7 @@ files, CLI guidance, or product documentation.
 | Tool host | An hctl-owned, long-lived language process that loads tool files and exposes them through MCP. Authors write functions, not host protocol code. |
 | Dependency lockfile | A language-native file that pins code dependencies. It is allowed beside authored files but does not register tools with hctl. |
 | Channel | A place where external input reaches an agent, such as Slack, an API, or local stdin. |
-| Connection | Configured access to an external service, commonly through MCP or HTTP. A future secretless operation broker may implement a connection without exposing credential values to the session. |
+| Connection | Filesystem-authored access to an external service through managed tools. The first concrete form is a bounded description at `connections/github.md`, which registers anonymous public GitHub access; a future secret-bearing connection must use the secretless operation broker without exposing credential values to the session. |
 | Sandbox | An execution boundary that restricts code access to host resources. Process validation and timeouts alone are not a sandbox. |
 | Subagent | A specialized native harness agent delegated work by a parent. In the MVP it supplies only instructions and inherits the parent's setup; it is not an independently applied agent project. |
 | Schedule | A recurring trigger for headless agent work. |

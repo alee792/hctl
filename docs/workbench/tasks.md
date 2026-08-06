@@ -17,41 +17,7 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### HCTL-010 — Add an anonymous public GitHub connection
-
-**Outcome:** A bounded UTF-8 description at `connections/github.md` registers
-one managed GitHub connection. Its path supplies the name and it exposes exactly
-`github__get-repository`, `github__list-issues`, and `github__get-issue` through
-the existing managed MCP server for both harnesses. The tools perform fixed,
-anonymous, read-only GitHub REST requests and return bounded schema-shaped
-public repository and issue data.
-
-**Boundaries:** Follow Eve's `connections/`, path-derived identity,
-model-facing description, and `<connection>__<tool>` precedent. Do not add
-TypeScript connection definitions, a generic OpenAPI loader, dynamic MCP
-proxying, credentials, private-repository access, writes, approval UX, or a
-broker. Only `connections/github.md` is supported; any other connection entry
-fails clearly. Apply does not contact GitHub. Runtime requests use a fixed HTTPS
-host, endpoints, headers, short timeout, rejected redirects, bounded bodies,
-strict input and response schemas, no retries, and stable errors that expose no
-upstream body or arbitrary diagnostics.
-
-**Acceptance:** Project tests cover valid discovery for both harnesses,
-fingerprinting, missing/empty/oversized/non-UTF-8/symlinked definitions, and
-unsupported connection entries before workspace mutation. Credential-free fake
-HTTP tests cover the three exact operations, method/path/headers, absence of
-authorization, limits and truncation, redirects, timeouts, response bounds,
-status classification, no retry, and continued MCP service after a failed
-call. Both generated harness configurations reach the same qualified tools,
-audit remains content-free, absent `connections/github.md` preserves the
-existing managed surface, and `./scripts/check.sh` passes. No live GitHub call
-or credential is authorized.
-
-**Context:** [ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md),
-[product specification](../product-spec.md), and Eve's current
-[`connections` contract](https://github.com/vercel/eve/blob/84c3dfc1ff91e075444eee7c6d8e2ef55b2aaebe/docs/connections/overview.mdx).
-Add a short ADR for the anonymous-first decision and update the README, product
-specification, glossary, status, task list, and a minimal fixture.
+None. Shape HCTL-011 before moving it here.
 
 ## Ordered next
 
@@ -69,6 +35,27 @@ completed predecessor.
    that shape.
 
 ## Completed
+
+### HCTL-010 — Add an anonymous public GitHub connection
+
+**Outcome:** A bounded UTF-8 description at `connections/github.md` registers
+the path-derived `github` connection and exposes exactly
+`github__get-repository`, `github__list-issues`, and `github__get-issue` through
+the existing managed MCP server in both harnesses. Runtime calls make fixed,
+anonymous, read-only GitHub REST requests and return selected, bounded public
+repository and issue data. Apply makes no network request. Private access,
+writes, credentials, generic OpenAPI loading, MCP proxying, approval UX, and
+broker code remain out of scope.
+
+**Evidence:** Project, CLI, connection, and MCP tests cover discovery for both
+harnesses, fingerprinting, invalid definitions before workspace mutation, the
+three exact operations, fixed method/path/headers, absent authorization,
+input/output limits, truncation, redirects, timeouts, response bounds, stable
+status errors, no retry, content-free audit, the unchanged connection-free
+surface, and continued MCP service after a failed call. The public fixture and
+[ADR 0011](../adr/0011-start-github-connections-anonymously.md) record the
+anonymous-first contract. `./scripts/check.sh` passes without a live GitHub
+call or credential.
 
 ### HCTL-009 — Add portable subagent effort
 

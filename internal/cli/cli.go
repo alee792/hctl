@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"hctl/internal/connection/github"
 	"hctl/internal/gateway"
 	"hctl/internal/harness"
 	"hctl/internal/harness/claude"
@@ -121,6 +122,9 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 		}
 	}
 	toolNames := []string{"echo"}
+	if p.GitHubConnection != nil {
+		toolNames = append(toolNames, github.GetRepository, github.ListIssues, github.GetIssue)
+	}
 	for _, source := range p.Tools.Sources {
 		toolNames = append(toolNames, source.Name)
 	}

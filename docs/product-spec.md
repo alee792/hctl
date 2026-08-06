@@ -76,6 +76,8 @@ my-agent/
   subagents/
     researcher/
       instructions.md
+  connections/
+    github.md
   harnesses/
     claude/
       .claude/
@@ -161,6 +163,35 @@ Hctl-owned native destinations remain reserved. Claude authors cannot replace
 subagents, and managed MCP setup continue to use their existing conventions.
 Case-folded aliases of these paths are also rejected before mutation so agent
 source remains safe to apply to common case-insensitive workspaces.
+
+The optional `connections/github.md` file contains a 1-1024 character UTF-8
+Markdown description. Its conventional path registers a connection named
+`github`; there is no connection manifest or name field. It exposes exactly
+`github__get-repository`, `github__list-issues`, and `github__get-issue` through
+the existing managed MCP server for both harnesses. The description is included
+in each tool's model-visible description. Any other entry under `connections/`
+fails before workspace mutation.
+
+This first connection is anonymous, public, read-only GitHub REST access.
+Repository inputs are bounded `owner` and `repo` strings. Issue listing accepts
+optional `state` (`open`, `closed`, or `all`) and `limit` from 1-20, defaulting
+to `open` and 10; GitHub's issues endpoint may include pull requests. Single
+issue lookup requires a positive issue number. Hctl sends fixed GET requests
+to `https://api.github.com` with GitHub's JSON accept and current
+`2026-03-10` API-version headers,
+no authorization header, a five-second client timeout, no redirects, no retry,
+and a one-MiB response limit. Returned repository and issue fields are selected
+and bounded rather than forwarding raw upstream bodies; a `truncated` field
+reports when returned text or labels were shortened. Errors are stable
+categories for invalid input, missing resources, rate limits, authorization,
+service availability, timeouts, oversized or invalid responses, and other
+request failures; they do not include upstream bodies or arbitrary diagnostics.
+Apply performs no network request.
+
+Private repository access, credentials, writes, a generic OpenAPI engine,
+dynamic MCP proxying, approval UX, and credential-broker code are deferred. Any
+secret-bearing extension must first satisfy
+[ADR 0009](adr/0009-use-a-local-secretless-operation-broker.md).
 
 Visible `tools/*.ts` and `tools/*.py` files each declare one tool. A visible
 `tools/NAME/tool.go` directory declares one Go tool. Filenames supply tool
@@ -263,7 +294,8 @@ OAuth, network listeners, and vendor delivery are outside the MVP.
 
 ## Managed tool boundary
 
-The MVP exposes one bounded, read-only `echo` tool plus conventionally authored
+The MVP exposes one bounded, read-only `echo` tool, the optional anonymous
+GitHub connection's three read-only tools, and conventionally authored
 TypeScript, Python, and Go tools through one stdio MCP server in both harnesses.
 Inputs and outputs are schema-validated. Audit output contains a safe request
 identifier, tool name, and lifecycle outcome, never tool arguments or output.

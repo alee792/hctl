@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"hctl/internal/connection/github"
 	"hctl/internal/project"
 	"hctl/internal/setup"
 	"hctl/internal/tool"
@@ -24,6 +25,10 @@ const maxLineBytes = 64 << 10
 var portableToolName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 func Serve(source, workspace, harness string, input io.Reader, output, audit io.Writer) error {
+	return serve(source, workspace, harness, input, output, audit, github.NewClient(nil))
+}
+
+func serve(source, workspace, harness string, input io.Reader, output, audit io.Writer, githubClient *github.Client) error {
 	p, err := project.Load(source, harness, workspace)
 	if err != nil {
 		return err
@@ -68,12 +73,15 @@ func Serve(source, workspace, harness string, input io.Reader, output, audit io.
 				"outputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"text": map[string]any{"type": "string"}}, "required": []string{"text"}},
 				"annotations":  map[string]any{"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
 			}}
+			if p.GitHubConnection != nil {
+				tools = append(tools, github.Definitions(p.GitHubConnection.Description)...)
+			}
 			for _, definition := range runtime.List() {
 				tools = append(tools, definition)
 			}
 			writeResult(encoder, request.ID, map[string]any{"tools": tools})
 		case "tools/call":
-			result, requestID, toolName, err := callManaged(p, runtime, request.ID, request.Params, audit)
+			result, requestID, toolName, err := callManaged(p, runtime, githubClient, request.ID, request.Params, audit)
 			if err != nil {
 				if auditErr := writeAudit(audit, p.AgentID, toolName, requestID, "failed"); auditErr != nil {
 					return auditErr
@@ -95,7 +103,7 @@ func Serve(source, workspace, harness string, input io.Reader, output, audit io.
 	return nil
 }
 
-func callManaged(p *project.Project, runtime *tool.Runtime, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
+func callManaged(p *project.Project, runtime *tool.Runtime, githubClient *github.Client, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
 	requestHash := sha256.Sum256(append(append([]byte{}, id...), params...))
 	requestID := hex.EncodeToString(requestHash[:8])
 	var call struct {
@@ -103,7 +111,11 @@ func callManaged(p *project.Project, runtime *tool.Runtime, id, params json.RawM
 		Arguments json.RawMessage `json:"arguments"`
 		Meta      json.RawMessage `json:"_meta"`
 	}
-	if err := decodeStrict(params, &call); err != nil || !portableToolName.MatchString(call.Name) {
+	if err := decodeStrict(params, &call); err != nil {
+		return nil, requestID, "unknown", errors.New("invalid managed tool call")
+	}
+	githubTool := p.GitHubConnection != nil && github.IsTool(call.Name)
+	if !portableToolName.MatchString(call.Name) && !githubTool {
 		return nil, requestID, "unknown", errors.New("invalid managed tool call")
 	}
 	if err := writeAudit(audit, p.AgentID, call.Name, requestID, "requested"); err != nil {
@@ -115,7 +127,13 @@ func callManaged(p *project.Project, runtime *tool.Runtime, id, params json.RawM
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		output, err := runtime.Call(ctx, call.Name, call.Arguments)
+		var output []byte
+		var err error
+		if githubTool {
+			output, err = githubClient.Call(ctx, call.Name, call.Arguments)
+		} else {
+			output, err = runtime.Call(ctx, call.Name, call.Arguments)
+		}
 		if err != nil {
 			return nil, requestID, call.Name, err
 		}

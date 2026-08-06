@@ -31,6 +31,22 @@ func TestApplyPrintsSafeCompatibilityWarning(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsUnsupportedConnectionBeforeWorkspaceMutation(t *testing.T) {
+	source := t.TempDir()
+	workspace := t.TempDir()
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "connections", "gitlab.md"), "GitLab.\n", 0o644)
+	var output, stderr bytes.Buffer
+	err := Run([]string{"apply", source, "--workspace", workspace, "--harness", "codex"}, strings.NewReader(""), &output, &stderr, "")
+	if err == nil || !strings.Contains(err.Error(), "supports github.md only") {
+		t.Fatalf("unsupported connection error = %v", err)
+	}
+	entries, readErr := os.ReadDir(workspace)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("invalid project mutated workspace: %v, %v", entries, readErr)
+	}
+}
+
 func writeCLIFile(t *testing.T, path, content string, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

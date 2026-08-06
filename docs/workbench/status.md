@@ -33,6 +33,9 @@ that:
   obsolete duplicated runtime manifest;
 - discovers, prepares, validates, and exposes TypeScript, Python, and Go tool
   functions beside the bounded built-in `echo` tool through stdio MCP;
+- discovers a bounded `connections/github.md` description and exposes three
+  fixed anonymous public GitHub repository and issue operations through the
+  same managed MCP server without contacting GitHub during apply;
 - drives local Claude Code and Codex processes headlessly through fake-tested
   bidirectional protocols;
 - maps conversations to resumable harness sessions, queues input FIFO,
@@ -135,14 +138,14 @@ a generated custom subagent, and session resume in a fresh external workspace.
 
 These are later product promises, not MVP implementation work:
 
-- Advance the remaining filesystem conventions in this order: a GitHub
-  connection, a Discord channel, then schedules and sandbox/runtime
+- Advance the remaining filesystem conventions in this order: a Discord
+  channel, then schedules and sandbox/runtime
   conventions. Each item must remain a
   bounded product slice; completing the sequence is not permission to add live
   credentials, contact GitHub or Discord, publish, deploy, or replace native
   harness behavior.
-- Before defining the GitHub connection or Discord channel contract, inspect
-  Eve's then-current filesystem convention and interface. Reuse its plain
+- Before defining the Discord channel contract, inspect Eve's then-current
+  filesystem convention and interface. Reuse its plain
   author-facing concepts where they fit hctl's native-harness boundary; record
   deliberate differences rather than copying an incompatible runtime model.
 - Future channel adapters feed the same session-aware gateway exercised by
@@ -180,9 +183,9 @@ installation; it deliberately leaves a relocatable package command out until a
 concrete need demonstrates one.
 
 Product naming, the concrete secretless-broker backend, proposal review UX,
-and the exact GitHub and Discord authoring interfaces are also intentionally
-unresolved. Do not infer answers from the current prototype or define those
-interfaces before their ordered work item reaches the frontier.
+and the exact Discord authoring interface are also intentionally unresolved.
+Do not infer answers from the current prototype or define that interface before
+its ordered work item reaches the frontier.
 
 ## Current design frontier
 
@@ -194,8 +197,8 @@ The Codex native journey has live evidence, and the `darwin-arm64`
 clean-machine release archive journey is credential-free tested. Equivalent
 Claude acceptance remains. The credential-broker execution boundary is settled
 in ADR 0009; its backend and credential-owner decision remain deferred because
-the first GitHub slice is anonymous. HCTL-010 is shaped and Ready; the Discord
-channel and remaining ordered conventions stay behind it. Do not implement
+the first GitHub slice is anonymous. HCTL-010 is complete; shape the Discord
+channel next, with remaining ordered conventions behind it. Do not implement
 proposal capture, image deployment, or broker code merely to exercise future
 seams.
 

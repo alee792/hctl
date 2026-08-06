@@ -1,6 +1,7 @@
 package project
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,6 +60,93 @@ func TestToolSourceChangesFingerprint(t *testing.T) {
 	if first.SourceFingerprint == second.SourceFingerprint {
 		t.Fatal("tool source change did not change the fingerprint")
 	}
+}
+
+func TestLoadDiscoversGitHubConnectionForBothHarnesses(t *testing.T) {
+	root := agent(t, "portable")
+	baseline, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.GitHubConnection != nil {
+		t.Fatalf("missing connection = %#v", baseline.GitHubConnection)
+	}
+	path := filepath.Join(root, "connections", "github.md")
+	write(t, path, "Read public GitHub repositories and issues.\n")
+
+	for _, harness := range []string{"claude", "codex"} {
+		loaded, err := Load(root, harness)
+		if err != nil {
+			t.Fatalf("%s: %v", harness, err)
+		}
+		if loaded.GitHubConnection == nil || loaded.GitHubConnection.Description != "Read public GitHub repositories and issues." || loaded.GitHubConnection.Path != "connections/github.md" {
+			t.Fatalf("%s GitHub connection = %#v", harness, loaded.GitHubConnection)
+		}
+		if loaded.SourceFingerprint == baseline.SourceFingerprint {
+			t.Fatalf("%s connection did not join the source fingerprint", harness)
+		}
+	}
+
+	first, _ := Load(root, "claude")
+	write(t, path, "Read public GitHub data carefully.\n")
+	second, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SourceFingerprint == second.SourceFingerprint {
+		t.Fatal("connection description change did not change the source fingerprint")
+	}
+}
+
+func TestLoadRejectsInvalidConnections(t *testing.T) {
+	tests := map[string]struct {
+		path    string
+		content []byte
+		want    string
+	}{
+		"empty GitHub description":     {"connections/github.md", nil, "must contain 1-1024"},
+		"oversized GitHub description": {"connections/github.md", bytes.Repeat([]byte("a"), 1025), "must contain 1-1024"},
+		"non-UTF-8 GitHub description": {"connections/github.md", []byte{0xff}, "valid UTF-8"},
+		"unsupported file":             {"connections/gitlab.md", []byte("GitLab.\n"), "supports github.md only"},
+		"unsupported directory":        {"connections/github/connection.md", []byte("GitHub.\n"), "supports github.md only"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := agent(t, "portable")
+			writeBytes(t, filepath.Join(root, filepath.FromSlash(test.path)), test.content, 0o644)
+			if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("invalid connection was not rejected with %q: %v", test.want, err)
+			}
+		})
+	}
+
+	t.Run("connection file symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		outside := filepath.Join(t.TempDir(), "github.md")
+		write(t, outside, "GitHub.\n")
+		path := filepath.Join(root, "connections", "github.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "symlinks") {
+			t.Fatalf("connection symlink was not rejected: %v", err)
+		}
+	})
+
+	t.Run("connections directory symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		outside := t.TempDir()
+		write(t, filepath.Join(outside, "github.md"), "GitHub.\n")
+		if err := os.Symlink(outside, filepath.Join(root, "connections")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "real directory") {
+			t.Fatalf("connections directory symlink was not rejected: %v", err)
+		}
+	})
 }
 
 func TestLoadAllowsInstructionsWithoutSkills(t *testing.T) {

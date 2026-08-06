@@ -21,16 +21,17 @@ import (
 )
 
 const (
-	GeneratorVersion  = "hctl/0.7.0-dev"
-	maxSourceBytes    = 128 << 10
-	maxSkills         = 8
-	maxSkillFiles     = 128
-	maxSkillFileBytes = 1 << 20
-	maxSkillBytes     = 8 << 20
-	maxHarnessFiles   = 128
-	maxHarnessBytes   = 8 << 20
-	maxSubagents      = 8
-	echoMaxInputBytes = 1024
+	GeneratorVersion   = "hctl/0.7.0-dev"
+	maxSourceBytes     = 128 << 10
+	maxSkills          = 8
+	maxSkillFiles      = 128
+	maxSkillFileBytes  = 1 << 20
+	maxSkillBytes      = 8 << 20
+	maxHarnessFiles    = 128
+	maxHarnessBytes    = 8 << 20
+	maxConnectionBytes = 8 << 10
+	maxSubagents       = 8
+	echoMaxInputBytes  = 1024
 )
 
 var (
@@ -65,6 +66,12 @@ type Subagent struct {
 	Source       []byte
 }
 
+type GitHubConnection struct {
+	Description string
+	Path        string
+	Source      []byte
+}
+
 type SourceRecord struct {
 	Path       string `json:"path"`
 	SHA256     string `json:"sha256"`
@@ -83,6 +90,7 @@ type Project struct {
 	Skills            []Skill
 	Subagents         []Subagent
 	HarnessFiles      []File
+	GitHubConnection  *GitHubConnection
 	Tools             tool.Inventory
 	SourceFingerprint string
 	MaxToolInput      int
@@ -136,6 +144,10 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
+	githubConnection, err := loadGitHubConnection(sourceRoot)
+	if err != nil {
+		return nil, err
+	}
 	toolNames := map[string]bool{"echo": true}
 	for _, source := range tools.Sources {
 		toolNames[source.Name] = true
@@ -166,6 +178,9 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 			Executable: file.Executable,
 		})
 	}
+	if githubConnection != nil {
+		sources = append(sources, SourceRecord{Path: githubConnection.Path, SHA256: rootfs.SHA256(githubConnection.Source)})
+	}
 	for _, file := range tools.Files {
 		sources = append(sources, SourceRecord{Path: file.Path, SHA256: file.SHA256})
 	}
@@ -193,10 +208,47 @@ func Load(source, harness string, workspace ...string) (*Project, error) {
 		Skills:            skills,
 		Subagents:         subagents,
 		HarnessFiles:      harnessFiles,
+		GitHubConnection:  githubConnection,
 		Tools:             tools,
 		SourceFingerprint: fingerprint,
 		MaxToolInput:      echoMaxInputBytes,
 	}, nil
+}
+
+func loadGitHubConnection(root string) (*GitHubConnection, error) {
+	directory := filepath.Join(root, "connections")
+	info, err := os.Lstat(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("connections must be a real directory")
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, errors.New("cannot read connections directory")
+	}
+	for _, entry := range entries {
+		if entry.Name() != "github.md" {
+			return nil, fmt.Errorf("connections supports github.md only; found %q", entry.Name())
+		}
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	path := "connections/github.md"
+	source, err := rootfs.ReadSource(root, path, maxConnectionBytes)
+	if err != nil {
+		return nil, fmt.Errorf("GitHub connection: %w", err)
+	}
+	if !utf8.Valid(source) {
+		return nil, errors.New("GitHub connection description must be valid UTF-8")
+	}
+	description := strings.TrimSpace(string(source))
+	if description == "" || len([]rune(description)) > 1024 {
+		return nil, errors.New("GitHub connection description must contain 1-1024 characters")
+	}
+	return &GitHubConnection{Description: description, Path: path, Source: source}, nil
 }
 
 func loadHarnessFiles(root, harness string) ([]File, error) {

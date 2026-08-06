@@ -96,9 +96,14 @@ a generated custom subagent, and session resume in a fresh external workspace.
   content, never mutate active authored files automatically, and retain
   immutable proposal evidence plus a later human decision. They must not retain
   credentials, secrets, raw tool outputs, or conversation transcripts.
-- A credential broker is required before the first secret-bearing managed tool
-  or connection ships. Secrets must remain out of authored files, generated
-  harness files, the harness environment, and model-visible input or output.
+- [ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md) selects a
+  local secretless operation broker before the first secret-bearing managed
+  tool or connection ships. It resolves opaque references only at authorized
+  managed invocations and consumes values itself, keeping them out of authored
+  files, generated harness files, the harness environment, model-visible I/O,
+  diagnostics, and audit. Backend selection and connection syntax remain
+  deferred; native harness capabilities and same-user peer processes remain
+  outside this additive boundary.
 - Authored tools are trusted project code in the local MVP. Process boundaries,
   validation, cancellation, and limits provide reliability; hctl does not claim
   to contain malicious tool code or provide an OS sandbox.
@@ -150,7 +155,7 @@ and HCTL-002 implemented a versioned `darwin-arm64` release archive for first
 installation; it deliberately leaves a relocatable package command out until a
 concrete need demonstrates one.
 
-Product naming, the concrete credential-broker backend, proposal review UX,
+Product naming, the concrete secretless-broker backend, proposal review UX,
 and specific vendor channel adapters are also intentionally unresolved. Do not
 infer answers from the current prototype.
 
@@ -161,9 +166,10 @@ subagents, and the Agent Skills compatibility contract are implemented and
 exercised through generated Claude and Codex configurations. The Codex native
 journey has live evidence, and the `darwin-arm64` clean-machine release archive
 journey is credential-free tested. Equivalent Claude acceptance remains. The
-next product decision is credential brokering or another vision item. Do not
-implement proposal capture, channels, or image deployment merely to exercise
-those future seams.
+credential-broker execution boundary is settled in ADR 0009; backend selection
+waits for a concrete secret-bearing managed tool. The next product decision is
+another vision item. Do not implement proposal capture, channels, image
+deployment, or broker code merely to exercise future seams.
 
 The [maintainer task list](tasks.md) turns that frontier into a prioritized,
 permission-aware queue. It is the source for agent assignments; this section

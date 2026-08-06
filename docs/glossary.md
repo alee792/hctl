@@ -19,7 +19,7 @@ files, CLI guidance, or product documentation.
 | Tool host | An hctl-owned, long-lived language process that loads tool files and exposes them through MCP. Authors write functions, not host protocol code. |
 | Dependency lockfile | A language-native file that pins code dependencies. It is allowed beside authored files but does not register tools with hctl. |
 | Channel | A place where external input reaches an agent, such as Slack, an API, or local stdin. |
-| Connection | Configured access to an external service, commonly through MCP or HTTP. Credential brokering may implement a connection without exposing secrets to the session. |
+| Connection | Configured access to an external service, commonly through MCP or HTTP. A future secretless operation broker may implement a connection without exposing credential values to the session. |
 | Sandbox | An execution boundary that restricts code access to host resources. Process validation and timeouts alone are not a sandbox. |
 | Subagent | A specialized native harness agent delegated work by a parent. In the MVP it supplies only instructions and inherits the parent's setup; it is not an independently applied agent project. |
 | Schedule | A recurring trigger for headless agent work. |
@@ -33,7 +33,8 @@ files, CLI guidance, or product documentation.
 | Gateway | The optional headless boundary that connects input to a resumable native-harness session. |
 | Session | One resumable interaction context owned by the native harness and mapped by the gateway when used headlessly. |
 | Proposal | A workspace-local, human-readable suggestion to change one existing UTF-8 instruction, skill, or managed-tool source file. Its immutable record holds provenance, the target's base content hash, and a diff; a later review record accepts or rejects it. It must not contain credentials, secrets, raw tool output, or conversation transcripts. |
-| Credential broker | An internal boundary that uses a credential for an authorized tool or connection without exposing the credential value to the agent session. |
+| Secretless operation broker | A future hctl-owned local process that resolves an opaque credential reference only for an authorized managed operation, uses the value itself against a constrained upstream target, and returns only safe results. It is an execution boundary, not a credential store, vault, or protection from peer processes or native harness capabilities running as the same OS user. |
+| Opaque credential reference | A bounded non-secret identifier that selects a credential inside the secretless operation broker. It is not a credential value, filesystem path, environment-variable name, command, or URI containing credentials. Its eventual author-facing syntax is deferred. |
 | Agent image | A possible future deployable package containing a harness, an agent project, and hctl. It composes the same source/workspace contract rather than redefining the agent project as a runtime. |
 
 Configuration may be added later only for settings a directory layout cannot

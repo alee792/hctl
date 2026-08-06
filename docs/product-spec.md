@@ -233,8 +233,14 @@ exceeds its deadline terminates that language host and fails clearly; graceful
 per-call cancellation and automatic host restart are not claimed.
 
 The managed boundary is additive. It does not disable, authorize, observe, or
-retry harness-native tools. Secret-bearing tools require a credential
-broker before they ship; no unused broker backend is scaffolded in the MVP.
+retry harness-native tools. Secret-bearing tools require the local secretless
+operation broker selected by [ADR 0009](adr/0009-use-a-local-secretless-operation-broker.md)
+before they ship. The broker resolves an opaque reference only at an authorized
+managed invocation and consumes the value for a constrained upstream operation;
+it declares no credential or authorization input fields and never returns the
+value to a tool host, harness, MCP client, or model.
+No backend, credential enrollment flow, connection syntax, or unused broker
+code is scaffolded in the MVP.
 Codex treats the generated managed server as required and delegates its tool
 approval to hctl, avoiding a second harness approval prompt after hctl records
 authorization where Codex user and administrator policy permits. This setting
@@ -309,6 +315,18 @@ mutation, and review UX remain outside the MVP and are not scaffolded. See
   without a target idempotency contract.
 - Diagnostics do not expose credentials, private prompts, or raw process
   output.
+- A future secretless broker validates a reference, managed operation, target,
+  and authorization on every call; uses private local IPC, a sensitive
+  session-scoped authorization capability for one managed MCP server instance,
+  and an upstream credential of its own; and returns/audits only bounded
+  secret-free data. The capability is delivered only to hctl's managed
+  MCP-server/broker pair, stays out of ordinary tool inputs, model-visible I/O,
+  generated configuration, logs, and audit, and is rotated/removed with the
+  managed MCP server process.
+  Its typed operation schema declares no credential/authentication fields and
+  rejects unknown fields; it cannot reliably detect a secret smuggled into an
+  allowed string after the model has submitted it. It does not protect against
+  native harness capabilities or any other process running as the same OS user.
 
 ## MVP acceptance
 
@@ -346,5 +364,6 @@ The MVP is complete when credential-free tests prove:
   deployment orchestration
 - Building or deploying packaged agent images
 - Governance claims over native harness tools
-- Credential storage before a secret-bearing tool exists
+- Credential storage, enrollment, or backend selection before a
+  secret-bearing tool exists
 - Automatic or unreviewed promotion of agent-authored improvements

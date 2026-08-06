@@ -21,6 +21,21 @@ No task is ready without further direction.
 
 ## Completed
 
+### HCTL-006 — Select a credential-broker boundary
+
+**Outcome:** Select a future hctl-owned local secretless operation broker, not
+a vault or a storage backend. It resolves an opaque credential reference only
+at an authorized managed invocation, performs a constrained upstream operation
+itself, and returns/audits only bounded secret-free data. Environment/file
+injection, credential-helper stdout, and direct SDK retrieval all disclose the
+value to a child or authored tool and therefore do not satisfy the boundary.
+No backend, author-facing connection syntax, credentials, or code was added.
+
+**Evidence:** [ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md)
+records the primary-source research, alternatives, minimum reference,
+authorization, IPC, lifecycle, failure, redaction, and audit contract, and
+the explicit same-OS-user/native-harness limit.
+
 ### HCTL-005 — Spike human-reviewed improvement proposals
 
 **Outcome:** Keep proposals as inert, workspace-local directories at
@@ -131,14 +146,6 @@ Any product fix discovered live also needs a credential-free regression test.
 **Context:** [Codex live acceptance](codex-live-acceptance.md).
 
 ## Start only with human direction
-
-### HCTL-006 — Select a credential-broker boundary
-
-Before the first secret-bearing managed tool or connection, evaluate existing
-local credential brokers and define the minimum execution contract that keeps
-secrets out of agent source, generated harness files, the harness environment,
-and model-visible I/O. Do not build a vault or accept real credentials during
-the spike.
 
 ### HCTL-007 — Revisit authored-tool host hardening
 

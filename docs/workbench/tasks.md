@@ -21,6 +21,27 @@ No task is ready without further direction.
 
 ## Completed
 
+### HCTL-004 — Spike an optional post-run summary
+
+**Outcome:** Do not implement a summary. Hctl can durably report the parent
+input outcome and observed parent runtime IDs; the current Codex App Server
+schema and prior live trace show child runtime IDs, but hctl has no stable
+native-log locator contract. A summary now would either invent one, copy
+transcript-derived content, or imply portable child semantics.
+
+**Evidence:** The credential-safe
+[Codex post-run summary spike](codex-post-run-summary-spike.md) records the
+reproducible schema procedure, current gateway/session/event boundaries, the
+prior child-stream observation, raw-observation limits, and additive failure
+behavior. Its regression source proves a child completion before the parent
+does not complete the parent gateway turn. No model turn, credential material,
+native-log content, or transcript was captured for this spike.
+
+**Follow-up:** No implementation is queued. Reopen only when optional
+Codex-specific observability is prioritized and an explicitly authorized
+model-backed capture can establish a documented native-log reference. Child
+visibility must remain outside completion semantics.
+
 ### HCTL-002 — Implement the accepted install journey
 
 **Outcome:** Implement the accepted release-archive contract without
@@ -93,13 +114,6 @@ Any product fix discovered live also needs a credential-free regression test.
 **Context:** [Codex live acceptance](codex-live-acceptance.md).
 
 ## Start only with human direction
-
-### HCTL-004 — Spike an optional post-run summary
-
-Determine whether the gateway can report a bounded parent outcome and child
-activity using stable harness IDs while pointing to native logs rather than
-copying transcripts. Start with Codex; do not invent cross-harness semantics or
-make child visibility part of task completion.
 
 ### HCTL-005 — Spike human-reviewed improvement proposals
 

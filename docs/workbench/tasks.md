@@ -17,14 +17,29 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-No task is ready for unattended implementation.
-
-## Next to shape
-
 ### HCTL-009 — Richer subagents
 
-Decide and implement the next native, portable child-specific behavior beyond
-the current instructions-only, parent-inherited slice.
+**Outcome:** Allow an immediate subagent's `instructions.md` frontmatter to
+request one optional portable `effort: low|medium|high`. Emit the value as
+Claude's native `effort` agent field and Codex's native
+`model_reasoning_effort` custom-agent field. Omit both when unspecified so
+existing description-only children remain compatible.
+
+**Boundaries:** Hctl validates and requests effort; the selected harness,
+model, account, and policy determine whether it is honored. Keep root
+instructions description-only. Do not add model selection, tool or skill
+allowlists, child-owned tools, skills, connections or MCP servers, permissions,
+sandbox/worktree settings, hooks, turn limits, nested children, delegation
+policy, lifecycle management, harness-version detection, or runtime
+observability. Those do not have one honest portable native contract today.
+
+**Acceptance:** Accept exactly `low`, `medium`, or `high`; reject unknown or
+duplicate fields, non-string effort, and unsupported values clearly. Prove
+description-only output remains unchanged, both native outputs use their exact
+field names, effort changes the source fingerprint, and removing it safely
+removes the native field on reapply. Update README, product specification,
+status, and ADR 0006's accepted boundary through a new short ADR. Run
+`./scripts/check.sh` and the maintainer's independent reviews.
 
 ## Ordered after HCTL-009
 

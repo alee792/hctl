@@ -226,8 +226,9 @@ exercise future seams.
 The channel runtime now owns explicit independent managed session lifecycles
 for its configured Discord guild and DM surfaces. Idle lifecycles release their
 resident harness after a bounded interval and resume the retained native
-session on the next message. Global resident-session and active-turn limits, read-only admission, and
-conversation-specific writable worktrees remain the ordered follow-up slices
+session on the next message. New and resumed channel harnesses are enforced
+read-only in the shared checkout and can return an exact internal write-access
+result. Global resident-session and active-turn limits and conversation-specific writable worktrees remain the ordered follow-up slices
 tracked by the concurrent-session epic.
 
 Live Discord acceptance remains pending enrollment of a user-controlled bot and

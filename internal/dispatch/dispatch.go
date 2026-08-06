@@ -126,7 +126,7 @@ func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0, 0, nil, store)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0, 0, nil, harness.PolicyDefault, store)
 }
 
 // RunSubmissionsWithTurnTimeout drives a long-lived channel conversation while
@@ -142,7 +142,7 @@ func RunSubmissionsWithTurnTimeout(ctx context.Context, p *project.Project, driv
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout, 0, nil, store)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout, 0, nil, harness.PolicyDefault, store)
 }
 
 // RunTask drives bounded task input while opening a fresh native harness
@@ -159,10 +159,10 @@ func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, con
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0, 0, nil, store)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0, 0, nil, harness.PolicyDefault, store)
 }
 
-func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout, idleTimeout time.Duration, timers idleTimerFactory, store *conversationStore) error {
+func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout, idleTimeout time.Duration, timers idleTimerFactory, policy harness.ExecutionPolicy, store *conversationStore) error {
 	if err := validateDispatch(conversationID, emit); err != nil {
 		return err
 	}
@@ -218,7 +218,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 					}
 					snapshot.sessionID = ""
 				}
-				process, err = driver.Open(ctx, p.WorkspaceRoot, snapshot.sessionID)
+				process, err = driver.Open(ctx, harness.OpenRequest{Root: p.WorkspaceRoot, ResumeID: snapshot.sessionID, Policy: policy})
 				if err != nil {
 					sink.emit(Event{Type: "driver.process_failed", InputID: snapshot.firstID, SessionID: snapshot.sessionID, Status: "startup_failure"})
 					return err

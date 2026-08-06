@@ -229,6 +229,17 @@ Active or queued work is never hibernated. Explicit `--input jsonl`
 selects the existing headless stream instead; one-shot schedules retain their
 fresh-session semantics.
 
+New and resumed channel-managed sessions run read-only in the shared workspace:
+Claude uses native plan permission mode, Codex uses a read-only sandbox with
+approvals disabled, and the managed MCP boundary does not start or expose
+authored tool hosts under that policy. Safe built-in and anonymous GitHub read
+operations remain available. Generated channel instructions define the exact
+`HCTL_REQUEST_WRITE_ACCESS` result for requests that genuinely require a
+workspace change. Like `HCTL_NO_REPLY`, it is interpreted only after the whole
+trimmed response exactly matches and is never delivered as ordinary output.
+This policy does not change apply, explicit JSONL, schedules, or interactive
+native-harness use.
+
 The optional root `schedules/` directory contains nested Markdown task files.
 The bounded, valid UTF-8 path beneath `schedules/`, without `.md`, is the
 schedule name. At most 32 schedules are discovered. Each file is bounded UTF-8

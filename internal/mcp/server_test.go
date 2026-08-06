@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"testing"
 
 	"hctl/internal/connection/github"
+	"hctl/internal/harness"
 	"hctl/internal/project"
 	"hctl/internal/setup"
 )
@@ -57,6 +60,48 @@ func TestManagedContract(t *testing.T) {
 	log := audit.String()
 	if strings.Contains(log, "hello") || !strings.Contains(log, "outcome=requested") || !strings.Contains(log, "outcome=authorized") || !strings.Contains(log, "outcome=completed") {
 		t.Fatalf("unsafe or incomplete audit output: %q", log)
+	}
+}
+
+func TestReadOnlyChannelPolicyRejectsAuthoredManagedTools(t *testing.T) {
+	t.Setenv("HCTL_EXECUTION_POLICY", string(harness.PolicyReadOnly))
+	root := testAgent(t)
+	p, err := project.Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.Apply(p, self); err != nil {
+		t.Fatal(err)
+	}
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"still readable"}}}`,
+	}, "\n") + "\n"
+	opened := 0
+	var output bytes.Buffer
+	if err := serveWithRuntime(root, root, "claude", strings.NewReader(input), &output, io.Discard, github.NewClient(nil), func(context.Context, *project.Project) (managedRuntime, error) {
+		opened++
+		return nil, errors.New("authored runtime started")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if opened != 0 {
+		t.Fatalf("authored runtime opened %d times", opened)
+	}
+	responses := decodeLines(t, output.String())
+	if responses[1]["result"].(map[string]any)["isError"] != false {
+		t.Fatalf("read-only echo failed: %#v", responses[1])
+	}
+
+	params := json.RawMessage(`{"name":"write-file","arguments":{"path":"changed.txt"}}`)
+	var audit bytes.Buffer
+	_, _, toolName, err := callManaged(&project.Project{AgentID: "test-agent"}, nil, github.NewClient(nil), json.RawMessage(`1`), params, &audit)
+	if err == nil || !strings.Contains(err.Error(), "unavailable in a read-only channel session") || toolName != "write-file" {
+		t.Fatalf("read-only authored call = tool %q error %v", toolName, err)
 	}
 }
 

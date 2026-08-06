@@ -359,6 +359,9 @@ func TestManagerHibernatesAndResumesIdleHarnesses(t *testing.T) {
 			if got := driver.resumeIDs(); !reflect.DeepEqual(got, []string{"", "session-1"}) {
 				t.Fatalf("resume IDs = %v", got)
 			}
+			if got := driver.executionPolicies(); !reflect.DeepEqual(got, []harness.ExecutionPolicy{harness.PolicyReadOnly, harness.PolicyReadOnly}) {
+				t.Fatalf("execution policies = %v", got)
+			}
 			driver.release("message-2")
 			waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "message-2"})
 		})
@@ -434,6 +437,33 @@ func TestManagerClassifiesHibernateCloseFailureWithoutLosingConversation(t *test
 	}
 }
 
+func TestManagerClassifiesReadOnlyPolicyStartupFailure(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	driver.openErr = errors.New("read-only policy unsupported")
+	events := make(chan managedEvent, 16)
+	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(conversation string, event Event) error {
+		events <- managedEvent{conversation: conversation, event: event}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	result, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-1", Text: "change it"})
+	if err != nil || result.Status != "queued" {
+		t.Fatalf("submission = %+v, %v", result, err)
+	}
+	failure := waitManagedEvent(t, events, "driver.process_failed")
+	if failure.event.Status != "startup_failure" || failure.event.InputID != "message-1" {
+		t.Fatalf("policy failure event = %+v", failure.event)
+	}
+	if got := driver.executionPolicies(); !reflect.DeepEqual(got, []harness.ExecutionPolicy{harness.PolicyReadOnly}) {
+		t.Fatalf("execution policies = %v", got)
+	}
+}
+
 func TestManagerBoundsBlockedHibernateClose(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
@@ -482,7 +512,7 @@ func TestManagedRunBoundsBlockedCloseAfterAdmissionsStop(t *testing.T) {
 		done <- runSubmissions(context.Background(), p, driver, "discord-guild", submissions, func(event Event) error {
 			events <- event
 			return nil
-		}, false, time.Minute, time.Hour, clock.NewTimer, store)
+		}, false, time.Minute, time.Hour, clock.NewTimer, harness.PolicyReadOnly, store)
 	}()
 	reply := make(chan SubmissionResult, 1)
 	submissions <- Submission{InputID: "message-1", Text: "first", Reply: reply}
@@ -670,6 +700,8 @@ type managerDriver struct {
 	opened    int
 	closed    int
 	resumed   []string
+	policies  []harness.ExecutionPolicy
+	openErr   error
 	closeErr  error
 	closeWait chan struct{}
 	abortOnce sync.Once
@@ -689,13 +721,17 @@ func newNamedManagerDriver(name string) *managerDriver {
 func (d *managerDriver) Name() string                 { return d.name }
 func (d *managerDriver) Executable() string           { return "/fake/claude" }
 func (d *managerDriver) Verify(context.Context) error { return nil }
-func (d *managerDriver) Open(_ context.Context, _ string, resumeID string) (harness.Session, error) {
+func (d *managerDriver) Open(_ context.Context, request harness.OpenRequest) (harness.Session, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.opened++
 	d.next++
-	d.resumed = append(d.resumed, resumeID)
-	sessionID := resumeID
+	d.resumed = append(d.resumed, request.ResumeID)
+	d.policies = append(d.policies, request.Policy)
+	if d.openErr != nil {
+		return nil, d.openErr
+	}
+	sessionID := request.ResumeID
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("session-%d", d.next)
 	}
@@ -748,6 +784,12 @@ func (d *managerDriver) resumeIDs() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]string(nil), d.resumed...)
+}
+
+func (d *managerDriver) executionPolicies() []harness.ExecutionPolicy {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]harness.ExecutionPolicy(nil), d.policies...)
 }
 
 func (d *managerDriver) blockProcessClose() {

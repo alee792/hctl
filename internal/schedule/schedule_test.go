@@ -97,8 +97,8 @@ type fakeDriver struct {
 func (d *fakeDriver) Name() string                 { return "claude" }
 func (d *fakeDriver) Executable() string           { return "/fake/claude" }
 func (d *fakeDriver) Verify(context.Context) error { return nil }
-func (d *fakeDriver) Open(_ context.Context, _ string, sessionID string) (harness.Session, error) {
-	d.resumed = append(d.resumed, sessionID)
+func (d *fakeDriver) Open(_ context.Context, request harness.OpenRequest) (harness.Session, error) {
+	d.resumed = append(d.resumed, request.ResumeID)
 	return &fakeSession{driver: d, id: "session-" + string(rune('0'+len(d.resumed)))}, nil
 }
 

@@ -28,11 +28,24 @@ type TurnResult struct {
 	Status    string
 }
 
+type ExecutionPolicy string
+
+const (
+	PolicyDefault  ExecutionPolicy = "default"
+	PolicyReadOnly ExecutionPolicy = "read-only"
+)
+
+type OpenRequest struct {
+	Root     string
+	ResumeID string
+	Policy   ExecutionPolicy
+}
+
 type Driver interface {
 	Name() string
 	Executable() string
 	Verify(context.Context) error
-	Open(context.Context, string, string) (Session, error)
+	Open(context.Context, OpenRequest) (Session, error)
 }
 
 type Session interface {

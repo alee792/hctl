@@ -9,13 +9,18 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"hctl/internal/harness"
 	"hctl/internal/secureenv"
 )
 
-type Driver struct{ executable string }
+type Driver struct {
+	executable string
+	policyMu   sync.Mutex
+	readOnlyOK bool
+}
 
 func New(executable string) *Driver { return &Driver{executable: executable} }
 
@@ -37,16 +42,42 @@ func (d *Driver) Verify(ctx context.Context) error {
 	return nil
 }
 
-func (d *Driver) Open(ctx context.Context, root, resumeID string) (harness.Session, error) {
+func (d *Driver) Open(ctx context.Context, request harness.OpenRequest) (harness.Session, error) {
 	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--replay-user-messages"}
-	if resumeID != "" {
-		args = append(args, "--resume", resumeID)
+	if request.Policy == harness.PolicyReadOnly {
+		if err := d.verifyReadOnly(ctx); err != nil {
+			return nil, err
+		}
+		args = append(args, "--permission-mode", "plan")
+	} else if request.Policy != harness.PolicyDefault {
+		return nil, errors.New("claude does not support the requested execution policy")
 	}
-	process, err := harness.StartProcess(ctx, root, d.executable, args...)
+	if request.ResumeID != "" {
+		args = append(args, "--resume", request.ResumeID)
+	}
+	process, err := harness.StartProcessWithPolicy(ctx, request.Root, d.executable, request.Policy, args...)
 	if err != nil {
 		return nil, err
 	}
-	return &session{process: process, encoder: json.NewEncoder(process.Input()), sessionID: resumeID, resumed: resumeID != ""}, nil
+	return &session{process: process, encoder: json.NewEncoder(process.Input()), sessionID: request.ResumeID, resumed: request.ResumeID != ""}, nil
+}
+
+func (d *Driver) verifyReadOnly(ctx context.Context) error {
+	d.policyMu.Lock()
+	defer d.policyMu.Unlock()
+	if d.readOnlyOK {
+		return nil
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(checkCtx, d.executable, "--permission-mode", "plan", "--help")
+	command.Env = secureenv.With("HCTL_EXECUTION_POLICY", string(harness.PolicyReadOnly))
+	output, err := command.Output()
+	if err != nil || len(output) > 64<<10 || !bytes.Contains(output, []byte("--permission-mode")) || !bytes.Contains(output, []byte("plan")) {
+		return errors.New("claude did not confirm read-only plan mode support")
+	}
+	d.readOnlyOK = true
+	return nil
 }
 
 type session struct {

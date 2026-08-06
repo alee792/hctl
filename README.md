@@ -171,6 +171,10 @@ inject `HCTL_DISCORD_TOKEN`; hctl removes that variable from every child process
 An idle channel session releases its resident harness after 15 minutes by
 default while retaining its native conversation; use `--idle-timeout` to choose
 a different interval up to 24 hours. The next message resumes that conversation.
+Channel-managed Claude and Codex sessions run read-only in the shared checkout.
+When a request genuinely requires a workspace change, the agent returns an
+internal write-access result that hctl withholds from Discord; interactive,
+JSONL, and scheduled use retain their existing native policy.
 
 ## Product boundary
 

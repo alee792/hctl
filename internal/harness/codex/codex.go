@@ -37,8 +37,11 @@ func (d *Driver) Verify(ctx context.Context) error {
 	return nil
 }
 
-func (d *Driver) Open(ctx context.Context, root, resumeID string) (harness.Session, error) {
-	process, err := harness.StartProcess(ctx, root, d.executable, "app-server", "--stdio")
+func (d *Driver) Open(ctx context.Context, request harness.OpenRequest) (harness.Session, error) {
+	if request.Policy != harness.PolicyDefault && request.Policy != harness.PolicyReadOnly {
+		return nil, errors.New("codex does not support the requested execution policy")
+	}
+	process, err := harness.StartProcessWithPolicy(ctx, request.Root, d.executable, request.Policy, "app-server", "--stdio")
 	if err != nil {
 		return nil, err
 	}
@@ -53,10 +56,18 @@ func (d *Driver) Open(ctx context.Context, root, resumeID string) (harness.Sessi
 		return nil, errors.New("cannot complete Codex initialize handshake")
 	}
 	method := "thread/start"
-	params := map[string]any{"cwd": root}
-	if resumeID != "" {
+	params := map[string]any{"cwd": request.Root}
+	if request.Policy == harness.PolicyReadOnly {
+		params["sandbox"] = "read-only"
+		params["approvalPolicy"] = "never"
+	}
+	if request.ResumeID != "" {
 		method = "thread/resume"
-		params = map[string]any{"threadId": resumeID, "cwd": root}
+		params = map[string]any{"threadId": request.ResumeID, "cwd": request.Root}
+		if request.Policy == harness.PolicyReadOnly {
+			params["sandbox"] = "read-only"
+			params["approvalPolicy"] = "never"
+		}
 	}
 	threadResult, _, err := client.request(2, method, params)
 	if err != nil {
@@ -67,16 +78,31 @@ func (d *Driver) Open(ctx context.Context, root, resumeID string) (harness.Sessi
 		Thread struct {
 			ID string `json:"id"`
 		} `json:"thread"`
+		Sandbox struct {
+			Type string `json:"type"`
+		} `json:"sandbox"`
+		ApprovalPolicy string `json:"approvalPolicy"`
 	}
 	if err := json.Unmarshal(threadResult, &response); err != nil || response.Thread.ID == "" {
 		process.Abort()
 		return nil, errors.New("codex returned an invalid thread response")
 	}
-	if resumeID != "" && response.Thread.ID != resumeID {
+	if request.ResumeID != "" && response.Thread.ID != request.ResumeID {
 		process.Abort()
 		return nil, errors.New("codex resumed an unexpected thread")
 	}
-	return &session{process: process, client: client, sessionID: response.Thread.ID, resumed: resumeID != "", requestID: 3}, nil
+	if err := validateEffectivePolicy(request.Policy, response.Sandbox.Type, response.ApprovalPolicy); err != nil {
+		process.Abort()
+		return nil, err
+	}
+	return &session{process: process, client: client, sessionID: response.Thread.ID, resumed: request.ResumeID != "", requestID: 3}, nil
+}
+
+func validateEffectivePolicy(policy harness.ExecutionPolicy, sandboxType, approvalPolicy string) error {
+	if policy == harness.PolicyReadOnly && (sandboxType != "readOnly" || approvalPolicy != "never") {
+		return errors.New("codex did not enforce the requested read-only policy")
+	}
+	return nil
 }
 
 type session struct {

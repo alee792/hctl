@@ -20,9 +20,14 @@ if [ "${1-}" = "--version" ]; then
   echo "2.1.221 (Claude Code)"
   exit 0
 fi
+if [ "${1-}" = "--permission-mode" ] && [ "${2-}" = "plan" ] && [ "${3-}" = "--help" ]; then
+  echo '  --permission-mode <mode> (choices: plan)'
+  exit 0
+fi
 printf 'ARGS' >> "$FAKE_LOG"
 for arg in "$@"; do printf '\t%s' "$arg" >> "$FAKE_LOG"; done
 printf '\n' >> "$FAKE_LOG"
+printf 'POLICY\t%s\n' "$HCTL_EXECUTION_POLICY" >> "$FAKE_LOG"
 first=1
 while IFS= read -r line; do
   printf 'IN\t%s\n' "$line" >> "$FAKE_LOG"
@@ -41,7 +46,7 @@ done
 		t.Fatal(err)
 	}
 
-	session, err := driver.Open(ctx, t.TempDir(), "")
+	session, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +68,7 @@ done
 		t.Fatal(err)
 	}
 
-	resumed, err := driver.Open(ctx, t.TempDir(), result.SessionID)
+	resumed, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), ResumeID: result.SessionID, Policy: harness.PolicyDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +82,13 @@ done
 	if err := resumed.Close(); err != nil {
 		t.Fatal(err)
 	}
+	readOnly, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyReadOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := readOnly.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	log := readFile(t, logPath)
 	if !strings.Contains(log, "--resume\t11111111-1111-4111-8111-111111111111") {
@@ -84,6 +96,32 @@ done
 	}
 	if got := inputTexts(t, log); strings.Join(got, ",") != "first,second" {
 		t.Fatalf("wire inputs = %v", got)
+	}
+	if !strings.Contains(log, "--permission-mode\tplan") || !strings.Contains(log, "POLICY\tread-only") {
+		t.Fatalf("read-only policy missing:\n%s", log)
+	}
+	if _, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.ExecutionPolicy("unsupported")}); err == nil {
+		t.Fatal("unsupported Claude execution policy was accepted")
+	}
+}
+
+func TestReadOnlyOpenRequiresPlanModeCapability(t *testing.T) {
+	started := filepath.Join(t.TempDir(), "started")
+	t.Setenv("FAKE_STARTED", started)
+	executable := writeExecutable(t, `#!/bin/sh
+if [ "${1-}" = "--permission-mode" ]; then
+  exit 2
+fi
+touch "$FAKE_STARTED"
+`)
+	driver := New(executable)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyReadOnly}); err == nil || !strings.Contains(err.Error(), "plan mode support") {
+		t.Fatalf("read-only open error = %v", err)
+	}
+	if _, err := os.Stat(started); !os.IsNotExist(err) {
+		t.Fatalf("Claude session started before policy verification: %v", err)
 	}
 }
 

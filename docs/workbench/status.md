@@ -240,11 +240,20 @@ surfaces, hibernate and resume independently, and restore both assignments
 after restart. Ordinary worktree, harness, and deadline failures retire only
 the affected conversation worker; loss of dispatcher-event delivery remains a
 runtime-wide failure. Credential-free fake acceptance covers Claude and Codex.
+Startup now reconciles those durable worktrees against exact Git and generated
+ownership evidence. It preserves busy, uncertain, dirty, unmerged, missing,
+moved, foreign, and unverifiable assignments; only inactive clean branches
+already merged into the base are retired. A durable retirement marker makes
+partial cleanup retryable without broad or forced deletion, and local
+diagnostics explain preservation or recovery while Discord status stays
+redacted.
 
-Live Discord acceptance remains pending enrollment of a user-controlled bot and
-authorized guild/channel. The automated evidence uses credential-free tests;
-the runtime itself connects outbound through Discord's Gateway and needs no
-public HTTPS handoff.
+A [live Discord acceptance pass](discord-live-acceptance.md) with an enrolled
+user-controlled bot exercised independent guild and DM write promotion,
+graceful restart, preservation and reuse of both dirty managed worktrees, and
+redacted `/status` output. The broader automated evidence remains
+credential-free; the runtime connects outbound through Discord's Gateway and
+needs no public HTTPS handoff.
 
 The [maintainer task list](tasks.md) turns that frontier into a prioritized,
 permission-aware queue. It is the source for agent assignments; this section

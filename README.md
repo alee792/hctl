@@ -185,7 +185,10 @@ other conversations remain read-only. Guild and DM mutations may run
 concurrently: each keeps its own worktree, queue, native session, and response
 surface under the shared capacity limits, and an ordinary failure in one does
 not stop the other. Interactive, JSONL, and scheduled use retain their existing
-native policy.
+native policy. On restart, hctl validates every saved worktree and preserves
+anything active, queued, uncertain, dirty, unmerged, or unverifiable. It removes
+only an inactive, clean worktree whose branch is already merged into the base,
+using durable cleanup intent so an interrupted retirement can be retried safely.
 
 ## Product boundary
 

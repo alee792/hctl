@@ -1,6 +1,8 @@
 package discord
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -18,6 +20,7 @@ import (
 	"hctl/internal/harness/codex"
 	"hctl/internal/project"
 	"hctl/internal/session"
+	"hctl/internal/worktree"
 )
 
 type acceptanceDelivery struct {
@@ -43,14 +46,15 @@ func TestConcurrentDiscordMutationsUseRealHarnessAdaptersAndWorktrees(t *testing
 			} else {
 				driver = codex.New(executable)
 			}
-			runtime, err := New(p, driver, Config{
+			config := Config{
 				Token: "test.token.value", Executable: "/usr/bin/true", Audit: io.Discard,
 				TurnTimeout: 30 * time.Second, IdleTimeout: time.Hour, MaxResident: 2, MaxActive: 2,
 				Runtime: channelconfig.Profile{
 					ApplicationID: "application", BotUserID: "bot", AllowedUserID: "person",
 					AllowedGuildID: "guild", AllowedChannelID: "guild-channel",
 				},
-			})
+			}
+			runtime, err := New(p, driver, config)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -100,6 +104,98 @@ func TestConcurrentDiscordMutationsUseRealHarnessAdaptersAndWorktrees(t *testing
 			second := waitAcceptanceDelivery(t, deliveries)
 			if second.channel != "guild-channel" || second.reference != "guild-message" || second.content != "done" {
 				t.Fatalf("second out-of-order delivery = %#v", second)
+			}
+
+			// A restart must preserve both dirty worktrees and explain that local
+			// decision without exposing it through Discord status.
+			runtime.Close()
+			var audit bytes.Buffer
+			config.Audit = &audit
+			if harnessName == "claude" {
+				driver = claude.New(executable)
+			} else {
+				driver = codex.New(executable)
+			}
+			restarted, err := New(p, driver, config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restarted.Close()
+			if strings.Count(audit.String(), "dirty or untracked work") != 2 {
+				t.Fatalf("restart reconciliation diagnostics:\n%s", audit.String())
+			}
+			restartedState, err := session.Load(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restartedGuild := acceptanceConversation(restartedState, conversationID("application", "guild-channel"))
+			restartedDM := acceptanceConversation(restartedState, conversationID("application", "dm-channel"))
+			if restartedGuild == nil || restartedDM == nil || restartedGuild.WorkspaceRoot != guild.WorkspaceRoot || restartedDM.WorkspaceRoot != dm.WorkspaceRoot {
+				t.Fatalf("restart lost multi-surface worktrees: guild=%#v dm=%#v", restartedGuild, restartedDM)
+			}
+		})
+	}
+}
+
+func TestDiscordStartupRetiresOnlyProvenCleanMergedWorktree(t *testing.T) {
+	for _, harnessName := range []string{"claude", "codex"} {
+		t.Run(harnessName, func(t *testing.T) {
+			executable := writeAcceptanceExecutable(t, harnessName)
+			repo := discordAcceptanceProject(t)
+			p, err := project.Load(repo, harnessName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workspaceManager, err := worktree.New(context.Background(), p, "/usr/bin/true")
+			if err != nil {
+				t.Fatal(err)
+			}
+			conversation := conversationID("application", "guild-channel")
+			_, assignment, err := workspaceManager.Provision(context.Background(), conversation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := session.Load(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			durable, err := state.GetOrCreate(p.AgentID, harnessName, conversation, p.SourceFingerprint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			durable.WorkspaceRoot = assignment.Root
+			durable.WorktreeBranch = assignment.Branch
+			if err := session.Save(repo, state); err != nil {
+				t.Fatal(err)
+			}
+			var driver harness.Driver
+			if harnessName == "claude" {
+				driver = claude.New(executable)
+			} else {
+				driver = codex.New(executable)
+			}
+			var audit bytes.Buffer
+			runtime, err := New(p, driver, Config{
+				Token: "test.token.value", Executable: "/usr/bin/true", Audit: &audit,
+				Runtime: channelconfig.Profile{ApplicationID: "application", BotUserID: "bot", AllowedUserID: "person", AllowedGuildID: "guild", AllowedChannelID: "guild-channel"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.Close()
+			if _, err := os.Lstat(assignment.Root); !os.IsNotExist(err) {
+				t.Fatalf("clean merged worktree remains: %v", err)
+			}
+			persisted, err := session.Load(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := acceptanceConversation(persisted, conversation)
+			if got == nil || got.WorkspaceRoot != "" || got.WorktreeBranch != "" || got.WorktreeRetiring {
+				t.Fatalf("retired durable state = %#v", got)
+			}
+			if !strings.Contains(audit.String(), "retired after verifying it was inactive, clean, and merged") {
+				t.Fatalf("retirement diagnostic = %q", audit.String())
 			}
 		})
 	}

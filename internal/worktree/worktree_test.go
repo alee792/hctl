@@ -139,6 +139,339 @@ func TestResolveRefusesModifiedGeneratedSetup(t *testing.T) {
 	if _, err := manager.Resolve(context.Background(), "discord-conversation", assignment); err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
 		t.Fatalf("resolve modified generated file = %v", err)
 	}
+	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err == nil {
+		t.Fatal("modified generated setup was retired")
+	}
+	if _, err := os.Stat(assignment.Root); err != nil {
+		t.Fatalf("modified generated worktree was not preserved: %v", err)
+	}
+}
+
+func TestInspectAndRetireCleanMergedManagedWorktree(t *testing.T) {
+	repo, base := gitProject(t)
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := manager.Inspect(context.Background(), "discord-conversation", assignment)
+	if err != nil || !inspection.Clean || !inspection.Merged {
+		t.Fatalf("clean managed inspection = %+v, %v", inspection, err)
+	}
+	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(assignment.Root); !os.IsNotExist(err) {
+		t.Fatalf("retired worktree remains: %v", err)
+	}
+	if command := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+assignment.Branch); command.Run() == nil {
+		t.Fatal("retired branch remains")
+	}
+	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err != nil {
+		t.Fatalf("idempotent retirement = %v", err)
+	}
+}
+
+func TestRetireDoesNotDeleteManagedFilesTrackedInMergedBase(t *testing.T) {
+	repo, base := gitProject(t)
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, assignment.Root, "add", ".")
+	git(t, assignment.Root, "commit", "--quiet", "-m", "track generated setup")
+	git(t, repo, "merge", "--quiet", "--no-ff", "-m", "merge conversation", assignment.Branch)
+	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "CLAUDE.md")); err != nil {
+		t.Fatalf("tracked generated file was deleted from merged base: %v", err)
+	}
+}
+
+func TestInspectPreservesDirtyUntrackedAndUnmergedWorktrees(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+		clean  bool
+		merged bool
+	}{
+		{name: "untracked", mutate: func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, "untracked.txt"), []byte("work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, clean: false, merged: true},
+		{name: "unmerged", mutate: func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, "committed.txt"), []byte("work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			git(t, root, "add", ".")
+			git(t, root, "commit", "--quiet", "-m", "conversation work")
+		}, clean: true, merged: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, base := gitProject(t)
+			manager, err := New(context.Background(), base, "/usr/bin/true")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { manager.Remove(context.Background(), assignment) })
+			test.mutate(t, assignment.Root)
+			inspection, err := manager.Inspect(context.Background(), "discord-conversation", assignment)
+			if err != nil || inspection.Clean != test.clean || inspection.Merged != test.merged {
+				t.Fatalf("inspection = %+v, %v", inspection, err)
+			}
+			if err := manager.Retire(context.Background(), "discord-conversation", assignment); err == nil {
+				t.Fatal("non-disposable worktree was retired")
+			}
+			if _, err := os.Stat(assignment.Root); err != nil {
+				t.Fatalf("preserved worktree missing: %v", err)
+			}
+		})
+	}
+}
+
+func TestInspectPreservesModifiedTrackedFile(t *testing.T) {
+	repo, base := gitProject(t)
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "add", "tracked.txt")
+	git(t, repo, "commit", "--quiet", "-m", "tracked fixture")
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Remove(context.Background(), assignment) })
+	if err := os.WriteFile(filepath.Join(assignment.Root, "tracked.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := manager.Inspect(context.Background(), "discord-conversation", assignment)
+	if err != nil || inspection.Clean {
+		t.Fatalf("modified tracked inspection = %+v, %v", inspection, err)
+	}
+}
+
+func TestInspectPreservesIgnoredUntrackedWork(t *testing.T) {
+	repo, base := gitProject(t)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".hctl/\n.claude/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "add", ".gitignore")
+	git(t, repo, "commit", "--quiet", "-m", "ignore fixture")
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Remove(context.Background(), assignment) })
+	userWork := filepath.Join(assignment.Root, ".hctl", "user-work.txt")
+	if err := os.WriteFile(userWork, []byte("must survive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := manager.Inspect(context.Background(), "discord-conversation", assignment)
+	if err != nil || inspection.Clean {
+		t.Fatalf("ignored work inspection = %+v, %v", inspection, err)
+	}
+	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err == nil {
+		t.Fatal("worktree containing ignored user work was retired")
+	}
+	data, err := os.ReadFile(userWork)
+	if err != nil || string(data) != "must survive\n" {
+		t.Fatalf("ignored user work was not preserved: %q, %v", data, err)
+	}
+}
+
+func TestRetireAllowsIgnoredGeneratedDirectories(t *testing.T) {
+	repo, _ := gitProject(t)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".hctl/\n.claude/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "add", ".gitignore")
+	git(t, repo, "commit", "--quiet", "-m", "ignore generated directories")
+	base, err := project.Load(repo, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Remove(context.Background(), assignment) })
+	inspection, err := manager.Inspect(context.Background(), "discord-conversation", assignment)
+	if err != nil || !inspection.Clean || !inspection.Merged {
+		t.Fatalf("ignored generated setup inspection = %+v, %v", inspection, err)
+	}
+	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err != nil {
+		t.Fatalf("retire ignored generated setup = %v", err)
+	}
+	if _, err := os.Lstat(assignment.Root); !os.IsNotExist(err) {
+		t.Fatalf("retired worktree remains: %v", err)
+	}
+}
+
+func TestRetireResumesAfterWorktreeRemovalWasInterrupted(t *testing.T) {
+	repo, base := gitProject(t)
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "worktree", "remove", "--force", assignment.Root)
+	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err != nil {
+		t.Fatalf("resume interrupted retirement = %v", err)
+	}
+	if command := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+assignment.Branch); command.Run() == nil {
+		t.Fatal("branch remains after resumed retirement")
+	}
+}
+
+func TestRetireResumesAfterManagedSetupRemovalWasInterrupted(t *testing.T) {
+	_, base := gitProject(t)
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.RemoveWritableChannel(prepared, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err != nil {
+		t.Fatalf("resume after generated setup removal = %v", err)
+	}
+	if _, err := os.Lstat(assignment.Root); !os.IsNotExist(err) {
+		t.Fatalf("retired worktree remains: %v", err)
+	}
+}
+
+func TestRetireResumesAfterPartialManagedFileRemoval(t *testing.T) {
+	_, base := gitProject(t)
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := setup.WritableChannelFiles(prepared)
+	if err != nil || len(paths) < 2 {
+		t.Fatalf("managed setup paths = %v, %v", paths, err)
+	}
+	if err := os.Remove(filepath.Join(assignment.Root, filepath.FromSlash(paths[0]))); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err != nil {
+		t.Fatalf("resume after partial generated-file removal = %v", err)
+	}
+	if _, err := os.Lstat(assignment.Root); !os.IsNotExist(err) {
+		t.Fatalf("retired worktree remains: %v", err)
+	}
+}
+
+func TestInspectPreservesMovedDeletedAndMissingBranchAssignments(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string, Assignment) string
+	}{
+		{name: "moved", mutate: func(t *testing.T, repo string, assignment Assignment) string {
+			moved := assignment.Root + "-moved"
+			git(t, repo, "worktree", "move", assignment.Root, moved)
+			return moved
+		}},
+		{name: "deleted", mutate: func(t *testing.T, repo string, assignment Assignment) string {
+			git(t, repo, "worktree", "remove", "--force", assignment.Root)
+			return ""
+		}},
+		{name: "missing branch", mutate: func(t *testing.T, _ string, assignment Assignment) string {
+			git(t, assignment.Root, "checkout", "--detach", "--quiet")
+			git(t, assignment.Root, "branch", "-D", assignment.Branch)
+			return assignment.Root
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo, base := gitProject(t)
+			manager, err := New(context.Background(), base, "/usr/bin/true")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanupRoot := test.mutate(t, repo, assignment)
+			if cleanupRoot != "" {
+				t.Cleanup(func() {
+					git(t, repo, "worktree", "remove", "--force", cleanupRoot)
+				})
+			}
+			if _, err := manager.Inspect(context.Background(), "discord-conversation", assignment); err == nil {
+				t.Fatal("unverifiable assignment was accepted")
+			}
+		})
+	}
+}
+
+func TestReconciliationRejectsUnsafeOrForeignAssignments(t *testing.T) {
+	_, base := gitProject(t)
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Remove(context.Background(), assignment) })
+	if _, err := manager.Inspect(context.Background(), "other-conversation", assignment); err == nil {
+		t.Fatal("ownership mismatch was accepted")
+	}
+	if err := manager.Retire(context.Background(), "other-conversation", assignment); err == nil {
+		t.Fatal("foreign assignment retirement was accepted")
+	}
+	if _, err := manager.Inspect(context.Background(), "discord-conversation", Assignment{Root: filepath.Dir(assignment.Root), Branch: assignment.Branch}); err == nil {
+		t.Fatal("broad retirement target was accepted")
+	}
+
+	manager.Remove(context.Background(), assignment)
+	foreign := t.TempDir()
+	if err := os.Symlink(foreign, assignment.Root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Inspect(context.Background(), "discord-conversation", assignment); err == nil {
+		t.Fatal("symlink target was accepted")
+	}
+	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err == nil {
+		t.Fatal("symlink retirement target was accepted")
+	}
 }
 
 func TestNewRejectsNonGitWorkspace(t *testing.T) {
@@ -150,6 +483,29 @@ func TestNewRejectsNonGitWorkspace(t *testing.T) {
 	}
 	if _, err := New(context.Background(), base, "/usr/bin/true"); err == nil {
 		t.Fatal("non-Git workspace was accepted")
+	}
+}
+
+func TestManagedWorktreesSupportABaseThatIsItselfLinked(t *testing.T) {
+	repo, _ := gitProject(t)
+	linked := filepath.Join(filepath.Dir(repo), "linked-base")
+	git(t, repo, "worktree", "add", "--quiet", "-b", "linked-base", linked, "HEAD")
+	t.Cleanup(func() { git(t, repo, "worktree", "remove", "--force", linked) })
+	base, err := project.Load(linked, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := New(context.Background(), base, "/usr/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, assignment, err := manager.Provision(context.Background(), "discord-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Remove(context.Background(), assignment) })
+	if _, err := manager.Inspect(context.Background(), "discord-conversation", assignment); err != nil {
+		t.Fatalf("linked-base ownership validation = %v", err)
 	}
 }
 

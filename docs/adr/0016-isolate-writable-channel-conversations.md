@@ -51,7 +51,8 @@ would make a prompt responsible for runtime security and recovery.
   classified channel failure without retrying the user turn.
 - Generated-file ownership and stale-source protections apply inside the
   isolated checkout exactly as they do during ordinary apply.
-- Worktree lifecycle cleanup after a conversation is permanently retired is
-  deferred; resetting a surface deliberately retains its assignment.
+- Resetting a surface retains its assignment. ADR 0018 permits startup to
+  retire that checkout only after proving the conversation inactive, its
+  non-generated status clean, and its branch already merged into the base.
 - Global resident-process and active-turn capacity remains a separate runtime
   concern.

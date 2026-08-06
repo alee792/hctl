@@ -174,6 +174,71 @@ func VerifyWritableChannel(p *project.Project) error {
 	return verify(p, true)
 }
 
+// WritableChannelFiles returns the exact generated files whose current bytes
+// and modes are still proven by the writable-channel apply record.
+func WritableChannelFiles(p *project.Project) ([]string, error) {
+	if err := VerifyWritableChannel(p); err != nil {
+		return nil, err
+	}
+	meta, exists, err := readApplyRecord(p.WorkspaceRoot, applyRecordPath(p.Harness))
+	if err != nil || !exists {
+		return nil, errors.New("writable channel apply ownership is unavailable")
+	}
+	paths := make([]string, 0, len(meta.Files)+1)
+	for _, owned := range meta.Files {
+		paths = append(paths, owned.Path)
+	}
+	paths = append(paths, applyRecordPath(p.Harness))
+	return paths, nil
+}
+
+// WritableChannelRetirementFiles returns the exact owned paths while allowing
+// some of them to be absent after an interrupted, durably marked cleanup. Every
+// path still present must retain its recorded bytes and mode.
+func WritableChannelRetirementFiles(p *project.Project) ([]string, error) {
+	return writableChannelRetirementFiles(p)
+}
+
+// RemoveWritableChannel removes only files whose ownership, bytes, and modes
+// were revalidated immediately before cleanup.
+func RemoveWritableChannel(p *project.Project, retained map[string]bool) error {
+	paths, err := writableChannelRetirementFiles(p)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if retained[path] {
+			continue
+		}
+		if err := rootfs.RemoveRegular(p.WorkspaceRoot, path); err != nil {
+			return errors.New("cannot remove verified writable channel setup")
+		}
+	}
+	return nil
+}
+
+func writableChannelRetirementFiles(p *project.Project) ([]string, error) {
+	meta, exists, err := readApplyRecord(p.WorkspaceRoot, applyRecordPath(p.Harness))
+	if err != nil || !exists || meta.SchemaVersion != 3 || meta.Generator != project.GeneratorVersion || meta.AgentID != p.AgentID || meta.Source != p.SourceReference || meta.SourceFingerprint != p.SourceFingerprint || meta.Harness != p.Harness || !meta.ChannelWritable {
+		return nil, errors.New("writable channel apply ownership is unavailable")
+	}
+	seen := map[string]bool{}
+	paths := make([]string, 0, len(meta.Files))
+	for _, owned := range meta.Files {
+		if seen[owned.Path] || !allowedPath(p.Harness, owned.Path) {
+			return nil, errors.New("apply record contains an invalid path")
+		}
+		seen[owned.Path] = true
+		actual, mode, present, err := generatedState(p.WorkspaceRoot, owned.Path)
+		if err != nil || present && (actual != owned.SHA256 || uint32(mode.Perm()) != owned.Mode) {
+			return nil, fmt.Errorf("generated file %s changed during retirement; durable ownership was preserved", owned.Path)
+		}
+		paths = append(paths, owned.Path)
+	}
+	paths = append(paths, applyRecordPath(p.Harness))
+	return paths, nil
+}
+
 func verify(p *project.Project, channelWritable bool) error {
 	meta, exists, err := readApplyRecord(p.WorkspaceRoot, applyRecordPath(p.Harness))
 	if err != nil {

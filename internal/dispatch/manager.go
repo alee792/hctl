@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -49,21 +50,27 @@ type Manager struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 
-	mu        sync.Mutex
-	workers   map[string]*managedConversation
-	elevating map[string]bool
-	closed    bool
-	err       error
-	done      chan struct{}
-	doneOnce  sync.Once
-	stopped   chan struct{}
-	closeOnce sync.Once
+	mu          sync.Mutex
+	workers     map[string]*managedConversation
+	elevating   map[string]bool
+	closed      bool
+	err         error
+	done        chan struct{}
+	doneOnce    sync.Once
+	stopped     chan struct{}
+	closeOnce   sync.Once
+	diagnostics []string
 }
 
 type WorkspaceProvider interface {
 	Provision(context.Context, string) (*project.Project, worktree.Assignment, error)
 	Resolve(context.Context, string, worktree.Assignment) (*project.Project, error)
 	Remove(context.Context, worktree.Assignment)
+}
+
+type WorkspaceReconciler interface {
+	Inspect(context.Context, string, worktree.Assignment) (worktree.Inspection, error)
+	Retire(context.Context, string, worktree.Assignment) error
 }
 
 type managedConversation struct {
@@ -122,12 +129,26 @@ func newManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 	if err != nil {
 		return nil, err
 	}
+	records, recordErr := store.workspaceRecords(conversationRef{agentID: p.AgentID, harness: driver.Name()})
+	if recordErr != nil {
+		return nil, recordErr
+	}
+	if len(records) != 0 {
+		if _, ok := workspaces.(WorkspaceReconciler); !ok {
+			return nil, errors.New("persisted conversation worktrees require local Git ownership recovery before hctl can run")
+		}
+	}
 	managerCtx, cancel := context.WithCancel(ctx)
-	return &Manager{
+	manager := &Manager{
 		project: p, driver: driver, turnTimeout: turnTimeout, idleTimeout: idleTimeout, timers: timers, capacity: capacity, workspaces: workspaces, emit: emit,
 		store: store, ctx: managerCtx, cancel: cancel,
 		workers: map[string]*managedConversation{}, elevating: map[string]bool{}, done: make(chan struct{}), stopped: make(chan struct{}),
-	}, nil
+	}
+	if err := manager.reconcileWorkspaces(managerCtx); err != nil {
+		cancel()
+		return nil, err
+	}
+	return manager, nil
 }
 
 func (m *Manager) Elevate(ctx context.Context, conversation string, continuation Submission) (SubmissionResult, error) {
@@ -164,6 +185,9 @@ func (m *Manager) Elevate(ctx context.Context, conversation string, continuation
 	snapshot, err := m.store.snapshot(m.reference(conversation))
 	if err != nil {
 		return SubmissionResult{}, err
+	}
+	if snapshot.retiring {
+		return SubmissionResult{}, errors.New("conversation worktree retirement requires local recovery")
 	}
 	assignment := worktree.Assignment{Root: snapshot.workspace, Branch: snapshot.branch}
 	created := false
@@ -227,6 +251,13 @@ func (m *Manager) Submit(ctx context.Context, conversation string, submission Su
 	}
 	if elevating {
 		return SubmissionResult{}, ErrConversationBusy
+	}
+	snapshot, err := m.store.snapshot(m.reference(conversation))
+	if err != nil {
+		return SubmissionResult{}, err
+	}
+	if snapshot.retiring {
+		return SubmissionResult{}, errors.New("conversation worktree retirement requires local recovery")
 	}
 	status, duplicate, err := m.store.inputStatus(m.reference(conversation), submission.InputID)
 	if err != nil {
@@ -385,6 +416,78 @@ func (m *Manager) Capacity() CapacityStatus {
 	return m.capacity.snapshot(queued)
 }
 
+func (m *Manager) Diagnostics() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.diagnostics...)
+}
+
+func (m *Manager) reconcileWorkspaces(ctx context.Context) error {
+	reconciler, ok := m.workspaces.(WorkspaceReconciler)
+	if !ok {
+		return nil
+	}
+	records, err := m.store.workspaceRecords(m.reference(""))
+	if err != nil {
+		return err
+	}
+	claims := make(map[worktree.Assignment]int, len(records))
+	for _, record := range records {
+		claims[record.assignment]++
+	}
+	for _, record := range records {
+		ref := conversationRef{agentID: m.project.AgentID, harness: m.driver.Name(), id: record.conversation, fingerprint: record.fingerprint}
+		if claims[record.assignment] != 1 {
+			_, inspectErr := reconciler.Inspect(ctx, record.conversation, record.assignment)
+			detail := "multiple durable conversations claim this assignment"
+			if inspectErr != nil {
+				detail += "; ownership also could not be verified: " + inspectErr.Error()
+			}
+			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved: %s; repair durable ownership locally", record.assignment.Root, detail))
+			continue
+		}
+		if record.retiring {
+			if err := reconciler.Retire(ctx, record.conversation, record.assignment); err != nil {
+				m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved after interrupted cleanup: %v; repair the exact target and restart hctl", record.assignment.Root, err))
+				continue
+			}
+			if err := m.store.clearRetiredWorkspace(ref, record.assignment); err != nil {
+				return err
+			}
+			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s retirement completed after interrupted cleanup", record.assignment.Root))
+			continue
+		}
+		inspection, err := reconciler.Inspect(ctx, record.conversation, record.assignment)
+		if err != nil {
+			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved because ownership could not be verified: %v; repair it locally before this conversation can resume", record.assignment.Root, err))
+			continue
+		}
+		reason := inspection.Reason
+		switch {
+		case record.busy:
+			reason = "active or queued durable work"
+		case record.uncertain:
+			reason = "uncertain recovered work"
+		}
+		if record.busy || record.uncertain || !inspection.Clean || !inspection.Merged {
+			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved: %s", record.assignment.Root, reason))
+			continue
+		}
+		if err := m.store.markWorkspaceRetiring(ref); err != nil {
+			return err
+		}
+		if err := reconciler.Retire(ctx, record.conversation, record.assignment); err != nil {
+			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s cleanup was interrupted: %v; durable ownership was preserved for retry", record.assignment.Root, err))
+			continue
+		}
+		if err := m.store.clearRetiredWorkspace(ref, record.assignment); err != nil {
+			return err
+		}
+		m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s retired after verifying it was inactive, clean, and merged", record.assignment.Root))
+	}
+	return nil
+}
+
 func statusFromSnapshot(snapshot conversationSnapshot, admissions int, resident bool) ConversationStatus {
 	pending := max(snapshot.queueLen, admissions)
 	status := ConversationStatus{State: LifecycleIdle, Pending: pending}
@@ -466,6 +569,10 @@ func (m *Manager) Reset(conversation string) error {
 		if !snapshot.exists {
 			m.mu.Unlock()
 			return nil
+		}
+		if snapshot.retiring {
+			m.mu.Unlock()
+			return errors.New("conversation worktree retirement requires local recovery")
 		}
 		if snapshot.queueLen != 0 {
 			m.mu.Unlock()

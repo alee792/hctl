@@ -259,8 +259,9 @@ directory, applies the selected agent there, resumes the same native session
 with workspace-write access, and submits one internal continuation of the
 original request. The control result and continuation are never Discord
 messages. The owner-only dispatch state records only the validated worktree
-root and branch. Later turns and restarts reuse that assignment; other
-conversations remain read-only in the shared checkout. A non-Git workspace,
+root and branch. Later turns and restarts reuse that assignment unless the
+startup retirement rules below prove it disposable; other conversations remain
+read-only in the shared checkout. A non-Git workspace,
 identity mismatch, unsafe assignment, or modified generated file fails without
 changing the shared checkout or ambiguously retrying the turn. `/new` starts a
 fresh native session while retaining an existing isolated workspace.
@@ -272,6 +273,16 @@ turn-deadline failure retires only that conversation's current worker and
 preserves the other conversations' state and execution. Failure to deliver
 dispatcher events is runtime-wide and still stops admission because the
 channel can no longer account for outcomes safely.
+
+At startup, hctl validates every durable worktree assignment before admitting
+turns. Active, queued, uncertain, dirty, untracked, unmerged, missing, moved,
+foreign, and otherwise unverifiable assignments are preserved with local
+operator diagnostics. Only an inactive worktree with verified generated setup,
+no non-generated changes, and a branch already reachable from the base
+checkout's `HEAD` is retired automatically. Durable retirement intent precedes
+narrow cleanup of the exact worktree and branch; partial failure retains the
+assignment for idempotent retry and blocks only that conversation. Discord
+status remains path- and identifier-free.
 
 The optional root `schedules/` directory contains nested Markdown task files.
 The bounded, valid UTF-8 path beneath `schedules/`, without `.md`, is the
@@ -573,6 +584,9 @@ The MVP is complete when credential-free tests prove:
     sessions for both Claude and Codex, survive independent hibernation and
     restart, deliver out-of-order results only to their originating surfaces,
     and contain ordinary harness or worktree failures to one conversation.
+19. Startup reconciliation preserves every worktree that is busy, uncertain,
+    dirty, unmerged, or unverifiable and retires only exact clean merged
+    assignments through restart-safe, idempotent cleanup.
 
 ## Explicit non-goals
 

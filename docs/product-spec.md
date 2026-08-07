@@ -248,7 +248,14 @@ and removes the token from every child-process environment.
 
 `hctl run` auto-applies missing or stale setup, then serves the authorized user
 in one guild channel and DM. Each surface has independent durable dispatcher
-state. One deterministic managed-session lifecycle owns each surface's queue,
+state. A transport-neutral channel controller owns surface registration,
+pending-turn correlation, complete-response buffering and control-result
+handling, typing readiness, terminal classification, status/reset delegation,
+and dispatcher lifecycle. The Discord adapter retains Gateway/REST integration,
+authorization, native event filtering, reply references, rendering, mentions,
+commands, and delivery semantics. Transport-owned reply targets remain
+process-local and vendor payloads never enter dispatcher or durable state. One
+deterministic managed-session lifecycle owns each surface's queue,
 native session mapping, and resident harness process, while a shared state
 owner serializes durable updates across surfaces. Other users, channels, bots,
 and webhooks are ignored. Output is buffered until completion, exact
@@ -454,11 +461,13 @@ compatibility, if that file is absent, hctl validates an existing owner-only
 and removes the old regular file. When both paths exist, the dispatch path is
 authoritative.
 
-The local stdin adapter and conversational Discord Gateway adapter share the same
-typed submission and event seam. The JSONL input adapter remains the reference
-for durable state and event semantics. Other vendor channels, generic webhooks,
-OAuth, proactive delivery, and public listener management remain outside the
-MVP.
+The local stdin adapter and transport-neutral channel controller share the turn
+dispatcher's typed submission and event seam. Built-in vendor adapters use the
+controller's normalized inbound-message and semantic-outcome interface; this is
+not a public plugin ABI or a rich component schema. The JSONL input adapter
+remains the reference for durable state and event semantics. Other vendor
+channels, generic webhooks, OAuth, proactive delivery, and public listener
+management remain outside the MVP.
 
 ## Managed tool boundary
 

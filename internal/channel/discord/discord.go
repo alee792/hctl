@@ -13,25 +13,21 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/gofrs/flock"
 
+	"hctl/internal/channel/controller"
 	"hctl/internal/channelconfig"
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
 	"hctl/internal/project"
-	"hctl/internal/worktree"
 )
 
 const (
-	NoReply            = channelconfig.NoReplyResult
-	RequestWriteAccess = channelconfig.RequestWriteAccessResult
-	maxOutputRunes     = 6*2000 - 64
-	maxChunks          = 6
-	defaultTurnLimit   = 2 * time.Minute
-	defaultIdleLimit   = dispatch.DefaultIdleTimeout
+	maxChunks        = 6
+	defaultTurnLimit = 2 * time.Minute
+	defaultIdleLimit = dispatch.DefaultIdleTimeout
 )
 
 type Identity struct {
@@ -52,53 +48,35 @@ type Config struct {
 	Executable  string
 }
 
-type pendingTurn struct {
-	channelID string
-	messageID string
-	outputs   []*bufferedOutput
-	byItem    map[string]*bufferedOutput
-	runes     int
-	truncated bool
-}
-
-type bufferedOutput struct {
-	itemID string
-	text   strings.Builder
-}
-
-type surface struct {
-	id           string
-	conversation string
-	turns        map[string]*pendingTurn
-}
-
-type conversationManager interface {
-	Submit(context.Context, string, dispatch.Submission) (dispatch.SubmissionResult, error)
-	Elevate(context.Context, string, dispatch.Submission) (dispatch.SubmissionResult, error)
-	Status(string) dispatch.ConversationStatus
-	Capacity() dispatch.CapacityStatus
-	Reset(string) error
+type channelController interface {
+	Submit(context.Context, controller.Inbound) (dispatch.SubmissionResult, error)
+	Status(string) controller.Status
+	Reset(string, string) error
 	Done() <-chan struct{}
 	Err() error
 	Close()
 }
 
-type Runtime struct {
-	project *project.Project
-	driver  harness.Driver
-	config  Config
-	session *discordgo.Session
-	ctx     context.Context
-	cancel  context.CancelFunc
-	manager conversationManager
-	deliver func(string, *discordgo.MessageSend) error
-	typing  func(string) error
+type replyTarget struct {
+	channelID string
+	messageID string
+}
 
-	mu             sync.Mutex
-	surfaces       map[string]*surface
-	byConversation map[string]*surface
-	closed         bool
-	lock           *flock.Flock
+type Runtime struct {
+	project             *project.Project
+	driver              harness.Driver
+	config              Config
+	session             *discordgo.Session
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	controller          channelController
+	deliver             func(string, *discordgo.MessageSend) error
+	typing              func(string) error
+	interactionResponse func(*discordgo.Interaction, string)
+
+	mu     sync.Mutex
+	closed bool
+	lock   *flock.Flock
 }
 
 func ValidateIdentity(ctx context.Context, token string) (Identity, error) {
@@ -205,38 +183,29 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 	ctx, cancel := context.WithCancel(context.Background())
 	runtime := &Runtime{
 		project: p, driver: driver, config: config, session: s, ctx: ctx, cancel: cancel,
-		surfaces: map[string]*surface{}, byConversation: map[string]*surface{},
 	}
 	runtime.deliver = func(channelID string, message *discordgo.MessageSend) error {
 		_, err := s.ChannelMessageSendComplex(channelID, message)
 		return err
 	}
 	runtime.typing = func(channelID string) error { return s.ChannelTyping(channelID) }
-	emit := func(conversation string, event dispatch.Event) error {
-		runtime.handleDispatch(conversation, event)
-		return nil
-	}
-	workspaceManager, _ := worktree.New(ctx, p, config.Executable)
-	var manager *dispatch.Manager
-	if workspaceManager != nil {
-		manager, err = dispatch.NewManagerWithWorkspaceAndLimits(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, workspaceManager)
-	} else {
-		manager, err = dispatch.NewManagerWithLimits(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit)
-	}
+	channelController, err := controller.New(ctx, controller.Config{
+		Project: p, Driver: driver, TurnTimeout: config.TurnTimeout, IdleTimeout: config.IdleTimeout,
+		MaxResident: config.MaxResident, MaxActive: config.MaxActive, Executable: config.Executable,
+		Audit: config.Audit, AuditPrefix: "Discord",
+	}, runtime)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	for _, diagnostic := range manager.Diagnostics() {
-		_, _ = fmt.Fprintf(config.Audit, "Discord worktree reconciliation: %s\n", diagnostic)
-	}
-	runtime.manager = manager
+	runtime.controller = channelController
 	s.AddHandler(runtime.handleMessage)
 	s.AddHandler(runtime.handleInteraction)
 	return runtime, nil
 }
 
 func (r *Runtime) Run(ctx context.Context) error {
+	defer r.Close()
 	identity, err := ValidateIdentity(ctx, r.config.Token)
 	if err != nil {
 		return err
@@ -260,15 +229,14 @@ func (r *Runtime) Run(ctx context.Context) error {
 	if err := r.session.Open(); err != nil {
 		return errors.New("cannot connect to the Discord Gateway")
 	}
-	defer r.Close()
 	_, _ = fmt.Fprintf(r.config.Audit, "Discord connected profile=%s agent=%s\n", r.config.Profile, r.project.Name)
 	select {
 	case <-ctx.Done():
 		return nil
 	case <-r.ctx.Done():
 		return nil
-	case <-r.manager.Done():
-		return r.manager.Err()
+	case <-r.controller.Done():
+		return r.controller.Err()
 	}
 }
 
@@ -282,17 +250,12 @@ func (r *Runtime) Close() {
 	r.mu.Unlock()
 	r.cancel()
 	_ = r.session.Close()
-	r.manager.Close()
+	r.controller.Close()
 }
 
 func (r *Runtime) handleMessage(_ *discordgo.Session, incoming *discordgo.MessageCreate) {
 	profile := r.config.Runtime
 	if !eligibleMessage(profile, incoming) {
-		return
-	}
-	surfaceID := incoming.ChannelID
-	current, err := r.surface(surfaceID)
-	if err != nil {
 		return
 	}
 	surfaceKind := "guild"
@@ -307,23 +270,13 @@ func (r *Runtime) handleMessage(_ *discordgo.Session, incoming *discordgo.Messag
 	if err != nil {
 		return
 	}
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return
-	}
-	current.turns[incoming.ID] = &pendingTurn{channelID: incoming.ChannelID, messageID: incoming.ID}
-	r.mu.Unlock()
-	result, err := r.manager.Submit(r.ctx, current.conversation, dispatch.Submission{InputID: incoming.ID, Text: "Discord message (JSON):\n" + string(text)})
+	_, err = r.controller.Submit(r.ctx, controller.Inbound{
+		SurfaceID: incoming.ChannelID, ConversationID: conversationID(r.config.Runtime.ApplicationID, incoming.ChannelID),
+		InputID: incoming.ID, Text: "Discord message (JSON):\n" + string(text),
+		Target: replyTarget{channelID: incoming.ChannelID, messageID: incoming.ID},
+	})
 	if err != nil {
-		r.drop(current, incoming.ID)
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, dispatch.ErrManagerClosed) {
-			r.sendTurn(incoming.ID, &pendingTurn{channelID: incoming.ChannelID, messageID: incoming.ID}, []string{"I couldn't handle that request in this conversation. Please try again."}, false)
-		}
 		return
-	}
-	if result.Status != "queued" && result.Status != "active" && result.Status != "completed" {
-		r.drop(current, incoming.ID)
 	}
 }
 
@@ -374,10 +327,10 @@ func (r *Runtime) handleInteraction(_ *discordgo.Session, incoming *discordgo.In
 		if incoming.GuildID == "" {
 			surfaceKind = "dm"
 		}
-		status := r.manager.Status(conversationID(r.config.Runtime.ApplicationID, incoming.ChannelID))
-		r.respond(incoming.Interaction, statusMessage(r.project.Name, r.driver.Name(), surfaceKind, status, r.manager.Capacity()))
+		status := r.controller.Status(conversationID(r.config.Runtime.ApplicationID, incoming.ChannelID))
+		r.respond(incoming.Interaction, statusMessage(r.project.Name, r.driver.Name(), surfaceKind, status.Conversation, status.Capacity))
 	case "new":
-		if err := r.resetSurface(incoming.ChannelID); err != nil {
+		if err := r.controller.Reset(incoming.ChannelID, conversationID(r.config.Runtime.ApplicationID, incoming.ChannelID)); err != nil {
 			r.respond(incoming.Interaction, "The conversation is busy. Try again after current work finishes.")
 			return
 		}
@@ -385,174 +338,58 @@ func (r *Runtime) handleInteraction(_ *discordgo.Session, incoming *discordgo.In
 	}
 }
 
-func (r *Runtime) surface(id string) (*surface, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if current := r.surfaces[id]; current != nil {
-		return current, nil
+func (r *Runtime) Typing(target any) error {
+	reply, ok := target.(replyTarget)
+	if !ok || r.typing == nil {
+		return nil
 	}
-	conversation := conversationID(r.config.Runtime.ApplicationID, id)
-	current := &surface{id: id, conversation: conversation, turns: map[string]*pendingTurn{}}
-	r.surfaces[id] = current
-	r.byConversation[conversation] = current
-	return current, nil
+	return r.typing(reply.channelID)
 }
 
-func (r *Runtime) handleDispatch(conversation string, event dispatch.Event) {
-	r.mu.Lock()
-	current := r.byConversation[conversation]
-	if current == nil {
-		r.mu.Unlock()
-		return
+func (r *Runtime) Deliver(outcome controller.Outcome) error {
+	reply, ok := outcome.Target.(replyTarget)
+	if !ok {
+		return errors.New("discord reply target is invalid")
 	}
-	turn := current.turns[event.InputID]
-	if turn == nil {
-		r.mu.Unlock()
-		return
+	parts := outcome.Parts
+	if outcome.Failure != controller.FailureNone {
+		parts = []string{discordFailureMessage(outcome.Failure)}
 	}
-	if event.Type == "agent.output.delta" {
-		appendBounded(turn, event.ItemID, event.Delta)
-		showTyping := visibleReplyDecided(combinedOutput(turn))
-		r.mu.Unlock()
-		if showTyping && r.typing != nil {
-			_ = r.typing(turn.channelID)
-		}
-		return
-	}
-	if !event.Terminal() {
-		r.mu.Unlock()
-		return
-	}
-	content := strings.TrimSpace(combinedOutput(turn))
-	parts := outputParts(turn)
-	truncated := turn.truncated
-	if event.Type == "turn.completed" && suppressedControl(content) == RequestWriteAccess && !strings.HasSuffix(event.InputID, ":write") {
-		delete(current.turns, event.InputID)
-		continuationID := event.InputID + ":write"
-		current.turns[continuationID] = &pendingTurn{channelID: turn.channelID, messageID: turn.messageID}
-		r.mu.Unlock()
-		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn suppressed input_id=%s class=write_access_requested\n", event.InputID)
-		go r.continueWritable(current, continuationID)
-		return
-	}
-	delete(current.turns, event.InputID)
-	r.mu.Unlock()
-	if suppressedControl(content) == NoReply {
-		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn suppressed input_id=%s class=no_reply\n", event.InputID)
-		return
-	}
-	if suppressedControl(content) == RequestWriteAccess {
-		content = "I couldn't continue that request with write access."
-		parts = []string{content}
-	}
-	if content == "" {
-		_, _ = fmt.Fprintf(r.config.Audit, "Discord turn empty input_id=%s class=%s\n", event.InputID, event.Type)
-		content = discordTerminalMessage(event.Type)
-		parts = []string{content}
-	}
-	r.sendTurn(event.InputID, turn, parts, truncated)
-}
-
-func (r *Runtime) sendTurn(inputID string, turn *pendingTurn, parts []string, truncated bool) {
-	chunks := responseMessages(parts, truncated)
+	chunks := responseMessages(parts, outcome.Truncated)
 	for index, chunk := range chunks {
 		message := &discordgo.MessageSend{Content: chunk, AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}}
 		if index == 0 {
 			failIfMissing := false
-			message.Reference = &discordgo.MessageReference{MessageID: turn.messageID, ChannelID: turn.channelID, FailIfNotExists: &failIfMissing}
+			message.Reference = &discordgo.MessageReference{MessageID: reply.messageID, ChannelID: reply.channelID, FailIfNotExists: &failIfMissing}
 		}
-		if err := r.deliver(turn.channelID, message); err != nil {
-			_, _ = fmt.Fprintf(r.config.Audit, "Discord delivery failed input_id=%s class=uncertain\n", inputID)
-			return
+		if err := r.deliver(reply.channelID, message); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
-func (r *Runtime) continueWritable(current *surface, inputID string) {
-	result, err := r.manager.Elevate(r.ctx, current.conversation, dispatch.Submission{InputID: inputID, Text: channelconfig.WriteContinuationPrompt})
-	if err == nil && (result.Status == "queued" || result.Status == "active") {
-		return
-	}
-	if err == nil && result.Status == "completed" {
-		r.drop(current, inputID)
-		return
-	}
-	r.mu.Lock()
-	turn := current.turns[inputID]
-	delete(current.turns, inputID)
-	r.mu.Unlock()
-	_, _ = fmt.Fprintf(r.config.Audit, "Discord elevation failed input_id=%s class=workspace_failure\n", inputID)
-	if turn != nil {
-		r.sendTurn(inputID, turn, []string{"I couldn't safely create a writable workspace for that request."}, false)
-	}
-}
-
-func suppressedControl(output string) string {
-	switch strings.TrimSpace(output) {
-	case NoReply:
-		return NoReply
-	case RequestWriteAccess:
-		return RequestWriteAccess
-	default:
-		return ""
-	}
-}
-
-func discordTerminalMessage(eventType string) string {
-	switch eventType {
-	case "turn.failed", "driver.process_failed":
+func discordFailureMessage(failure controller.Failure) string {
+	switch failure {
+	case controller.FailureAdmission:
+		return "I couldn't handle that request in this conversation. Please try again."
+	case controller.FailureProcess:
 		return "I hit an error while handling that. Please try again."
-	case "turn.cancelled":
+	case controller.FailureCancelled:
 		return "That request was cancelled."
-	case "turn.uncertain":
+	case controller.FailureUncertain:
 		return "I lost track of that response during recovery. Please try again."
+	case controller.FailureWriteAccess:
+		return "I couldn't continue that request with write access."
+	case controller.FailureWorkspace:
+		return "I couldn't safely create a writable workspace for that request."
 	default:
 		return "I couldn't produce a response. Please try again."
 	}
 }
 
-func visibleReplyDecided(output string) bool {
-	candidate := strings.TrimLeftFunc(output, unicode.IsSpace)
-	if candidate == "" {
-		return false
-	}
-	for _, control := range []string{NoReply, RequestWriteAccess} {
-		if strings.HasPrefix(control, candidate) {
-			return false
-		}
-	}
-	return true
-}
-
 func statusMessage(agent, harnessName, surfaceKind string, status dispatch.ConversationStatus, capacity dispatch.CapacityStatus) string {
 	return fmt.Sprintf("hctl is online: agent=%s harness=%s surface=%s state=%s pending=%d active=%d/%d resident=%d/%d queued=%d", agent, harnessName, surfaceKind, status.State, status.Pending, capacity.Active, capacity.ActiveLimit, capacity.Resident, capacity.ResidentLimit, capacity.Queued)
-}
-
-func (r *Runtime) resetSurface(id string) error {
-	r.mu.Lock()
-	current := r.surfaces[id]
-	if current != nil && len(current.turns) != 0 {
-		r.mu.Unlock()
-		return errors.New("busy")
-	}
-	r.mu.Unlock()
-	conversation := conversationID(r.config.Runtime.ApplicationID, id)
-	if err := r.manager.Reset(conversation); err != nil {
-		return err
-	}
-	r.mu.Lock()
-	if r.surfaces[id] == current {
-		delete(r.surfaces, id)
-		delete(r.byConversation, conversation)
-	}
-	r.mu.Unlock()
-	return nil
-}
-
-func (r *Runtime) drop(current *surface, inputID string) {
-	r.mu.Lock()
-	delete(current.turns, inputID)
-	r.mu.Unlock()
 }
 
 func (r *Runtime) registerCommands(applicationID string) error {
@@ -564,6 +401,10 @@ func (r *Runtime) registerCommands(applicationID string) error {
 }
 
 func (r *Runtime) respond(interaction *discordgo.Interaction, content string) {
+	if r.interactionResponse != nil {
+		r.interactionResponse(interaction, content)
+		return
+	}
 	_ = r.session.InteractionRespond(interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral, AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}}})
 }
 
@@ -582,53 +423,6 @@ func applicationLock(applicationID string) (*flock.Flock, error) {
 func conversationID(applicationID, channelID string) string {
 	digest := sha256.Sum256([]byte(applicationID + ":" + channelID))
 	return "discord-" + hex.EncodeToString(digest[:12])
-}
-
-func appendBounded(turn *pendingTurn, itemID, value string) {
-	if turn.truncated || value == "" {
-		return
-	}
-	if itemID == "" {
-		itemID = "default"
-	}
-	if turn.byItem == nil {
-		turn.byItem = map[string]*bufferedOutput{}
-	}
-	output := turn.byItem[itemID]
-	if output == nil {
-		output = &bufferedOutput{itemID: itemID}
-		turn.byItem[itemID] = output
-		turn.outputs = append(turn.outputs, output)
-	}
-	remaining := maxOutputRunes - turn.runes
-	for index := range value {
-		if remaining == 0 {
-			output.text.WriteString(value[:index])
-			turn.truncated = true
-			return
-		}
-		remaining--
-		turn.runes++
-	}
-	output.text.WriteString(value)
-}
-
-func combinedOutput(turn *pendingTurn) string {
-	values := make([]string, 0, len(turn.outputs))
-	for _, output := range turn.outputs {
-		values = append(values, output.text.String())
-	}
-	return strings.Join(values, "\n\n")
-}
-
-func outputParts(turn *pendingTurn) []string {
-	values := make([]string, 0, len(turn.outputs))
-	for _, output := range turn.outputs {
-		if value := strings.TrimSpace(output.text.String()); value != "" {
-			values = append(values, value)
-		}
-	}
-	return values
 }
 
 func responseMessages(parts []string, truncated bool) []string {

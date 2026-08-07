@@ -33,6 +33,7 @@ files, CLI guidance, or product documentation.
 | Managed tool | A tool whose requests cross an hctl-owned validation, policy, execution, and audit boundary. |
 | Native tool | A harness-provided tool that remains available but is not governed or observed by hctl. |
 | Turn dispatcher | The optional headless boundary that connects input to a resumable native-harness session. |
+| Channel controller | The internal transport-neutral module that correlates normalized channel input with dispatcher events and produces semantic delivery outcomes. Vendor adapters retain credentials, native payload decoding, rendering, commands, and delivery. It is not a public plugin interface or model loop. |
 | Session | One resumable interaction context owned by the native harness and mapped by the turn dispatcher when used headlessly. |
 | Managed session lifecycle | The deterministic runtime ownership of one external conversation's dispatcher worker, durable queue, native session mapping, and at most one resident harness process. It can hibernate an idle resident process while retaining the resumable native session; it coordinates work but is not a model loop or supervisor agent. |
 | Capacity coordinator | The deterministic runtime-wide admission boundary that limits resident managed sessions and active turns, fairly grants queued conversations, and requests idle hibernation under pressure. It is not a model scheduler. |

@@ -151,10 +151,14 @@ a generated custom subagent, and session resume in a fresh external workspace.
   application and identity to one authorized user, guild channel, and DM;
   credentials remain in the OS credential store. `hctl run` auto-applies stale
   setup, buffers responses for exact no-reply suppression, and exposes `/new`
-  and `/status` without requiring a public listener or tunnel. A deterministic
-  session manager owns one dispatcher worker and at most one resident harness
-  process per conversation, and serializes durable state updates across
-  surfaces.
+  and `/status` without requiring a public listener or tunnel. A
+  transport-neutral channel controller now owns reusable surface registration,
+  pending-turn correlation, buffering, exact controls, one-time elevation,
+  typing readiness, failure classification, and lifecycle delegation. Discord
+  retains its Gateway/REST adapter, native rendering, commands, and delivery
+  semantics. A deterministic session manager owns one dispatcher worker and at
+  most one resident harness process per conversation, and serializes durable
+  state updates across surfaces.
 - Root-agent Markdown schedules follow Eve's nested `schedules/` convention:
   strict frontmatter contains one valid standard five-field cron string and the
   body is the task prompt. Apply starts no clock. `hctl schedule trigger`

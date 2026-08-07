@@ -2,18 +2,17 @@ package discord
 
 import (
 	"context"
-	"errors"
-	"io"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 
+	"hctl/internal/channel/controller"
 	"hctl/internal/channelconfig"
 	"hctl/internal/dispatch"
+	"hctl/internal/harness/codex"
+	"hctl/internal/project"
 )
 
 func TestValidateProfilePinsTokenIdentity(t *testing.T) {
@@ -51,8 +50,7 @@ func TestEligibleMessageFailsClosed(t *testing.T) {
 }
 
 func TestDirectMessageClassification(t *testing.T) {
-	dm := &discordgo.MessageCreate{Message: &discordgo.Message{GuildID: ""}}
-	if !directMessage("222", dm) {
+	if !directMessage("222", &discordgo.MessageCreate{Message: &discordgo.Message{}}) {
 		t.Fatal("DM was not direct")
 	}
 	mention := &discordgo.MessageCreate{Message: &discordgo.Message{GuildID: "111", Mentions: []*discordgo.User{{ID: "222"}}}}
@@ -75,15 +73,112 @@ func TestConversationIDIsStableAndOpaque(t *testing.T) {
 	}
 }
 
-func TestAppendAndChunkBounded(t *testing.T) {
-	turn := &pendingTurn{}
-	appendBounded(turn, "message-1", strings.Repeat("a", maxOutputRunes+10))
-	if !turn.truncated || turn.runes != maxOutputRunes {
-		t.Fatalf("turn = %+v", turn)
+func TestDiscordMapsEligibleMessageToNormalizedInput(t *testing.T) {
+	fake := newFakeChannelController()
+	runtime := testRuntime(fake)
+	incoming := &discordgo.MessageCreate{Message: &discordgo.Message{
+		ID: "message-1", Content: "please check", ChannelID: "555", GuildID: "444",
+		Author: &discordgo.User{ID: "333"}, Mentions: []*discordgo.User{{ID: "222"}},
+	}}
+	runtime.handleMessage(nil, incoming)
+	if len(fake.inputs) != 1 {
+		t.Fatalf("normalized inputs = %#v", fake.inputs)
 	}
-	chunks := responseMessages(outputParts(turn), turn.truncated)
-	if len(chunks) != maxChunks {
-		t.Fatalf("chunks = %d", len(chunks))
+	got := fake.inputs[0]
+	if got.SurfaceID != "555" || got.ConversationID != conversationID("111", "555") || got.InputID != "message-1" {
+		t.Fatalf("normalized input = %#v", got)
+	}
+	if !strings.Contains(got.Text, `"platform":"discord"`) || !strings.Contains(got.Text, `"direct":true`) || !strings.Contains(got.Text, `"content":"please check"`) {
+		t.Fatalf("normalized text = %q", got.Text)
+	}
+	if got.Target != (replyTarget{channelID: "555", messageID: "message-1"}) {
+		t.Fatalf("reply target = %#v", got.Target)
+	}
+}
+
+func TestDiscordRendersAdmissionFailureAgainstTriggeringMessage(t *testing.T) {
+	runtime := testRuntime(newFakeChannelController())
+	var delivered []*discordgo.MessageSend
+	runtime.deliver = func(_ string, message *discordgo.MessageSend) error {
+		delivered = append(delivered, message)
+		return nil
+	}
+	if err := runtime.Deliver(controller.Outcome{InputID: "message-1", Target: replyTarget{channelID: "555", messageID: "message-1"}, Failure: controller.FailureAdmission}); err != nil {
+		t.Fatal(err)
+	}
+	if len(delivered) != 1 || delivered[0].Reference == nil || delivered[0].Reference.MessageID != "message-1" || !strings.Contains(delivered[0].Content, "this conversation") {
+		t.Fatalf("failure delivery = %#v", delivered)
+	}
+}
+
+func TestDiscordRendersSafeTerminalFailureMessages(t *testing.T) {
+	tests := map[controller.Failure]string{
+		controller.FailureProcess:   "hit an error",
+		controller.FailureCancelled: "was cancelled",
+		controller.FailureUncertain: "lost track",
+		controller.FailureNoOutput:  "couldn't produce",
+	}
+	for failure, phrase := range tests {
+		t.Run(string(failure), func(t *testing.T) {
+			runtime := testRuntime(newFakeChannelController())
+			var content string
+			runtime.deliver = func(_ string, message *discordgo.MessageSend) error {
+				content = message.Content
+				return nil
+			}
+			if err := runtime.Deliver(controller.Outcome{InputID: "input", Target: replyTarget{channelID: "channel", messageID: "message"}, Parts: []string{"unsafe partial"}, Failure: failure}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(content, phrase) || strings.Contains(content, "unsafe partial") {
+				t.Fatalf("failure content = %q", content)
+			}
+		})
+	}
+}
+
+func TestDiscordRendersNativeReplyWithReferencesAndDisabledMentions(t *testing.T) {
+	runtime := testRuntime(newFakeChannelController())
+	type delivery struct {
+		channel string
+		message *discordgo.MessageSend
+	}
+	var delivered []delivery
+	runtime.deliver = func(channel string, message *discordgo.MessageSend) error {
+		delivered = append(delivered, delivery{channel: channel, message: message})
+		return nil
+	}
+	err := runtime.Deliver(controller.Outcome{
+		InputID: "input", Target: replyTarget{channelID: "channel", messageID: "message"}, Parts: []string{"I'll check that.", "Yes, origin is configured."},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(delivered) != 2 || delivered[0].channel != "channel" || delivered[0].message.Content != "I'll check that." || delivered[1].message.Content != "Yes, origin is configured." {
+		t.Fatalf("deliveries = %#v", delivered)
+	}
+	if delivered[0].message.Reference == nil || delivered[0].message.Reference.MessageID != "message" || delivered[1].message.Reference != nil {
+		t.Fatalf("references = %#v %#v", delivered[0].message.Reference, delivered[1].message.Reference)
+	}
+	for _, got := range delivered {
+		if got.message.AllowedMentions == nil || len(got.message.AllowedMentions.Parse) != 0 {
+			t.Fatalf("mentions were not disabled: %#v", got.message.AllowedMentions)
+		}
+	}
+}
+
+func TestDiscordChunksBoundedOutcome(t *testing.T) {
+	runtime := testRuntime(newFakeChannelController())
+	var chunks []string
+	runtime.deliver = func(_ string, message *discordgo.MessageSend) error {
+		chunks = append(chunks, message.Content)
+		return nil
+	}
+	err := runtime.Deliver(controller.Outcome{Target: replyTarget{channelID: "channel", messageID: "message"}, Parts: []string{strings.Repeat("a", controller.DefaultMaxOutputRunes)}, Truncated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != maxChunks || !strings.HasSuffix(chunks[len(chunks)-1], "[output truncated]") {
+		t.Fatalf("chunks = %d, last = %q", len(chunks), chunks[len(chunks)-1])
 	}
 	for _, chunk := range chunks {
 		if len([]rune(chunk)) > 2000 {
@@ -92,223 +187,18 @@ func TestAppendAndChunkBounded(t *testing.T) {
 	}
 }
 
-func TestAssistantMessageItemsRemainSeparate(t *testing.T) {
-	turn := &pendingTurn{}
-	appendBounded(turn, "message-1", "I'll check that.")
-	appendBounded(turn, "message-2", "Yes, origin is configured.")
-	appendBounded(turn, "message-2", " It uses GitHub.")
-	messages := responseMessages(outputParts(turn), turn.truncated)
-	if len(messages) != 2 || messages[0] != "I'll check that." || messages[1] != "Yes, origin is configured. It uses GitHub." {
-		t.Fatalf("messages = %#v", messages)
+func TestDiscordTypingUsesTransportTarget(t *testing.T) {
+	runtime := testRuntime(newFakeChannelController())
+	var channels []string
+	runtime.typing = func(channel string) error {
+		channels = append(channels, channel)
+		return nil
 	}
-}
-
-func TestNoReplyIsExact(t *testing.T) {
-	if suppressedControl("  "+NoReply+"\n") != NoReply {
-		t.Fatal("no reply control result changed")
+	if err := runtime.Typing(replyTarget{channelID: "channel", messageID: "message"}); err != nil {
+		t.Fatal(err)
 	}
-	if suppressedControl(NoReply+" explanation") != "" {
-		t.Fatal("non-exact output was suppressed")
-	}
-}
-
-func TestWriteAccessRequestIsExactAndSuppressed(t *testing.T) {
-	if suppressedControl(" \n"+RequestWriteAccess+"\t") != RequestWriteAccess {
-		t.Fatal("write access control result was not recognized")
-	}
-	for _, output := range []string{RequestWriteAccess + " because", "please " + RequestWriteAccess, "`" + RequestWriteAccess + "`"} {
-		if suppressedControl(output) != "" {
-			t.Fatalf("non-exact write access output was suppressed: %q", output)
-		}
-	}
-}
-
-func TestTypingWaitsUntilVisibleReplyIsDecided(t *testing.T) {
-	for _, output := range []string{"", "  ", "H", "HCTL_NO_", "HCTL_NO_REPLY", " \nHCTL_NO_REPLY", "HCTL_REQUEST_", RequestWriteAccess} {
-		if visibleReplyDecided(output) {
-			t.Fatalf("typing started for possible no-reply output %q", output)
-		}
-	}
-	for _, output := range []string{"Hi", "Sure", "HCTL_NO_REPLY because"} {
-		if !visibleReplyDecided(output) {
-			t.Fatalf("typing did not start for visible output %q", output)
-		}
-	}
-}
-
-func TestOnlyTerminalDispatchEventsCompleteDiscordTurn(t *testing.T) {
-	for _, eventType := range []string{"turn.completed", "turn.failed", "turn.cancelled", "turn.uncertain", "driver.process_failed"} {
-		if !(dispatch.Event{Type: eventType}).Terminal() {
-			t.Fatalf("terminal event %q rejected", eventType)
-		}
-	}
-	for _, eventType := range []string{"input.accepted", "turn.queued", "turn.started", "agent.output.delta"} {
-		if (dispatch.Event{Type: eventType}).Terminal() {
-			t.Fatalf("nonterminal event %q accepted", eventType)
-		}
-	}
-}
-
-func TestDiscordSurfaceSubmitsThroughManagedConversation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	manager := newFakeConversationManager()
-	runtime := &Runtime{
-		config: Config{Runtime: channelconfig.Profile{
-			ApplicationID: "111", BotUserID: "222", AllowedUserID: "333",
-			AllowedGuildID: "444", AllowedChannelID: "555",
-		}},
-		ctx: ctx, cancel: cancel, manager: manager,
-		surfaces: map[string]*surface{}, byConversation: map[string]*surface{},
-	}
-	incoming := &discordgo.MessageCreate{Message: &discordgo.Message{
-		ID: "message-1", Content: "please check", ChannelID: "555", GuildID: "444",
-		Author: &discordgo.User{ID: "333"},
-	}}
-
-	runtime.handleMessage(nil, incoming)
-
-	if len(manager.submitted) != 1 {
-		t.Fatalf("managed submissions = %#v", manager.submitted)
-	}
-	wantConversation := conversationID("111", "555")
-	if manager.submitted[0].conversation != wantConversation || manager.submitted[0].submission.InputID != "message-1" {
-		t.Fatalf("managed submission = %#v", manager.submitted[0])
-	}
-	if current := runtime.surfaces["555"]; current == nil || current.conversation != wantConversation || current.turns["message-1"] == nil {
-		t.Fatalf("Discord surface = %#v", current)
-	}
-}
-
-func TestConversationLocalSubmissionFailureDoesNotCancelDiscordRuntime(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	manager := newFakeConversationManager()
-	manager.submitErr = errors.New("assigned worktree cannot be resolved")
-	var delivered []*discordgo.MessageSend
-	runtime := &Runtime{
-		config: Config{Runtime: channelconfig.Profile{
-			ApplicationID: "111", BotUserID: "222", AllowedUserID: "333",
-			AllowedGuildID: "444", AllowedChannelID: "555",
-		}},
-		ctx: ctx, cancel: cancel, manager: manager,
-		surfaces: map[string]*surface{}, byConversation: map[string]*surface{},
-		deliver: func(_ string, message *discordgo.MessageSend) error {
-			delivered = append(delivered, message)
-			return nil
-		},
-	}
-	incoming := &discordgo.MessageCreate{Message: &discordgo.Message{
-		ID: "message-1", Content: "please change it", ChannelID: "555", GuildID: "444",
-		Author: &discordgo.User{ID: "333"},
-	}}
-	runtime.handleMessage(nil, incoming)
-	select {
-	case <-ctx.Done():
-		t.Fatal("conversation-local failure cancelled Discord runtime")
-	default:
-	}
-	if len(delivered) != 1 || delivered[0].Reference == nil || delivered[0].Reference.MessageID != incoming.ID || !strings.Contains(delivered[0].Content, "this conversation") {
-		t.Fatalf("local failure delivery = %#v", delivered)
-	}
-}
-
-func TestExactWriteRequestIsSuppressedAndContinuedOnce(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	manager := newFakeConversationManager()
-	current := &surface{id: "555", conversation: "discord-conversation", turns: map[string]*pendingTurn{
-		"message-1": {channelID: "555", messageID: "message-1"},
-	}}
-	runtime := &Runtime{
-		config: Config{Audit: io.Discard}, ctx: ctx, cancel: cancel, manager: manager,
-		surfaces: map[string]*surface{"555": current}, byConversation: map[string]*surface{current.conversation: current},
-	}
-
-	runtime.handleDispatch(current.conversation, dispatch.Event{Type: "agent.output.delta", InputID: "message-1", ItemID: "output", Delta: RequestWriteAccess})
-	runtime.handleDispatch(current.conversation, dispatch.Event{Type: "turn.completed", InputID: "message-1"})
-
-	select {
-	case got := <-manager.elevated:
-		if got.conversation != current.conversation || got.submission.InputID != "message-1:write" || got.submission.Text != channelconfig.WriteContinuationPrompt {
-			t.Fatalf("elevation submission = %#v", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("write continuation was not submitted")
-	}
-	manager.mu.Lock()
-	count := len(manager.submitted)
-	manager.mu.Unlock()
-	if count != 1 {
-		t.Fatalf("continuations = %d, want 1", count)
-	}
-}
-
-func TestFailedTurnCannotRequestWriteAccess(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	manager := newFakeConversationManager()
-	current := &surface{id: "555", conversation: "discord-conversation", turns: map[string]*pendingTurn{
-		"message-1": {channelID: "555", messageID: "message-1"},
-	}}
-	var delivered []string
-	runtime := &Runtime{
-		config: Config{Audit: io.Discard}, ctx: ctx, cancel: cancel, manager: manager,
-		surfaces: map[string]*surface{"555": current}, byConversation: map[string]*surface{current.conversation: current},
-		deliver: func(_ string, message *discordgo.MessageSend) error {
-			delivered = append(delivered, message.Content)
-			return nil
-		},
-	}
-	runtime.handleDispatch(current.conversation, dispatch.Event{Type: "agent.output.delta", InputID: "message-1", ItemID: "output", Delta: RequestWriteAccess})
-	runtime.handleDispatch(current.conversation, dispatch.Event{Type: "turn.failed", InputID: "message-1"})
-	select {
-	case got := <-manager.elevated:
-		t.Fatalf("failed turn elevated: %#v", got)
-	default:
-	}
-	if len(delivered) != 1 || delivered[0] == RequestWriteAccess {
-		t.Fatalf("failed turn delivery = %#v", delivered)
-	}
-}
-
-func TestConcurrentSurfaceRepliesStayWithTriggeringChannelOutOfOrder(t *testing.T) {
-	guild := &surface{id: "guild-channel", conversation: "discord-guild", turns: map[string]*pendingTurn{
-		"guild-message": {channelID: "guild-channel", messageID: "guild-message"},
-	}}
-	dm := &surface{id: "dm-channel", conversation: "discord-dm", turns: map[string]*pendingTurn{
-		"dm-message": {channelID: "dm-channel", messageID: "dm-message"},
-	}}
-	type delivery struct {
-		channel   string
-		content   string
-		reference string
-	}
-	var delivered []delivery
-	runtime := &Runtime{
-		config:         Config{Audit: io.Discard},
-		surfaces:       map[string]*surface{"guild-channel": guild, "dm-channel": dm},
-		byConversation: map[string]*surface{"discord-guild": guild, "discord-dm": dm},
-		deliver: func(channel string, message *discordgo.MessageSend) error {
-			reference := ""
-			if message.Reference != nil {
-				reference = message.Reference.MessageID
-			}
-			delivered = append(delivered, delivery{channel: channel, content: message.Content, reference: reference})
-			return nil
-		},
-	}
-	appendBounded(dm.turns["dm-message"], "dm-output", "DM result")
-	appendBounded(guild.turns["guild-message"], "guild-output", "Guild result")
-	runtime.handleDispatch("discord-dm", dispatch.Event{Type: "turn.completed", InputID: "dm-message"})
-	runtime.handleDispatch("discord-guild", dispatch.Event{Type: "turn.completed", InputID: "guild-message"})
-
-	want := []delivery{
-		{channel: "dm-channel", content: "DM result", reference: "dm-message"},
-		{channel: "guild-channel", content: "Guild result", reference: "guild-message"},
-	}
-	if !reflect.DeepEqual(delivered, want) {
-		t.Fatalf("out-of-order deliveries = %#v, want %#v", delivered, want)
+	if !reflect.DeepEqual(channels, []string{"channel"}) {
+		t.Fatalf("typing channels = %#v", channels)
 	}
 }
 
@@ -324,58 +214,99 @@ func TestStatusMessageUsesOnlySafeLifecycleState(t *testing.T) {
 	}
 }
 
-func TestStatusMessageReportsHibernatedWithoutRuntimeIdentity(t *testing.T) {
-	message := statusMessage("maintainer", "claude", "dm", dispatch.ConversationStatus{State: dispatch.LifecycleHibernated}, dispatch.CapacityStatus{ActiveLimit: 2, ResidentLimit: 4})
-	if message != "hctl is online: agent=maintainer harness=claude surface=dm state=hibernated pending=0 active=0/2 resident=0/4 queued=0" {
-		t.Fatalf("status = %q", message)
+func TestDiscordStatusCommandRoutesThroughControllerAndStaysRedacted(t *testing.T) {
+	fake := newFakeChannelController()
+	fake.status = controller.Status{
+		Conversation: dispatch.ConversationStatus{State: dispatch.LifecycleQueued, Pending: 2},
+		Capacity:     dispatch.CapacityStatus{Active: 1, ActiveLimit: 2, Resident: 2, ResidentLimit: 4, Queued: 3},
+	}
+	runtime := testRuntime(fake)
+	var response string
+	runtime.interactionResponse = func(_ *discordgo.Interaction, content string) { response = content }
+	runtime.handleInteraction(nil, commandInteraction("status"))
+
+	wantConversation := conversationID("111", "555")
+	if !reflect.DeepEqual(fake.statusCalls, []string{wantConversation}) {
+		t.Fatalf("status calls = %#v", fake.statusCalls)
+	}
+	if response != "hctl is online: agent=maintainer harness=codex surface=guild state=queued pending=2 active=1/2 resident=2/4 queued=3" {
+		t.Fatalf("status response = %q", response)
+	}
+	for _, forbidden := range []string{wantConversation, "111", "555", "/Users/", "token", "session-"} {
+		if strings.Contains(response, forbidden) {
+			t.Fatalf("status exposed %q: %s", forbidden, response)
+		}
 	}
 }
 
-type fakeManagedSubmission struct {
+func TestDiscordNewCommandRoutesThroughController(t *testing.T) {
+	fake := newFakeChannelController()
+	runtime := testRuntime(fake)
+	var response string
+	runtime.interactionResponse = func(_ *discordgo.Interaction, content string) { response = content }
+	runtime.handleInteraction(nil, commandInteraction("new"))
+
+	want := resetCall{surface: "555", conversation: conversationID("111", "555")}
+	if !reflect.DeepEqual(fake.resets, []resetCall{want}) || response != "Started a new conversation." {
+		t.Fatalf("resets = %#v response = %q", fake.resets, response)
+	}
+	fake.resetErr = dispatch.ErrConversationBusy
+	runtime.handleInteraction(nil, commandInteraction("new"))
+	if response != "The conversation is busy. Try again after current work finishes." {
+		t.Fatalf("busy response = %q", response)
+	}
+}
+
+func commandInteraction(name string) *discordgo.InteractionCreate {
+	return &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
+		Type: discordgo.InteractionApplicationCommand, GuildID: "444", ChannelID: "555",
+		Member: &discordgo.Member{User: &discordgo.User{ID: "333"}},
+		Data:   discordgo.ApplicationCommandInteractionData{Name: name},
+	}}
+}
+
+func testRuntime(channelController channelController) *Runtime {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Runtime{
+		project: &project.Project{Name: "maintainer"}, driver: codex.New("codex"),
+		config: Config{Runtime: channelconfig.Profile{
+			ApplicationID: "111", BotUserID: "222", AllowedUserID: "333", AllowedGuildID: "444", AllowedChannelID: "555",
+		}},
+		ctx: ctx, cancel: cancel, controller: channelController,
+		deliver: func(string, *discordgo.MessageSend) error { return nil },
+	}
+}
+
+type fakeChannelController struct {
+	inputs      []controller.Inbound
+	status      controller.Status
+	statusCalls []string
+	resets      []resetCall
+	resetErr    error
+	done        chan struct{}
+}
+
+type resetCall struct {
+	surface      string
 	conversation string
-	submission   dispatch.Submission
 }
 
-type fakeConversationManager struct {
-	mu        sync.Mutex
-	submitted []fakeManagedSubmission
-	statuses  map[string]dispatch.ConversationStatus
-	done      chan struct{}
-	elevated  chan fakeManagedSubmission
-	submitErr error
+func newFakeChannelController() *fakeChannelController {
+	return &fakeChannelController{done: make(chan struct{})}
 }
 
-func newFakeConversationManager() *fakeConversationManager {
-	return &fakeConversationManager{statuses: map[string]dispatch.ConversationStatus{}, done: make(chan struct{}), elevated: make(chan fakeManagedSubmission, 1)}
-}
-
-func (m *fakeConversationManager) Submit(_ context.Context, conversation string, submission dispatch.Submission) (dispatch.SubmissionResult, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.submitted = append(m.submitted, fakeManagedSubmission{conversation: conversation, submission: submission})
-	if m.submitErr != nil {
-		return dispatch.SubmissionResult{}, m.submitErr
-	}
+func (f *fakeChannelController) Submit(_ context.Context, input controller.Inbound) (dispatch.SubmissionResult, error) {
+	f.inputs = append(f.inputs, input)
 	return dispatch.SubmissionResult{Status: "queued"}, nil
 }
-
-func (m *fakeConversationManager) Elevate(_ context.Context, conversation string, submission dispatch.Submission) (dispatch.SubmissionResult, error) {
-	m.mu.Lock()
-	m.submitted = append(m.submitted, fakeManagedSubmission{conversation: conversation, submission: submission})
-	m.mu.Unlock()
-	m.elevated <- fakeManagedSubmission{conversation: conversation, submission: submission}
-	return dispatch.SubmissionResult{Status: "queued"}, nil
+func (f *fakeChannelController) Status(conversation string) controller.Status {
+	f.statusCalls = append(f.statusCalls, conversation)
+	return f.status
 }
-
-func (m *fakeConversationManager) Status(conversation string) dispatch.ConversationStatus {
-	return m.statuses[conversation]
+func (f *fakeChannelController) Reset(surface, conversation string) error {
+	f.resets = append(f.resets, resetCall{surface: surface, conversation: conversation})
+	return f.resetErr
 }
-
-func (m *fakeConversationManager) Capacity() dispatch.CapacityStatus {
-	return dispatch.CapacityStatus{ActiveLimit: dispatch.DefaultMaxActiveTurns, ResidentLimit: dispatch.DefaultMaxResidentSessions}
-}
-
-func (m *fakeConversationManager) Reset(string) error    { return nil }
-func (m *fakeConversationManager) Done() <-chan struct{} { return m.done }
-func (m *fakeConversationManager) Err() error            { return nil }
-func (m *fakeConversationManager) Close()                {}
+func (f *fakeChannelController) Done() <-chan struct{} { return f.done }
+func (f *fakeChannelController) Err() error            { return nil }
+func (f *fakeChannelController) Close()                {}

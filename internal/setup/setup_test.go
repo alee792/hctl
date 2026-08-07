@@ -247,6 +247,144 @@ func TestVendoredPluginSkillRemovalCleansGeneratedFiles(t *testing.T) {
 	}
 }
 
+func TestPluginMCPServersGenerateNativeUnmanagedConfiguration(t *testing.T) {
+	source := testAgent(t)
+	workspace := t.TempDir()
+	pluginRoot := filepath.Join(source, "plugins", "tools")
+	write(t, filepath.Join(pluginRoot, "plugin.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"tools"}`)
+	writeBytes(t, source, "plugins/tools/bin/server", []byte("#!/bin/sh\n"))
+	if err := os.Chmod(filepath.Join(pluginRoot, "bin", "server"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(pluginRoot, "mcp.json"), `{
+  "$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers":{
+    "local.tool":{"type":"stdio","command":"./bin/server","args":["--root","${PLUGIN_ROOT}","--data","${PLUGIN_DATA}/input"],"env":{"CACHE":"${PLUGIN_DATA}/cache"},"cwd":"${PLUGIN_DATA}/state"},
+    "remote":{"type":"streamable-http","url":"https://example.com/mcp","headers":{"X-Package":"visible"}}
+  }
+}`)
+
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			p, err := project.Load(source, harness, workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := Apply(p, "/opt/hctl/bin/hctl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Diagnostics) != 0 {
+				t.Fatalf("unexpected diagnostics: %#v", result.Diagnostics)
+			}
+			canonicalPluginRoot := filepath.Join(p.SourceRoot, "plugins", "tools")
+			pluginData := filepath.Join(p.WorkspaceRoot, filepath.FromSlash(p.PluginMCPServers[0].DataPath))
+			if info, err := os.Stat(filepath.Join(pluginData, "state")); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+				t.Fatalf("plugin data cwd = %v, %v", info, err)
+			}
+			if err := Verify(p); err != nil {
+				t.Fatal(err)
+			}
+			if harness == "claude" {
+				var config struct {
+					Servers map[string]struct {
+						Type    string            `json:"type"`
+						Command string            `json:"command"`
+						Args    []string          `json:"args"`
+						Env     map[string]string `json:"env"`
+						CWD     string            `json:"cwd"`
+						URL     string            `json:"url"`
+						Headers map[string]string `json:"headers"`
+					} `json:"mcpServers"`
+				}
+				if err := json.Unmarshal([]byte(read(t, filepath.Join(workspace, ".mcp.json"))), &config); err != nil {
+					t.Fatal(err)
+				}
+				local := config.Servers["local.tool"]
+				if local.Type != "stdio" || local.Command != "/usr/bin/env" || local.CWD != "" || !reflect.DeepEqual(local.Args[:4], []string{"-C", filepath.Join(pluginData, "state"), "--", filepath.Join(canonicalPluginRoot, "bin", "server")}) || local.Env["PLUGIN_ROOT"] != canonicalPluginRoot || local.Env["PLUGIN_DATA"] != pluginData || local.Env["CACHE"] != filepath.Join(pluginData, "cache") || local.Args[7] != filepath.Join(pluginData, "input") {
+					t.Fatalf("Claude local MCP config = %#v", local)
+				}
+				if remote := config.Servers["remote"]; remote.Type != "http" || remote.URL != "https://example.com/mcp" || remote.Headers["X-Package"] != "visible" {
+					t.Fatalf("Claude remote MCP config = %#v", remote)
+				}
+			} else {
+				config := read(t, filepath.Join(workspace, ".codex", "config.toml"))
+				for _, fragment := range []string{`[mcp_servers."local.tool"]`, `command = "` + filepath.Join(canonicalPluginRoot, "bin", "server") + `"`, `cwd = "` + filepath.Join(pluginData, "state") + `"`, `default_tools_approval_mode = "prompt"`, `[mcp_servers."local.tool".env]`, `"PLUGIN_ROOT" = "` + canonicalPluginRoot + `"`, `[mcp_servers."remote".http_headers]`, `"X-Package" = "visible"`} {
+					if !strings.Contains(config, fragment) {
+						t.Fatalf("Codex MCP config omitted %q:\n%s", fragment, config)
+					}
+				}
+				pluginSection := strings.Split(config, `[mcp_servers."local.tool"]`)[1]
+				if strings.Contains(strings.Split(pluginSection, `[mcp_servers."local.tool".env]`)[0], "required = true") {
+					t.Fatal("plugin MCP server was made required")
+				}
+			}
+			if err := os.Chmod(pluginData, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := Verify(p); err == nil || !strings.Contains(err.Error(), "plugin data directory") {
+				t.Fatalf("permissive plugin data did not stale setup: %v", err)
+			}
+			if _, err := Apply(p, "/opt/hctl/bin/hctl"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.RemoveAll(pluginData); err != nil {
+				t.Fatal(err)
+			}
+			if err := Verify(p); err == nil || !strings.Contains(err.Error(), "plugin data directory") {
+				t.Fatalf("missing plugin data did not stale setup: %v", err)
+			}
+		})
+	}
+}
+
+func TestPluginMCPRemovalUpdatesConfigAndPreservesData(t *testing.T) {
+	source := testAgent(t)
+	workspace := t.TempDir()
+	pluginRoot := filepath.Join(source, "plugins", "tools")
+	write(t, filepath.Join(pluginRoot, "plugin.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"tools"}`)
+	mcpPath := filepath.Join(pluginRoot, "mcp.json")
+	write(t, mcpPath, `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"local":{"type":"stdio","command":"node"}}}`)
+	p, err := project.Load(source, "claude", workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(p, "/opt/hctl/bin/hctl"); err != nil {
+		t.Fatal(err)
+	}
+	dataPath := filepath.Join(workspace, filepath.FromSlash(p.PluginMCPServers[0].DataPath))
+	write(t, filepath.Join(dataPath, "retained.txt"), "state\n")
+	if err := os.Remove(mcpPath); err != nil {
+		t.Fatal(err)
+	}
+	without, err := project.Load(source, "claude", workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(without, "/opt/hctl/bin/hctl"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(read(t, filepath.Join(workspace, ".mcp.json")), `"local"`) {
+		t.Fatal("removed plugin MCP server remains configured")
+	}
+	if got := read(t, filepath.Join(dataPath, "retained.txt")); got != "state\n" {
+		t.Fatalf("plugin data was not preserved: %q", got)
+	}
+	if err := Verify(p); err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("pre-removal plugin MCP setup did not become stale: %v", err)
+	}
+}
+
+func TestPluginMCPPlaceholderExpansionIsNonRecursive(t *testing.T) {
+	root := filepath.Join("/source", "${PLUGIN_DATA}")
+	data := filepath.Join("/workspace", "${PLUGIN_ROOT}")
+	got := expandPluginMCPValue("${PLUGIN_ROOT}|${PLUGIN_DATA}|${OTHER}", root, data)
+	want := root + "|" + data + "|${OTHER}"
+	if got != want {
+		t.Fatalf("placeholder expansion = %q, want %q", got, want)
+	}
+}
+
 func TestSubagentEffortNativeOutput(t *testing.T) {
 	for _, effort := range []string{"", "low", "medium", "high"} {
 		label := effort

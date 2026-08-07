@@ -92,7 +92,7 @@ func WriteAtomic(root, relative string, data []byte, mode os.FileMode) error {
 	if err != nil {
 		return errors.New("internal output path is invalid")
 	}
-	if err := secureMkdirAll(root, filepath.ToSlash(filepath.Dir(relative))); err != nil {
+	if err := secureMkdirAll(root, filepath.ToSlash(filepath.Dir(relative)), 0o755); err != nil {
 		return err
 	}
 	target := filepath.Join(root, filepath.FromSlash(relative))
@@ -122,6 +122,42 @@ func WriteAtomic(root, relative string, data []byte, mode os.FileMode) error {
 	}
 	if err := os.Rename(tempName, target); err != nil {
 		return fmt.Errorf("cannot install file %s", relative)
+	}
+	return nil
+}
+
+// EnsurePrivateDir creates a persistent private directory beneath root without
+// traversing symlinks.
+func EnsurePrivateDir(root, relative string) error {
+	relative, err := CleanRelative(relative)
+	if err != nil {
+		return errors.New("internal directory path is invalid")
+	}
+	if err := secureMkdirAll(root, relative, 0o700); err != nil {
+		return err
+	}
+	path, info, exists, err := inspect(root, relative)
+	if err != nil || !exists || !info.IsDir() {
+		return fmt.Errorf("directory %s is missing or unsafe", relative)
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(path, 0o700); err != nil {
+			return fmt.Errorf("cannot make directory %s private", relative)
+		}
+	}
+	return nil
+}
+
+// RequirePrivateDir verifies that a private directory beneath root exists
+// without traversing symlinks.
+func RequirePrivateDir(root, relative string) error {
+	relative, err := CleanRelative(relative)
+	if err != nil {
+		return errors.New("internal directory path is invalid")
+	}
+	_, info, exists, err := inspect(root, relative)
+	if err != nil || !exists || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("directory %s is missing or unsafe", relative)
 	}
 	return nil
 }
@@ -173,7 +209,7 @@ func inspect(root, relative string) (string, os.FileInfo, bool, error) {
 	return current, nil, false, nil
 }
 
-func secureMkdirAll(root, relative string) error {
+func secureMkdirAll(root, relative string, mode os.FileMode) error {
 	if relative == "." || relative == "" {
 		return nil
 	}
@@ -182,7 +218,7 @@ func secureMkdirAll(root, relative string) error {
 		current = filepath.Join(current, part)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(current, 0o755); err != nil {
+			if err := os.Mkdir(current, mode); err != nil {
 				return errors.New("cannot create output directory")
 			}
 			continue

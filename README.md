@@ -25,6 +25,9 @@ my-agent/
   plugins/
     review-pack/
       plugin.json
+      mcp.json
+      bin/
+        review-notes
       skills/
         review/
           SKILL.md
@@ -67,11 +70,14 @@ containing `SKILL.md` and optional scripts, references, assets, or other
 resources. Adding a skill directory makes it available on the next apply;
 there is no registration file to update. Standards-shaped dependencies can be
 vendored as Agent Plugins v1 directories under `plugins/`; hctl validates each
-local `plugin.json` and imports skills from its fixed `skills/` location. Root
-skills win name collisions. Invalid plugin components warn and remain isolated.
-This phase does not import `mcp.json`, install or update packages, contact a
-marketplace, or interpret client extensions. TypeScript, Python, and Go tool
-functions under `tools/` are exposed through the same managed MCP server.
+local `plugin.json`, imports skills from its fixed `skills/` location, and maps
+valid `stdio` or `streamable-http` declarations from optional `mcp.json` into
+native project MCP configuration. Root skills and earlier server declarations
+win name collisions. Invalid plugin components warn and remain isolated. Hctl
+does not operate plugin servers or install or update packages, contact a
+marketplace, carry credentials, or interpret client extensions. TypeScript,
+Python, and Go tool functions under `tools/` are exposed through the same
+managed MCP server.
 Immediate subagents inherit their parent's generated skills and tools through
 the native harness. A subagent may optionally request portable reasoning effort
 in its `instructions.md` frontmatter:

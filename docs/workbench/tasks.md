@@ -36,16 +36,25 @@ completed predecessor.
    and skips overlapping occurrences. Do not install or mutate launchd,
    systemd, crontab, or a hosted scheduler.
 
-## Directed follow-up
-
-**[GitHub #27](https://github.com/alee792/hctl/issues/27) — Map vendored Agent
-Plugins v1 MCP servers into native harness setup.** Keep this in `needs-triage`
-until the vendored-skill implementation supplies concrete collision,
-diagnostic, trust, and lifecycle evidence. Shape native unmanaged MCP mapping
-as its own slice; do not add installation, download, update, marketplace,
-credential, proxy, extension, or cross-client conversion behavior.
-
 ## Completed
+
+### [GitHub #27](https://github.com/alee792/hctl/issues/27) — Map vendored Agent Plugins v1 MCP servers
+
+**Outcome:** Optional plugin `mcp.json` files are validated locally and their
+supported stdio and streamable-HTTP servers are emitted through native Claude
+Code or Codex project configuration. Invalid components, unsupported SSE, the
+reserved `managed` name, and later lexical collisions warn in isolation. Stdio
+servers receive safe plugin-root and persistent private plugin-data paths;
+remote endpoints require safe HTTP(S) URLs and literal non-secret headers.
+Plugin servers remain native and unmanaged.
+
+**Evidence:** Project, root-filesystem, and setup tests cover exact schemas,
+transport and field validation, collision order, component isolation,
+fingerprinting, path and symlink containment, placeholder rules, remote URL and
+header restrictions, private persistent plugin data, removal behavior, and
+both native harness targets. The [plugin example](../../examples/plugins) and
+[ADR 0020](../adr/0020-map-plugin-mcp-through-native-harness-configuration.md)
+record the boundary.
 
 ### [GitHub #26](https://github.com/alee792/hctl/issues/26) — Import vendored Agent Plugins v1 skills
 
@@ -62,7 +71,7 @@ validation, bounded deterministic discovery and precedence, failure isolation,
 diagnostic source paths, resource, mode, and manifest fingerprint changes,
 symlink denial, stale generated-skill cleanup, and both native harness targets. The credential-free
 [plugin example](../../examples/plugins) and
-[ADR 0014](../adr/0014-import-vendored-agent-plugin-skills.md) record the
+[ADR 0019](../adr/0019-import-vendored-agent-plugin-skills.md) record the
 vendored-dependency boundary. `mcp.json`, installation, downloads, updates,
 marketplaces, extensions, credentials, and vendor conversion remain outside
 this phase.

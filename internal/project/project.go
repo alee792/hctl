@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,22 +24,24 @@ import (
 )
 
 const (
-	GeneratorVersion   = "hctl/0.9.0-dev"
-	maxSourceBytes     = 128 << 10
-	maxSkills          = 8
-	maxPlugins         = 32
-	maxPluginSkills    = 128
-	maxSkillFiles      = 128
-	maxSkillFileBytes  = 1 << 20
-	maxSkillBytes      = 8 << 20
-	maxHarnessFiles    = 128
-	maxHarnessBytes    = 8 << 20
-	maxConnectionBytes = 8 << 10
-	maxChannelBytes    = 8 << 10
-	maxSchedules       = 32
-	maxSchedulePrompt  = 32 << 10
-	maxSubagents       = 8
-	echoMaxInputBytes  = 1024
+	GeneratorVersion      = "hctl/0.9.0-dev"
+	maxSourceBytes        = 128 << 10
+	maxSkills             = 8
+	maxPlugins            = 32
+	maxPluginSkills       = 128
+	maxPluginMCPServers   = 32
+	maxPluginCommandBytes = 8 << 20
+	maxSkillFiles         = 128
+	maxSkillFileBytes     = 1 << 20
+	maxSkillBytes         = 8 << 20
+	maxHarnessFiles       = 128
+	maxHarnessBytes       = 8 << 20
+	maxConnectionBytes    = 8 << 10
+	maxChannelBytes       = 8 << 10
+	maxSchedules          = 32
+	maxSchedulePrompt     = 32 << 10
+	maxSubagents          = 8
+	echoMaxInputBytes     = 1024
 )
 
 var (
@@ -47,6 +51,7 @@ var (
 )
 
 const pluginSchema = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+const pluginMCPSchema = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 
 type Skill struct {
 	Name                string
@@ -109,6 +114,21 @@ type SourceRecord struct {
 	Executable bool   `json:"executable,omitempty"`
 }
 
+type PluginMCPServer struct {
+	Name       string
+	Type       string
+	Command    string
+	Args       []string
+	Env        map[string]string
+	CWD        string
+	URL        string
+	Headers    map[string]string
+	PluginPath string
+	DataPath   string
+	SourcePath string
+	sources    []SourceRecord
+}
+
 type Project struct {
 	SourceRoot        string
 	WorkspaceRoot     string
@@ -119,6 +139,7 @@ type Project struct {
 	Harness           string
 	Instructions      []byte
 	Skills            []Skill
+	PluginMCPServers  []PluginMCPServer
 	Diagnostics       []Diagnostic
 	Subagents         []Subagent
 	HarnessFiles      []File
@@ -151,6 +172,7 @@ func LoadRelocated(source, harness, workspace string, selected *Project) (*Proje
 		return nil, errors.New("relocated project source does not match selected agent")
 	}
 	p.AgentID = selected.AgentID
+	setPluginDataPaths(p.PluginMCPServers, selected.AgentID)
 	return p, nil
 }
 
@@ -177,6 +199,8 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 	if name == "" {
 		name = nameFromRoot(sourceRoot)
 	}
+	sourceIdentity := rootfs.SHA256([]byte(sourceRoot))[:12]
+	agentID := name + "@" + sourceIdentity
 	instructionPath := "instructions.md"
 	instructionSource, err := rootfs.ReadSource(sourceRoot, instructionPath, maxSourceBytes)
 	if err != nil {
@@ -191,7 +215,7 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 	if err != nil {
 		return nil, err
 	}
-	skills, pluginSources, diagnostics, err := loadPlugins(sourceRoot, skills)
+	skills, pluginMCPServers, pluginSources, diagnostics, err := loadPlugins(sourceRoot, workspaceRoot, harness, agentID, skills)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +292,6 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 		Sources []SourceRecord `json:"sources"`
 	}{Agent: name, Sources: sources})
 	fingerprint := rootfs.SHA256(canonicalSources)
-	sourceIdentity := rootfs.SHA256([]byte(sourceRoot))[:12]
 	reference, err := filepath.Rel(workspaceRoot, sourceRoot)
 	if err != nil {
 		return nil, errors.New("cannot describe agent source relative to workspace")
@@ -278,12 +301,13 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 		SourceRoot:        sourceRoot,
 		WorkspaceRoot:     workspaceRoot,
 		SourceReference:   filepath.ToSlash(reference),
-		AgentID:           name + "@" + sourceIdentity,
+		AgentID:           agentID,
 		Name:              name,
 		Description:       description,
 		Harness:           harness,
 		Instructions:      instructions,
 		Skills:            skills,
+		PluginMCPServers:  pluginMCPServers,
 		Diagnostics:       diagnostics,
 		Subagents:         subagents,
 		HarnessFiles:      harnessFiles,
@@ -971,18 +995,18 @@ func loadSkillFiles(root, sourcePath string) ([]File, error) {
 	return files, nil
 }
 
-func loadPlugins(root string, skills []Skill) ([]Skill, []SourceRecord, []Diagnostic, error) {
+func loadPlugins(root, workspace, harness, agentID string, skills []Skill) ([]Skill, []PluginMCPServer, []SourceRecord, []Diagnostic, error) {
 	directory := filepath.Join(root, "plugins")
 	info, err := os.Lstat(directory)
 	if errors.Is(err, os.ErrNotExist) {
-		return skills, nil, nil, nil
+		return skills, nil, nil, nil, nil
 	}
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, nil, nil, errors.New("plugins must be a real directory")
+		return nil, nil, nil, nil, errors.New("plugins must be a real directory")
 	}
 	entries, err := readDirectory(directory, maxPlugins)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("plugins: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("plugins: %w", err)
 	}
 	seen := make(map[string]bool, len(skills))
 	for _, skill := range skills {
@@ -990,13 +1014,15 @@ func loadPlugins(root string, skills []Skill) ([]Skill, []SourceRecord, []Diagno
 	}
 	sources := []SourceRecord{}
 	diagnostics := []Diagnostic{}
+	mcpServers := []PluginMCPServer{}
+	seenMCP := map[string]bool{"managed": true}
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		entryInfo, err := entry.Info()
 		if err != nil || !entryInfo.IsDir() || entryInfo.Mode()&os.ModeSymlink != 0 {
-			return nil, nil, nil, fmt.Errorf("plugins may contain real plugin directories only; found %q", entry.Name())
+			return nil, nil, nil, nil, fmt.Errorf("plugins may contain real plugin directories only; found %q", entry.Name())
 		}
 		pluginPath := "plugins/" + entry.Name()
 		manifestPath := pluginPath + "/plugin.json"
@@ -1012,6 +1038,29 @@ func loadPlugins(root string, skills []Skill) ([]Skill, []SourceRecord, []Diagno
 			continue
 		}
 		sources = append(sources, SourceRecord{Path: manifestPath, SHA256: rootfs.SHA256(manifest)})
+		pluginServers, mcpDiagnostics, mcpSource := loadPluginMCP(root, pluginPath)
+		diagnostics = append(diagnostics, mcpDiagnostics...)
+		for _, server := range pluginServers {
+			server.DataPath = pluginDataPath(agentID, server.PluginPath)
+			if harness == "claude" && !claudeMCPServerExpansionSafe(root, workspace, server) {
+				diagnostics = append(diagnostics, Diagnostic{Path: server.SourcePath, Field: "mcpServers." + server.Name, Message: "plugin MCP server skipped: Claude project configuration would expand unsupported placeholder-like text"})
+				continue
+			}
+			if seenMCP[server.Name] {
+				diagnostics = append(diagnostics, Diagnostic{Path: server.SourcePath, Field: "mcpServers." + server.Name, Message: fmt.Sprintf("plugin MCP server skipped: server name %q is already provided by an earlier source", server.Name)})
+				continue
+			}
+			if len(mcpServers) == maxPluginMCPServers {
+				diagnostics = append(diagnostics, Diagnostic{Path: server.SourcePath, Field: "mcpServers." + server.Name, Message: fmt.Sprintf("plugin MCP server skipped: agent may contain at most %d plugin MCP servers", maxPluginMCPServers)})
+				continue
+			}
+			seenMCP[server.Name] = true
+			mcpServers = append(mcpServers, server)
+			sources = append(sources, server.sources...)
+		}
+		if mcpSource != nil {
+			sources = append(sources, *mcpSource)
+		}
 
 		skillRoot := filepath.Join(directory, entry.Name(), "skills")
 		skillRootInfo, err := os.Lstat(skillRoot)
@@ -1052,13 +1101,349 @@ func loadPlugins(root string, skills []Skill) ([]Skill, []SourceRecord, []Diagno
 				continue
 			}
 			if len(skills) == maxSkills {
-				return nil, nil, nil, fmt.Errorf("agent may contain at most %d skills", maxSkills)
+				return nil, nil, nil, nil, fmt.Errorf("agent may contain at most %d skills", maxSkills)
 			}
 			seen[name] = true
 			skills = append(skills, skill)
 		}
 	}
-	return skills, sources, diagnostics, nil
+	return skills, mcpServers, sources, diagnostics, nil
+}
+
+func loadPluginMCP(root, pluginPath string) ([]PluginMCPServer, []Diagnostic, *SourceRecord) {
+	path := pluginPath + "/mcp.json"
+	abs := filepath.Join(root, filepath.FromSlash(path))
+	info, err := os.Lstat(abs)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, []Diagnostic{{Path: path, Message: "plugin MCP component skipped: must be a bounded regular file without symlinks"}}, nil
+	}
+	content, err := rootfs.ReadSource(root, path, maxSourceBytes)
+	if err != nil {
+		return nil, []Diagnostic{{Path: path, Message: "plugin MCP component skipped: " + err.Error()}}, nil
+	}
+	fields, err := decodeJSONObject(content)
+	if err != nil {
+		return nil, []Diagnostic{{Path: path, Message: "plugin MCP component skipped: " + err.Error()}}, nil
+	}
+	if len(fields) != 2 || fields["$schema"] == nil || fields["mcpServers"] == nil {
+		return nil, []Diagnostic{{Path: path, Message: "plugin MCP component skipped: top-level object must contain only $schema and mcpServers"}}, nil
+	}
+	var schema string
+	if json.Unmarshal(fields["$schema"], &schema) != nil || schema != pluginMCPSchema {
+		return nil, []Diagnostic{{Path: path, Field: "$schema", Message: fmt.Sprintf("plugin MCP component skipped: must equal %q", pluginMCPSchema)}}, nil
+	}
+	var rawServers map[string]json.RawMessage
+	if json.Unmarshal(fields["mcpServers"], &rawServers) != nil || rawServers == nil {
+		return nil, []Diagnostic{{Path: path, Field: "mcpServers", Message: "plugin MCP component skipped: must be an object"}}, nil
+	}
+	if len(rawServers) > maxPluginMCPServers {
+		return nil, []Diagnostic{{Path: path, Field: "mcpServers", Message: fmt.Sprintf("plugin MCP component skipped: may contain at most %d servers", maxPluginMCPServers)}}, nil
+	}
+	names := make([]string, 0, len(rawServers))
+	for name := range rawServers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	servers := []PluginMCPServer{}
+	diagnostics := []Diagnostic{}
+	for _, name := range names {
+		server, commandSource, err := validatePluginMCPServer(root, pluginPath, path, name, rawServers[name])
+		if err != nil {
+			diagnostics = append(diagnostics, Diagnostic{Path: path, Field: "mcpServers." + name, Message: "plugin MCP server skipped: " + err.Error()})
+			continue
+		}
+		if server.Type == "sse" {
+			diagnostics = append(diagnostics, Diagnostic{Path: path, Field: "mcpServers." + name, Message: "plugin MCP server skipped: SSE transport is not supported"})
+			continue
+		}
+		if commandSource != nil {
+			server.sources = append(server.sources, *commandSource)
+		}
+		servers = append(servers, server)
+	}
+	return servers, diagnostics, &SourceRecord{Path: path, SHA256: rootfs.SHA256(content)}
+}
+
+func setPluginDataPaths(servers []PluginMCPServer, agentID string) {
+	for index := range servers {
+		servers[index].DataPath = pluginDataPath(agentID, servers[index].PluginPath)
+	}
+}
+
+func pluginDataPath(agentID, pluginPath string) string {
+	identity := rootfs.SHA256([]byte(agentID + "\x00" + pluginPath))[:16]
+	return ".hctl/plugin-data/" + identity
+}
+
+func claudeMCPServerExpansionSafe(root, workspace string, server PluginMCPServer) bool {
+	values := []string{}
+	if server.Type == "streamable-http" {
+		values = append(values, server.URL)
+		for _, value := range server.Headers {
+			values = append(values, value)
+		}
+	} else {
+		pluginRoot := filepath.Join(root, filepath.FromSlash(server.PluginPath))
+		pluginData := filepath.Join(workspace, filepath.FromSlash(server.DataPath))
+		expand := strings.NewReplacer("${PLUGIN_ROOT}", pluginRoot, "${PLUGIN_DATA}", pluginData)
+		command := server.Command
+		if strings.HasPrefix(command, "./") {
+			command = filepath.Join(pluginRoot, filepath.FromSlash(strings.TrimPrefix(command, "./")))
+		}
+		values = append(values, pluginRoot, pluginData, command, expand.Replace(server.CWD))
+		for _, value := range server.Args {
+			values = append(values, expand.Replace(value))
+		}
+		for _, value := range server.Env {
+			values = append(values, expand.Replace(value))
+		}
+	}
+	for _, value := range values {
+		if strings.Contains(value, "${") {
+			return false
+		}
+	}
+	return true
+}
+
+func validatePluginMCPServer(root, pluginPath, sourcePath, name string, raw json.RawMessage) (PluginMCPServer, *SourceRecord, error) {
+	fields, err := decodeJSONObject(raw)
+	if err != nil {
+		return PluginMCPServer{}, nil, err
+	}
+	var transport string
+	if value, ok := fields["type"]; !ok || json.Unmarshal(value, &transport) != nil {
+		return PluginMCPServer{}, nil, errors.New("field \"type\" is required and must be a string")
+	}
+	server := PluginMCPServer{Name: name, Type: transport, PluginPath: pluginPath, SourcePath: sourcePath}
+	switch transport {
+	case "stdio":
+		if err := requireOnlyFields(fields, "type", "command", "args", "env", "cwd"); err != nil {
+			return PluginMCPServer{}, nil, err
+		}
+		if value, ok := fields["command"]; !ok || json.Unmarshal(value, &server.Command) != nil || server.Command == "" {
+			return PluginMCPServer{}, nil, errors.New("field \"command\" is required and must be a non-empty string")
+		}
+		var commandSource *SourceRecord
+		if strings.HasPrefix(server.Command, "./") {
+			relative, err := rootfs.CleanRelative(strings.TrimPrefix(server.Command, "./"))
+			if err != nil {
+				return PluginMCPServer{}, nil, errors.New("field \"command\" must remain inside the plugin directory")
+			}
+			commandPath := pluginPath + "/" + relative
+			content, err := rootfs.ReadSource(root, commandPath, maxPluginCommandBytes)
+			if err != nil {
+				return PluginMCPServer{}, nil, fmt.Errorf("field \"command\": %w", err)
+			}
+			info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(commandPath)))
+			if err != nil {
+				return PluginMCPServer{}, nil, errors.New("cannot inspect plugin-relative command")
+			}
+			commandSource = &SourceRecord{Path: commandPath, SHA256: rootfs.SHA256(content), Executable: info.Mode().Perm()&0o111 != 0}
+		} else if strings.ContainsAny(server.Command, "/\\ \t\r\n") {
+			return PluginMCPServer{}, nil, errors.New("field \"command\" must be a bare executable name or start with ./")
+		}
+		if value, ok := fields["args"]; ok {
+			if json.Unmarshal(value, &server.Args) != nil || server.Args == nil {
+				return PluginMCPServer{}, nil, errors.New("field \"args\" must be an array of strings")
+			}
+		}
+		if value, ok := fields["env"]; ok {
+			if err := json.Unmarshal(value, &server.Env); err != nil || server.Env == nil {
+				return PluginMCPServer{}, nil, errors.New("field \"env\" must be an object of string values")
+			}
+			if _, ok := server.Env["PLUGIN_ROOT"]; ok {
+				return PluginMCPServer{}, nil, errors.New("field \"env\" must not configure PLUGIN_ROOT")
+			}
+			if _, ok := server.Env["PLUGIN_DATA"]; ok {
+				return PluginMCPServer{}, nil, errors.New("field \"env\" must not configure PLUGIN_DATA")
+			}
+		}
+		if value, ok := fields["cwd"]; ok {
+			if json.Unmarshal(value, &server.CWD) != nil || server.CWD == "" {
+				return PluginMCPServer{}, nil, errors.New("field \"cwd\" must be a non-empty string")
+			}
+			if err := validatePluginCWD(root, pluginPath, server.CWD); err != nil {
+				return PluginMCPServer{}, nil, fmt.Errorf("field \"cwd\": %w", err)
+			}
+		}
+		return server, commandSource, nil
+	case "streamable-http", "sse":
+		if err := requireOnlyFields(fields, "type", "url", "headers"); err != nil {
+			return PluginMCPServer{}, nil, err
+		}
+		if value, ok := fields["url"]; !ok || json.Unmarshal(value, &server.URL) != nil || server.URL == "" {
+			return PluginMCPServer{}, nil, errors.New("field \"url\" is required and must be a non-empty string")
+		}
+		if err := validatePluginMCPURL(server.URL); err != nil {
+			return PluginMCPServer{}, nil, fmt.Errorf("field \"url\": %w", err)
+		}
+		if value, ok := fields["headers"]; ok {
+			server.Headers, err = decodePluginHeaders(value)
+			if err != nil {
+				return PluginMCPServer{}, nil, fmt.Errorf("field \"headers\": %w", err)
+			}
+			for key, value := range server.Headers {
+				if !validHTTPHeaderName(key) || !validHTTPHeaderValue(value) {
+					return PluginMCPServer{}, nil, fmt.Errorf("field \"headers\" contains invalid HTTP header %q", key)
+				}
+			}
+		}
+		return server, nil, nil
+	default:
+		return PluginMCPServer{}, nil, fmt.Errorf("unsupported transport %q", transport)
+	}
+}
+
+func decodePluginHeaders(raw json.RawMessage) (map[string]string, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
+		return nil, errors.New("must be an object of string values")
+	}
+	result := map[string]string{}
+	seen := map[string]bool{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, errors.New("must be an object of string values")
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, errors.New("must be an object of string values")
+		}
+		folded := strings.ToLower(key)
+		if seen[folded] {
+			return nil, fmt.Errorf("contains duplicate name %q ignoring case", key)
+		}
+		seen[folded] = true
+		var value string
+		if err := decoder.Decode(&value); err != nil {
+			return nil, errors.New("must be an object of string values")
+		}
+		result[key] = value
+	}
+	if end, err := decoder.Token(); err != nil || end != json.Delim('}') {
+		return nil, errors.New("must be an object of string values")
+	}
+	return result, nil
+}
+
+func decodeJSONObject(content []byte) (map[string]json.RawMessage, error) {
+	if !utf8.Valid(content) {
+		return nil, errors.New("must be valid UTF-8")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	var fields map[string]json.RawMessage
+	if err := decoder.Decode(&fields); err != nil || fields == nil {
+		return nil, errors.New("must be one JSON object")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("must contain one JSON value")
+	}
+	return fields, nil
+}
+
+func requireOnlyFields(fields map[string]json.RawMessage, allowed ...string) error {
+	want := map[string]bool{}
+	for _, field := range allowed {
+		want[field] = true
+	}
+	for field := range fields {
+		if !want[field] {
+			return fmt.Errorf("unsupported field %q", field)
+		}
+	}
+	return nil
+}
+
+func validatePluginCWD(root, pluginPath, value string) error {
+	if value != "./" && strings.HasSuffix(value, "/") {
+		return errors.New("must be normalized and remain inside its selected root")
+	}
+	data := false
+	relative := ""
+	switch {
+	case strings.HasPrefix(value, "./"):
+		relative = strings.TrimPrefix(value, "./")
+	case value == "${PLUGIN_ROOT}":
+	case strings.HasPrefix(value, "${PLUGIN_ROOT}/"):
+		relative = strings.TrimPrefix(value, "${PLUGIN_ROOT}/")
+	case value == "${PLUGIN_DATA}":
+		data = true
+	case strings.HasPrefix(value, "${PLUGIN_DATA}/"):
+		data = true
+		relative = strings.TrimPrefix(value, "${PLUGIN_DATA}/")
+	default:
+		return errors.New("must start with ./, ${PLUGIN_ROOT}, or ${PLUGIN_DATA}")
+	}
+	if relative != "" {
+		cleaned, err := rootfs.CleanRelative(relative)
+		if err != nil || cleaned != relative {
+			return errors.New("must be normalized and remain inside its selected root")
+		}
+	}
+	if data {
+		return nil
+	}
+	directory := pluginPath
+	if relative != "" {
+		directory += "/" + relative
+	}
+	current := root
+	for _, part := range strings.Split(directory, "/") {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("must resolve to a real directory without symlinks")
+		}
+	}
+	return nil
+}
+
+func validatePluginMCPURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return errors.New("must be an absolute HTTP(S) URL without user information or a fragment")
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || scheme != "http" && scheme != "https" {
+		return errors.New("must be an absolute HTTP(S) URL without user information or a fragment")
+	}
+	if scheme == "http" {
+		host := parsed.Hostname()
+		ip := net.ParseIP(host)
+		if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+			return errors.New("must use HTTPS unless the host is localhost or a loopback IP literal")
+		}
+	}
+	return nil
+}
+
+func validHTTPHeaderName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range []byte(value) {
+		allowed := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))
+		if !allowed {
+			return false
+		}
+	}
+	return true
+}
+
+func validHTTPHeaderValue(value string) bool {
+	for _, character := range []byte(value) {
+		if character == '\r' || character == '\n' || character == 0x7f || character < 0x20 && character != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 func validatePluginManifest(path string, content []byte) ([]Diagnostic, error) {

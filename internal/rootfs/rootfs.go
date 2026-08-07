@@ -1,3 +1,11 @@
+// Package rootfs provides the filesystem safety primitives used for portable
+// agent sources and hctl-owned generated state.
+//
+// Source reads are bounded and reject symlinks in every path component.
+// Generated writes use normalized relative paths, refuse symlink traversal,
+// and replace files atomically. Private directories are created or verified
+// with owner-only permissions. Callers remain responsible for restricting an
+// operation to paths that hctl is allowed to own.
 package rootfs
 
 import (

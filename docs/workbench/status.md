@@ -218,14 +218,15 @@ a generated custom subagent, and session resume in a fresh external workspace.
   deadline aborts a stalled task process, retains the occurrence as uncertain,
   persists `deadline_exceeded` as a separate bounded reason for duplicate
   reporting, and leaves later occurrences free to open fresh sessions.
+  `hctl schedule run` adds an explicit foreground UTC clock over one shared
+  durable task runtime. It admits current minutes only, skips overlap including
+  capacity waiters, excludes a second matching clock with a local lock, and
+  drains admitted work on signal shutdown without installing a daemon.
 
 ## Retained product horizon
 
 These are later product promises, not MVP implementation work:
 
-- Advance the remaining schedule runtime with a foreground local clock. That
-  work is not permission to add live credentials, contact GitHub or Discord,
-  publish, deploy, or replace native harness behavior.
 - Future channel adapters feed the same session-aware turn dispatcher exercised by
   local input. Network adapters verify their source before acceptance.
 - An external conversation maps to one native-harness session. Accepted input
@@ -280,8 +281,9 @@ uses a fresh native-harness task session, while its stable input ID deduplicates
 retries of that occurrence. HCTL-014 now gives the native task turn a separate
 bounded deadline: expiry aborts the affected process, durably retains an
 uncertain result with a distinct deadline reason, and does not prevent a later
-occurrence from opening a fresh session. A foreground local clock remains a
-separate follow-up.
+occurrence from opening a fresh session. HCTL-015 now adds the foreground UTC
+clock with shared state ownership, bounded concurrency, no backfill, stable
+occurrence identity, overlap skipping, runtime locking, and graceful drain.
 Portable sandbox and image/runtime authoring are deferred: the native harnesses
 do not expose equivalent sandbox contracts, native lockfiles already cover
 authored-tool runtimes, and hctl does not own deployment. Do not implement

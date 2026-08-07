@@ -583,7 +583,24 @@ reported. This task mode performs no channel delivery, registration, daemon
 installation, missed-run replay, overlap handling, credential use, or live
 model call during credential-free tests. TypeScript schedule handlers,
 subagent schedules, and Eve's hosted auth and delivery runtime are unsupported.
-A foreground UTC clock remains a separate follow-up.
+
+`hctl schedule run AGENT --harness <claude|codex>` is the explicit foreground
+clock. It requires current generated setup, loads schedules once, verifies the
+harness once, and performs no auto-apply or hot reload. Standard five-field
+cron expressions are evaluated in UTC. The first occurrence is strictly after
+startup; each wake admits only a matching occurrence in its current UTC minute,
+without downtime or clock-jump backfill. Repeated and backward wakeups do not
+duplicate an admitted scheduled minute.
+
+One shared task runtime owns the durable store and bounds concurrent fresh
+task sessions with `--max-active-turns` (default 2, maximum 64). Queued capacity
+counts as in flight, so the same schedule cannot overlap. Stable occurrence IDs
+are the full SHA-256 of the exact UTF-8 schedule name and canonical scheduled
+UTC minute. A local lock excludes another clock for the same canonical
+workspace, agent identity, and harness. SIGINT or SIGTERM stops admission and
+drains admitted work through completion or its `--turn-timeout`. Lifecycle
+output is bounded and contains no prompt, model text, path, or raw harness
+error. See [ADR 0026](adr/0026-run-schedules-from-a-foreground-utc-clock.md).
 
 Visible `tools/*.ts` and `tools/*.py` files each declare one tool. A visible
 `tools/NAME/tool.go` directory declares one Go tool. Filenames supply tool
@@ -868,6 +885,9 @@ The MVP is complete when credential-free tests prove:
     dispatch conversation, accepts one authorized normalized answer exactly
     once, parks without consuming harness or active-turn capacity, and preserves
     ambiguous delivery or continuation as uncertain without automatic replay.
+21. A foreground UTC schedule clock admits only current, non-overlapping
+    occurrences through one bounded durable task runtime, drains admitted work
+    on shutdown, and never backfills missed minutes or emits model output.
 
 ## Explicit non-goals
 
@@ -875,8 +895,8 @@ The MVP is complete when credential-free tests prove:
 - Channels other than conversational Discord Gateway, generic webhooks, and
   proactive vendor delivery
 - Claude Agent SDK or hosted OpenAI agent runtimes
-- Automatic schedule clocks, workflows, independently configured nested
-  subagents, or deployment orchestration
+- Background or distributed schedule clocks, workflows, independently
+  configured nested subagents, or deployment orchestration
 - Building or deploying packaged agent images
 - Governance claims over native harness tools
 - Hosted secret managers and model-visible secret-bearing managed operations

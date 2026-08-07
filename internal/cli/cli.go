@@ -40,6 +40,7 @@ Commands:
   channel setup discord AGENT             Enroll an existing Discord bot
   channel status discord AGENT            Validate Discord configuration
   schedule trigger AGENT NAME [options]   Run one scheduled occurrence
+  schedule run AGENT [options]            Run schedules from a foreground clock
 
 Run "hctl <command> --help" for command details.
 `
@@ -75,10 +76,13 @@ func runHook(args []string, input io.Reader, output io.Writer) error {
 }
 
 func runSchedule(args []string, output, stderr io.Writer) error {
-	const usage = "Usage: hctl schedule trigger AGENT NAME [--workspace DIR] --harness <claude|codex> --input-id ID [--command PATH] [--timeout DURATION] [--turn-timeout DURATION]\n"
+	const usage = "Usage:\n  hctl schedule trigger AGENT NAME [--workspace DIR] --harness <claude|codex> --input-id ID [--command PATH] [--timeout DURATION] [--turn-timeout DURATION]\n  hctl schedule run AGENT [--workspace DIR] --harness <claude|codex> [--command PATH] [--turn-timeout DURATION] [--max-active-turns N]\n"
 	if len(args) > 0 && isHelp(args[len(args)-1]) {
 		_, err := io.WriteString(output, usage)
 		return err
+	}
+	if len(args) >= 1 && args[0] == "run" {
+		return runScheduleClock(args[1:], output, stderr)
 	}
 	if len(args) < 3 || args[0] != "trigger" {
 		return errors.New("usage: hctl schedule trigger AGENT NAME --harness <claude|codex> --input-id ID")
@@ -153,6 +157,84 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 		return fmt.Errorf("schedule trigger ended with status %s", result.Status)
 	}
 	return nil
+}
+
+func runScheduleClock(args []string, output, stderr io.Writer) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runScheduleClockContext(ctx, args, output, stderr, nil)
+}
+
+func runScheduleClockContext(ctx context.Context, args []string, output, stderr io.Writer, clock schedule.Clock) error {
+	if len(args) == 0 {
+		return errors.New("usage: hctl schedule run AGENT --harness <claude|codex>")
+	}
+	fs := flag.NewFlagSet("schedule run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	harnessName := fs.String("harness", "", "target harness")
+	workspace := fs.String("workspace", "", "target workspace (defaults to AGENT)")
+	command := fs.String("command", "", "harness executable override")
+	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "bounded task turn lifetime")
+	maxActive := fs.Int("max-active-turns", dispatch.DefaultMaxActiveTurns, "maximum simultaneous task turns")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("unexpected schedule run arguments")
+	}
+	if *turnTimeout <= 0 || *turnTimeout > 30*time.Minute {
+		return errors.New("--turn-timeout must be greater than zero and at most 30m")
+	}
+	if *maxActive <= 0 || *maxActive > 64 {
+		return errors.New("--max-active-turns must be between 1 and 64")
+	}
+	p, err := project.Load(args[0], *harnessName, *workspace)
+	if err != nil {
+		return err
+	}
+	if len(p.Schedules) == 0 {
+		return errors.New("agent project defines no schedules")
+	}
+	if err := setup.Verify(p); err != nil {
+		return err
+	}
+	driver, err := newDriver(*harnessName, *command)
+	if err != nil {
+		return err
+	}
+	verifyCtx, cancelVerify := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelVerify()
+	if err := driver.Verify(verifyCtx); err != nil {
+		return err
+	}
+	lock, err := schedule.AcquireRuntimeLock(p)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }()
+	runtime, err := dispatch.NewTaskRuntime(p, driver, *turnTimeout, *maxActive)
+	if err != nil {
+		return err
+	}
+	defer runtime.Close()
+	emit := func(diagnostic schedule.Diagnostic) error {
+		if diagnostic.Kind == "runtime" {
+			_, err = fmt.Fprintf(output, "schedule_runtime status=%s", diagnostic.Status)
+		} else {
+			_, err = fmt.Fprintf(output, "schedule=%q occurrence=%s status=%s", diagnostic.Schedule, diagnostic.OccurrenceID, diagnostic.Status)
+		}
+		if err != nil {
+			return err
+		}
+		if diagnostic.Reason != "" {
+			if _, err = fmt.Fprintf(output, " reason=%s", diagnostic.Reason); err != nil {
+				return err
+			}
+		}
+		_, err = fmt.Fprintln(output)
+		return err
+	}
+	return schedule.RunForeground(ctx, p.Schedules, runtime, schedule.RunnerOptions{Clock: clock, Emit: emit})
 }
 
 func runChannel(args []string, input io.Reader, output, stderr io.Writer) error {

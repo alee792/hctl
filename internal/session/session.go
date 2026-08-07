@@ -380,6 +380,30 @@ func (c *Conversation) RecoverUncertain() []string {
 	return uncertain
 }
 
+// RecoverTaskUncertain terminalizes every non-parked task left in the durable
+// queue. A queued entry may already have been externally announced before a
+// crash, so restart never silently executes it.
+func (c *Conversation) RecoverTaskUncertain() ([]string, error) {
+	var recovered []string
+	for len(c.Queue) > 0 {
+		if c.Queue[0].Status == inputParked {
+			return nil, errors.New("task conversation cannot contain parked input")
+		}
+		if c.Queue[0].Status == inputQueued {
+			if _, err := c.StartNext(); err != nil {
+				return nil, err
+			}
+		}
+		id := c.Queue[0].ID
+		if err := c.Complete(id, "uncertain"); err != nil {
+			return nil, err
+		}
+		recovered = append(recovered, id)
+	}
+	c.SessionID = ""
+	return recovered, nil
+}
+
 // OutcomeReason returns the optional bounded classification for a retained
 // terminal outcome.
 func (c *Conversation) OutcomeReason(id string) string {

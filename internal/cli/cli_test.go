@@ -2,13 +2,18 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"hctl/internal/dispatch"
+	"hctl/internal/schedule"
 )
 
 func TestHeadlessCommandIsNamedRun(t *testing.T) {
@@ -262,6 +267,76 @@ func TestScheduleTriggerValidatesTurnTimeoutIndependently(t *testing.T) {
 	}
 }
 
+func TestScheduleRunHelpAndValidation(t *testing.T) {
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"schedule", "run", "--help"}, strings.NewReader(""), &output, &stderr, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "hctl schedule run AGENT") || !strings.Contains(got, "--max-active-turns N") {
+		t.Fatalf("help=%q", got)
+	}
+	if err := Run([]string{"schedule", "run"}, strings.NewReader(""), &output, &stderr, ""); err == nil || !strings.Contains(err.Error(), "schedule run AGENT") {
+		t.Fatalf("missing agent error=%v", err)
+	}
+	for _, args := range [][]string{
+		{"schedule", "run", "agent", "--harness", "claude", "--turn-timeout", "0s"},
+		{"schedule", "run", "agent", "--harness", "claude", "--max-active-turns", "0"},
+	} {
+		if err := Run(args, strings.NewReader(""), &output, &stderr, ""); err == nil {
+			t.Fatalf("invalid args accepted: %v", args)
+		}
+	}
+	root := t.TempDir()
+	writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	if err := Run([]string{"schedule", "run", root, "--harness", "claude"}, strings.NewReader(""), &output, &stderr, ""); err == nil || err.Error() != "agent project defines no schedules" {
+		t.Fatalf("no schedules error=%v", err)
+	}
+}
+
+func TestScheduleRunCancellationStopsHarnessVerification(t *testing.T) {
+	source, workspace := t.TempDir(), t.TempDir()
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "schedules", "sweep.md"), "---\ncron: '* * * * *'\n---\n\nSweep.\n", 0o644)
+	command := filepath.Join(t.TempDir(), "claude")
+	writeCLIFile(t, command, "#!/bin/sh\necho '2.1.221 (Claude Code)'\n", 0o755)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var applyOut, stderr bytes.Buffer
+	if err := Run([]string{"apply", source, "--workspace", workspace, "--harness", "claude", "--command", command}, strings.NewReader(""), &applyOut, &stderr, self); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "verifying")
+	t.Setenv("VERIFY_MARKER", marker)
+	writeCLIFile(t, command, "#!/bin/sh\n: > \"$VERIFY_MARKER\"\nexec sleep 300\n", 0o755)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runScheduleClockContext(ctx, []string{source, "--workspace", workspace, "--harness", "claude", "--command", command}, io.Discard, &stderr, nil)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("harness verification did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled verification succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled harness verification did not stop")
+	}
+}
+
 func TestScheduleTriggerRunsFreshCodexTaskAndDiscardsOutput(t *testing.T) {
 	source := t.TempDir()
 	workspace := t.TempDir()
@@ -325,6 +400,119 @@ done
 	}
 	if strings.Count(string(log), `"method":"thread/start"`) != 2 || strings.Contains(string(log), `"method":"thread/resume"`) {
 		t.Fatalf("Codex schedule tasks were not fresh and deduplicated:\n%s", log)
+	}
+}
+
+type cliScheduleClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers chan *cliScheduleTimer
+}
+type cliScheduleTimer struct{ c chan time.Time }
+
+func (c *cliScheduleClock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
+func (c *cliScheduleClock) NewTimer(time.Duration) schedule.Timer {
+	timer := &cliScheduleTimer{c: make(chan time.Time, 1)}
+	c.timers <- timer
+	return timer
+}
+func (t *cliScheduleTimer) C() <-chan time.Time { return t.c }
+func (*cliScheduleTimer) Stop() bool            { return true }
+func (c *cliScheduleClock) wake(t *testing.T, at time.Time) {
+	t.Helper()
+	select {
+	case timer := <-c.timers:
+		c.mu.Lock()
+		c.now = at
+		c.mu.Unlock()
+		timer.c <- at
+	case <-time.After(time.Second):
+		t.Fatal("schedule timer was not created")
+	}
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.Write(p)
+}
+func (b *lockedBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.Buffer.String() }
+
+func TestScheduleRunForegroundFakeClaudeAndCodex(t *testing.T) {
+	commands := map[string]string{
+		"claude": `#!/bin/sh
+if [ "${1-}" = "--version" ]; then echo "2.1.221 (Claude Code)"; exit 0; fi
+IFS= read -r line || exit 1
+printf '{"type":"system","subtype":"init","session_id":"session-fake"}\n'
+printf '{"type":"stream_event","session_id":"session-fake","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"SECRET MODEL OUTPUT"}}}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"session_id":"session-fake","result":"SECRET MODEL OUTPUT"}\n'
+`,
+		"codex": `#!/bin/sh
+if [ "${1-}" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+while IFS= read -r line; do
+ printf 'WIRE\t%s\n' "$line" >> "$FAKE_LOG"
+ case "$line" in
+  *'"method":"initialize"'*) echo '{"id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.1"}}' ;;
+  *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
+    echo '{"id":2,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"}}}'
+    ;;
+  *'"method":"turn/start"'*)
+    turn_id="01922222-2222-7222-8222-222222222222"
+    echo '{"id":3,"result":{"turn":{"id":"01922222-2222-7222-8222-222222222222","items":[],"status":"inProgress"}}}'
+    printf '{"method":"item/agentMessage/delta","params":{"threadId":"01933333-3333-7333-8333-333333333333","turnId":"01944444-4444-7444-8444-444444444444","itemId":"child-item","delta":"child"}}\n'
+    printf '{"method":"turn/completed","params":{"threadId":"01933333-3333-7333-8333-333333333333","turn":{"id":"01944444-4444-7444-8444-444444444444","items":[],"status":"completed"}}}\n'
+    printf '{"method":"item/agentMessage/delta","params":{"threadId":"01911111-1111-7111-8111-111111111111","turnId":"%s","itemId":"item-1","delta":"SECRET MODEL OUTPUT"}}\n' "$turn_id"
+    printf '{"method":"turn/completed","params":{"threadId":"01911111-1111-7111-8111-111111111111","turn":{"id":"%s","items":[],"status":"completed"}}}\n' "$turn_id"
+    ;;
+ esac
+done
+`,
+	}
+	for harnessName, script := range commands {
+		t.Run(harnessName, func(t *testing.T) {
+			source, workspace := t.TempDir(), t.TempDir()
+			writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+			writeCLIFile(t, filepath.Join(source, "schedules", "sweep.md"), "---\ncron: '* * * * *'\n---\n\nSweep stale work.\n", 0o644)
+			command := filepath.Join(t.TempDir(), harnessName)
+			logPath := filepath.Join(t.TempDir(), harnessName+".log")
+			t.Setenv("FAKE_LOG", logPath)
+			writeCLIFile(t, command, script, 0o755)
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var applyOut, stderr bytes.Buffer
+			if err := Run([]string{"apply", source, "--workspace", workspace, "--harness", harnessName, "--command", command}, strings.NewReader(""), &applyOut, &stderr, self); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+			clock := &cliScheduleClock{now: start, timers: make(chan *cliScheduleTimer, 8)}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var output lockedBuffer
+			done := make(chan error, 1)
+			go func() {
+				done <- runScheduleClockContext(ctx, []string{source, "--workspace", workspace, "--harness", harnessName, "--command", command}, &output, &stderr, clock)
+			}()
+			clock.wake(t, start.Add(time.Minute))
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) && !strings.Contains(output.String(), "status=completed") {
+				time.Sleep(time.Millisecond)
+			}
+			if got := output.String(); !strings.Contains(got, "status=completed") || strings.Contains(got, "SECRET MODEL OUTPUT") || strings.Contains(got, "Sweep stale work") {
+				log, _ := os.ReadFile(logPath)
+				t.Fatalf("schedule run output=%q stderr=%q log=%s", got, stderr.String(), log)
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

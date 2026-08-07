@@ -85,6 +85,45 @@ func (s *conversationStore) recover(ref conversationRef) ([]string, string, erro
 	return uncertain, sessionID, err
 }
 
+func (s *conversationStore) recoverTask(ref conversationRef) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var recovered []string
+	err := s.persistMutationIfChanged(func() (bool, error) {
+		conversation, err := s.lookup(ref)
+		if err != nil || conversation == nil || len(conversation.Queue) == 0 {
+			return false, err
+		}
+		recovered, err = conversation.RecoverTaskUncertain()
+		return len(recovered) > 0, err
+	})
+	return recovered, err
+}
+
+func (s *conversationStore) terminalizeTask(ref conversationRef, inputID, outcome string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistMutation(func() error {
+		conversation, err := s.conversation(ref)
+		if err != nil {
+			return err
+		}
+		if len(conversation.Queue) == 0 || conversation.Queue[0].ID != inputID {
+			return errors.New("task input does not match durable queue")
+		}
+		if conversation.Queue[0].Status == "queued" {
+			if _, err := conversation.StartNext(); err != nil {
+				return err
+			}
+		}
+		if err := conversation.Complete(inputID, outcome); err != nil {
+			return err
+		}
+		conversation.SessionID = ""
+		return nil
+	})
+}
+
 func (s *conversationStore) snapshot(ref conversationRef) (conversationSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

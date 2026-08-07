@@ -299,6 +299,11 @@ dispatchLoop:
 				}
 				process, err = driver.Open(ctx, harness.OpenRequest{Root: p.WorkspaceRoot, ResumeID: snapshot.sessionID, Policy: policy, ManagedRequestInput: requestInputs != nil})
 				if err != nil {
+					if options.taskDeadline {
+						if terminalErr := store.terminalizeTask(ref, snapshot.firstID, "failed"); terminalErr != nil {
+							return terminalErr
+						}
+					}
 					sink.emit(Event{Type: "driver.process_failed", InputID: snapshot.firstID, SessionID: snapshot.sessionID, Status: "startup_failure"})
 					return err
 				}
@@ -494,6 +499,16 @@ dispatchLoop:
 			}
 			if message.err != nil {
 				snapshot, _ := store.snapshot(ref)
+				if options.taskDeadline {
+					if terminalErr := store.terminalizeTask(ref, active.ID, "uncertain"); terminalErr != nil {
+						return terminalErr
+					}
+					completedID := active.ID
+					active = nil
+					process.Abort()
+					sink.emit(Event{Type: "turn.uncertain", InputID: completedID, SessionID: snapshot.sessionID, TurnID: completedID, Status: "process_failure"})
+					return message.err
+				}
 				sink.emit(Event{Type: "driver.process_failed", InputID: active.ID, SessionID: snapshot.sessionID, Status: "process_failure"})
 				return message.err
 			}

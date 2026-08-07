@@ -131,6 +131,10 @@ occurrence explicitly with a stable caller-owned ID:
 hctl schedule trigger ~/agents/reviewer billing/sweep \
   --workspace ~/Code/example --harness codex \
   --input-id billing-sweep-2026-08-06 --turn-timeout 90s
+
+# Or keep the validated schedules running from a foreground UTC clock.
+hctl schedule run ~/agents/reviewer \
+  --workspace ~/Code/example --harness codex
 ```
 
 Each accepted occurrence starts a fresh native-harness session. Retrying the

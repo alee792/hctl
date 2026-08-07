@@ -10,9 +10,10 @@
 
 Make the authored directory layout the project API. Derive the agent name from
 the directory, load descriptive `instructions.md`, and discover optional
-Agent Skills directories at `skills/NAME/SKILL.md`, `tools/`, and immediate
-`subagents/` without a registry or required configuration file. Copy supported
-regular skill resources into each harness's project skill location. Keep
+authored paths such as Agent Skills directories at `skills/NAME/SKILL.md`,
+`tools/`, and immediate `subagents/` without a registry or required
+configuration file. Copy supported regular skill resources into each harness's
+project skill location. Keep
 harness-specific skill metadata beside `SKILL.md` only when the target has an
 honest native representation. When applying recognized vendor metadata to a
 different harness, copy it unchanged and warn that it may have no effect rather

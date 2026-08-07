@@ -4,6 +4,7 @@
 - Integrated by: [ADR 0023](0023-continue-codex-input-in-a-new-turn.md),
   [ADR 0024](0024-resume-claude-channel-input-with-native-tool-deferral.md),
   and [ADR 0025](0025-render-discord-input-with-bounded-native-components.md)
+- Implementation: integrated into the live Discord path on 2026-08-07
 
 ## Decision
 

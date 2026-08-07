@@ -156,6 +156,97 @@ func TestWritableChannelInstructionsDoNotRequestElevationAgain(t *testing.T) {
 	}
 }
 
+func TestVendoredPluginSkillsGenerateForBothHarnesses(t *testing.T) {
+	root := testAgent(t)
+	write(t, filepath.Join(root, "plugins", "review-pack", "plugin.json"), `{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "review-pack",
+  "extensions": {"com.example.review": {}},
+  "future": true
+}`)
+	write(t, filepath.Join(root, "plugins", "review-pack", "skills", "review", "SKILL.md"), "---\nname: review\ndescription: Review carefully.\nallowed-tools: Read\n---\n\nReview.\n")
+	write(t, filepath.Join(root, "plugins", "review-pack", "skills", "review", "references", "guide.md"), "plugin guide\n")
+
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			p, err := project.Load(root, harness)
+			if err != nil {
+				t.Fatal(err)
+			}
+			generated, err := filesFor(p, "/opt/hctl/bin/hctl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			prefix := ".claude/skills"
+			if harness == "codex" {
+				prefix = ".agents/skills"
+			}
+			if got := string(generated.Files[prefix+"/review/references/guide.md"].Content); got != "plugin guide\n" {
+				t.Fatalf("generated plugin resource = %q", got)
+			}
+			wantDiagnostics := 2
+			if harness == "codex" {
+				wantDiagnostics = 3
+			}
+			if len(generated.Diagnostics) != wantDiagnostics {
+				t.Fatalf("%s diagnostics = %#v", harness, generated.Diagnostics)
+			}
+			for _, diagnostic := range generated.Diagnostics {
+				if diagnostic.Harness != harness || !strings.HasPrefix(diagnostic.Path, "plugins/review-pack/") {
+					t.Fatalf("%s diagnostic lost plugin source context: %#v", harness, diagnostic)
+				}
+			}
+		})
+	}
+}
+
+func TestVendoredPluginSkillRemovalCleansGeneratedFiles(t *testing.T) {
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			source := testAgent(t)
+			workspace := t.TempDir()
+			pluginRoot := filepath.Join(source, "plugins", "review-pack")
+			write(t, filepath.Join(pluginRoot, "plugin.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"review-pack"}`)
+			write(t, filepath.Join(pluginRoot, "skills", "review", "SKILL.md"), "---\nname: review\ndescription: Review carefully.\n---\n\nReview.\n")
+
+			loaded, err := project.Load(source, harness, workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Apply(loaded, "/opt/hctl/bin/hctl"); err != nil {
+				t.Fatal(err)
+			}
+			generated := filepath.Join(workspace, ".claude", "skills", "review", "SKILL.md")
+			if harness == "codex" {
+				generated = filepath.Join(workspace, ".agents", "skills", "review", "SKILL.md")
+			}
+			if _, err := os.Stat(generated); err != nil {
+				t.Fatalf("generated plugin skill missing before removal: %v", err)
+			}
+
+			if err := os.RemoveAll(pluginRoot); err != nil {
+				t.Fatal(err)
+			}
+			withoutPlugin, err := project.Load(source, harness, workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if withoutPlugin.SourceFingerprint == loaded.SourceFingerprint {
+				t.Fatal("plugin removal did not change the source fingerprint")
+			}
+			if _, err := Apply(withoutPlugin, "/opt/hctl/bin/hctl"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(generated); !os.IsNotExist(err) {
+				t.Fatalf("removed plugin skill remains in generated setup: %v", err)
+			}
+			if err := Verify(loaded); err == nil || !strings.Contains(err.Error(), "stale") {
+				t.Fatalf("pre-removal project did not become stale: %v", err)
+			}
+		})
+	}
+}
+
 func TestSubagentEffortNativeOutput(t *testing.T) {
 	for _, effort := range []string{"", "low", "medium", "high"} {
 		label := effort

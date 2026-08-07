@@ -23,8 +23,9 @@ open follow-up questions.
 The repository contains a small Go CLI, with one maintained YAML dependency,
 that:
 
-- applies portable agent instructions, open Agent Skills directories with
-  bundled resources, immediate inherited subagents with an optional portable
+- applies portable agent instructions, root and vendored Agent Plugins v1
+  skills with bundled resources, immediate inherited subagents with an optional
+  portable
   reasoning-effort request, and selected
   harness-specific native files to an
   independently selected workspace as native Claude Code and Codex files
@@ -130,6 +131,11 @@ a generated custom subagent, and session resume in a fresh external workspace.
   metadata and regular-file resources survive both native project harness
   setups. Recognized vendor metadata is copied unchanged to either target and
   warns when that harness does not document honoring it.
+- Agent Plugins v1 directories may be vendored beneath `plugins/`. Hctl validates
+  each local manifest without a schema fetch and imports only its fixed Agent
+  Skills component. Root skills and earlier plugin directories win deterministic
+  name collisions; invalid plugins and plugin skills warn without suppressing
+  independent valid components.
 - Intentionally nonportable native files use a literal
   `harnesses/claude/.claude/` or `harnesses/codex/.codex/` tree. Only the
   selected tree is copied, its files share the existing source-fingerprint and
@@ -160,6 +166,9 @@ a generated custom subagent, and session resume in a fresh external workspace.
 
 These are later product promises, not MVP implementation work:
 
+- Shape native, unmanaged Agent Plugins MCP mapping from GitHub issue #27 using
+  Phase 1 evidence. Do not infer installation, marketplace, update, credential,
+  proxy, or extension support from vendored skill loading.
 - Advance the remaining schedule runtime as separate bounded slices: per-turn
   dispatch deadlines, then a foreground local clock. Completing that sequence
   is not permission to add live credentials, contact GitHub or Discord,

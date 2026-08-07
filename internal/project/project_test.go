@@ -589,6 +589,236 @@ Use echo.
 	}
 }
 
+func TestLoadImportsVendoredPluginSkillsDeterministically(t *testing.T) {
+	root := agent(t, "portable")
+	write(t, filepath.Join(root, "plugins", "zeta", "plugin.json"), pluginManifest("zeta"))
+	write(t, filepath.Join(root, "plugins", "zeta", "skills", "review", "SKILL.md"), "---\nname: review\ndescription: Review carefully.\n---\n\nReview.\n")
+	write(t, filepath.Join(root, "plugins", "zeta", "skills", "review", "references", "guide.md"), "guide one\n")
+	write(t, filepath.Join(root, "plugins", "alpha", "plugin.json"), `{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "alpha",
+  "extensions": {"com.example.alpha": {"mode": "safe"}},
+  "future": true
+}`)
+	write(t, filepath.Join(root, "plugins", "alpha", "skills", "echo", "SKILL.md"), "---\nname: echo\ndescription: Must lose to the root.\n---\n")
+	write(t, filepath.Join(root, "plugins", "alpha", "skills", "analyze", "SKILL.md"), "---\nname: analyze\ndescription: Analyze evidence.\n---\n")
+	write(t, filepath.Join(root, "plugins", "broken", "plugin.json"), `{"$schema":"wrong","name":"broken"}`)
+	write(t, filepath.Join(root, "plugins", "broken", "skills", "ignored", "SKILL.md"), "---\nname: ignored\ndescription: Ignore.\n---\n")
+	write(t, filepath.Join(root, "plugins", "invalid-skill", "plugin.json"), pluginManifest("invalid-skill"))
+	write(t, filepath.Join(root, "plugins", "invalid-skill", "skills", "bad", "SKILL.md"), "not frontmatter\n")
+
+	first, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SourceFingerprint != second.SourceFingerprint {
+		t.Fatal("same plugin source produced different fingerprints")
+	}
+	got := []string{}
+	for _, skill := range first.Skills {
+		got = append(got, skill.Name+"@"+skill.SourcePath)
+	}
+	want := "[echo@skills/echo analyze@plugins/alpha/skills/analyze review@plugins/zeta/skills/review]"
+	if fmt.Sprint(got) != want {
+		t.Fatalf("plugin skill order = %v, want %s", got, want)
+	}
+	if len(first.Diagnostics) != 5 {
+		t.Fatalf("plugin diagnostics = %#v", first.Diagnostics)
+	}
+	diagnosticText := fmt.Sprint(first.Diagnostics)
+	for _, fragment := range []string{"extensions.com.example.alpha", "future", "already provided", "plugin rejected", "plugin skill skipped"} {
+		if !strings.Contains(diagnosticText, fragment) {
+			t.Fatalf("plugin diagnostics omitted %q: %#v", fragment, first.Diagnostics)
+		}
+	}
+
+	write(t, filepath.Join(root, "plugins", "zeta", "skills", "review", "references", "guide.md"), "guide two\n")
+	changed, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.SourceFingerprint == first.SourceFingerprint {
+		t.Fatal("plugin skill resource did not change the fingerprint")
+	}
+	write(t, filepath.Join(root, "plugins", "zeta", "plugin.json"), strings.Replace(pluginManifest("zeta"), "\n}", ",\n  \"description\": \"Changed\"\n}", 1))
+	manifestChanged, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifestChanged.SourceFingerprint == changed.SourceFingerprint {
+		t.Fatal("plugin manifest did not change the fingerprint")
+	}
+	if err := os.Chmod(filepath.Join(root, "plugins", "zeta", "skills", "review", "references", "guide.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	modeChanged, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modeChanged.SourceFingerprint == manifestChanged.SourceFingerprint {
+		t.Fatal("plugin skill executable intent did not change the fingerprint")
+	}
+}
+
+func TestPluginManifestValidationAndIsolation(t *testing.T) {
+	tests := map[string]struct {
+		manifest string
+		want     string
+	}{
+		"missing schema":       {`{"name":"example"}`, "must equal"},
+		"wrong schema":         {`{"$schema":"wrong","name":"example"}`, "must equal"},
+		"invalid name":         {`{"$schema":"` + pluginSchema + `","name":"Bad_Name"}`, "name format"},
+		"wrong metadata type":  {`{"$schema":"` + pluginSchema + `","name":"example","version":1}`, "must be a string"},
+		"unknown author field": {`{"$schema":"` + pluginSchema + `","name":"example","author":{"team":"x"}}`, "unsupported field"},
+		"trailing JSON":        {`{"$schema":"` + pluginSchema + `","name":"example"} {}`, "one JSON value"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := agent(t, "portable")
+			write(t, filepath.Join(root, "plugins", "example", "plugin.json"), test.manifest)
+			write(t, filepath.Join(root, "plugins", "example", "skills", "from-plugin", "SKILL.md"), "---\nname: from-plugin\ndescription: Import me.\n---\n")
+			loaded, err := Load(root, "codex")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(loaded.Skills) != 1 || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, test.want) {
+				t.Fatalf("invalid plugin was not isolated with %q: skills=%#v diagnostics=%#v", test.want, loaded.Skills, loaded.Diagnostics)
+			}
+		})
+	}
+
+	t.Run("unknown field is reported with rejection", func(t *testing.T) {
+		root := agent(t, "portable")
+		write(t, filepath.Join(root, "plugins", "example", "plugin.json"), `{"$schema":"wrong","name":"example","future":true}`)
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.Diagnostics) != 2 || loaded.Diagnostics[0].Field != "future" || !strings.Contains(loaded.Diagnostics[1].Message, "plugin rejected") {
+			t.Fatalf("unknown field and rejection diagnostics = %#v", loaded.Diagnostics)
+		}
+	})
+
+	for name, extensions := range map[string]string{
+		"non-object extensions":       `42`,
+		"unvalidated namespace value": `{"com.example":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := agent(t, "portable")
+			write(t, filepath.Join(root, "plugins", "example", "plugin.json"), `{"$schema":"`+pluginSchema+`","name":"example","extensions":`+extensions+`}`)
+			write(t, filepath.Join(root, "plugins", "example", "skills", "from-plugin", "SKILL.md"), "---\nname: from-plugin\ndescription: Import me.\n---\n")
+			loaded, err := Load(root, "codex")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(loaded.Skills) != 2 || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, "ignored") {
+				t.Fatalf("extensions were not ignored: skills=%#v diagnostics=%#v", loaded.Skills, loaded.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestPluginFilesystemBoundaries(t *testing.T) {
+	t.Run("missing skills is normal", func(t *testing.T) {
+		root := agent(t, "portable")
+		write(t, filepath.Join(root, "plugins", "metadata-only", "plugin.json"), pluginManifest("metadata-only"))
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.Skills) != 1 || len(loaded.Diagnostics) != 0 {
+			t.Fatalf("metadata-only plugin = skills %#v diagnostics %#v", loaded.Skills, loaded.Diagnostics)
+		}
+	})
+
+	t.Run("plugins directory symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(root, "plugins")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "real directory") {
+			t.Fatalf("plugins symlink was not rejected: %v", err)
+		}
+	})
+
+	t.Run("plugin directory symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		outside := t.TempDir()
+		write(t, filepath.Join(outside, "plugin.json"), pluginManifest("linked"))
+		if err := os.MkdirAll(filepath.Join(root, "plugins"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(root, "plugins", "linked")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "real plugin directories") {
+			t.Fatalf("plugin directory symlink was not rejected: %v", err)
+		}
+	})
+
+	t.Run("plugin skill resource symlink", func(t *testing.T) {
+		root := agent(t, "portable")
+		write(t, filepath.Join(root, "plugins", "example", "plugin.json"), pluginManifest("example"))
+		write(t, filepath.Join(root, "plugins", "example", "skills", "safe", "SKILL.md"), "---\nname: safe\ndescription: Safe.\n---\n")
+		outside := filepath.Join(t.TempDir(), "secret")
+		write(t, outside, "secret\n")
+		if err := os.Symlink(outside, filepath.Join(root, "plugins", "example", "skills", "safe", "secret")); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.Skills) != 1 || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, "symlinks") {
+			t.Fatalf("plugin skill symlink was not isolated: skills=%#v diagnostics=%#v", loaded.Skills, loaded.Diagnostics)
+		}
+	})
+
+	t.Run("aggregate skill limit", func(t *testing.T) {
+		root := agent(t, "portable")
+		write(t, filepath.Join(root, "plugins", "many", "plugin.json"), pluginManifest("many"))
+		for index := 0; index < maxSkills; index++ {
+			name := fmt.Sprintf("plugin-%d", index)
+			write(t, filepath.Join(root, "plugins", "many", "skills", name, "SKILL.md"), fmt.Sprintf("---\nname: %s\ndescription: Extra.\n---\n", name))
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "at most") {
+			t.Fatalf("aggregate skill limit was not enforced: %v", err)
+		}
+	})
+
+	t.Run("plugin directory entry limit", func(t *testing.T) {
+		root := agent(t, "portable")
+		for index := 0; index <= maxPlugins; index++ {
+			write(t, filepath.Join(root, "plugins", fmt.Sprintf("plugin-%02d", index), "plugin.json"), pluginManifest(fmt.Sprintf("plugin-%02d", index)))
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "at most 32") {
+			t.Fatalf("plugin directory entry limit was not enforced: %v", err)
+		}
+	})
+
+	t.Run("plugin skill entry limit", func(t *testing.T) {
+		root := agent(t, "portable")
+		write(t, filepath.Join(root, "plugins", "many", "plugin.json"), pluginManifest("many"))
+		for index := 0; index <= maxPluginSkills; index++ {
+			if err := os.MkdirAll(filepath.Join(root, "plugins", "many", "skills", fmt.Sprintf("entry-%03d", index)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.Skills) != 1 || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, "at most 128") {
+			t.Fatalf("plugin skill entry limit was not isolated: skills=%#v diagnostics=%#v", loaded.Skills, loaded.Diagnostics)
+		}
+	})
+}
+
 func TestSkillResourcesChangeFingerprint(t *testing.T) {
 	root := agent(t, "portable")
 	resource := filepath.Join(root, "skills", "echo", "scripts", "run.sh")
@@ -970,4 +1200,8 @@ func writeBytes(t *testing.T, path string, content []byte, mode os.FileMode) {
 
 func instructions(body string) string {
 	return "---\ndescription: Test agent.\n---\n\n" + body + "\n"
+}
+
+func pluginManifest(name string) string {
+	return "{\n  \"$schema\": \"" + pluginSchema + "\",\n  \"name\": \"" + name + "\"\n}\n"
 }

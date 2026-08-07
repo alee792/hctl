@@ -25,6 +25,8 @@ const (
 	GeneratorVersion   = "hctl/0.9.0-dev"
 	maxSourceBytes     = 128 << 10
 	maxSkills          = 8
+	maxPlugins         = 32
+	maxPluginSkills    = 128
 	maxSkillFiles      = 128
 	maxSkillFileBytes  = 1 << 20
 	maxSkillBytes      = 8 << 20
@@ -41,7 +43,10 @@ const (
 var (
 	portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 	skillName    = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	pluginName   = regexp.MustCompile(`^(?:[a-z0-9]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9]))$`)
 )
+
+const pluginSchema = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 
 type Skill struct {
 	Name                string
@@ -53,6 +58,13 @@ type Skill struct {
 	AllowedToolsPresent bool
 	ClaudeFields        []string
 	Files               []File
+	SourcePath          string
+}
+
+type Diagnostic struct {
+	Path    string
+	Field   string
+	Message string
 }
 
 type File struct {
@@ -107,6 +119,7 @@ type Project struct {
 	Harness           string
 	Instructions      []byte
 	Skills            []Skill
+	Diagnostics       []Diagnostic
 	Subagents         []Subagent
 	HarnessFiles      []File
 	GitHubConnection  *GitHubConnection
@@ -178,6 +191,10 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 	if err != nil {
 		return nil, err
 	}
+	skills, pluginSources, diagnostics, err := loadPlugins(sourceRoot, skills)
+	if err != nil {
+		return nil, err
+	}
 	tools, err := tool.Discover(sourceRoot)
 	if err != nil {
 		return nil, err
@@ -216,12 +233,13 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 	for _, skill := range skills {
 		for _, file := range skill.Files {
 			sources = append(sources, SourceRecord{
-				Path:       "skills/" + skill.Name + "/" + file.Path,
+				Path:       skill.SourcePath + "/" + file.Path,
 				SHA256:     rootfs.SHA256(file.Content),
 				Executable: file.Executable,
 			})
 		}
 	}
+	sources = append(sources, pluginSources...)
 	for _, subagent := range subagents {
 		sources = append(sources, SourceRecord{Path: subagent.Path, SHA256: rootfs.SHA256(subagent.Source)})
 	}
@@ -266,6 +284,7 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 		Harness:           harness,
 		Instructions:      instructions,
 		Skills:            skills,
+		Diagnostics:       diagnostics,
 		Subagents:         subagents,
 		HarnessFiles:      harnessFiles,
 		GitHubConnection:  githubConnection,
@@ -844,34 +863,43 @@ func loadSkills(root string) ([]Skill, error) {
 		if !validSkillName(name) {
 			return nil, fmt.Errorf("skill directory %q must be 1-64 lowercase ASCII letters, numbers, and single hyphens", name)
 		}
-		files, err := loadSkillFiles(root, name)
+		skill, err := loadSkill(root, "skills/"+name, name)
 		if err != nil {
 			return nil, fmt.Errorf("skill %q: %w", name, err)
 		}
-		frontmatter, err := parseSkill(files[0].Content)
-		if err != nil {
-			return nil, fmt.Errorf("skill %q SKILL.md: %w", name, err)
-		}
-		if frontmatter.Name != name {
-			return nil, fmt.Errorf("skill %q name must match its parent directory", name)
-		}
-		skills = append(skills, Skill{
-			Name:                name,
-			Description:         frontmatter.Description,
-			License:             frontmatter.License,
-			Compatibility:       frontmatter.Compatibility,
-			Metadata:            frontmatter.Metadata,
-			AllowedTools:        frontmatter.AllowedTools,
-			AllowedToolsPresent: frontmatter.AllowedToolsPresent,
-			ClaudeFields:        frontmatter.ClaudeFields,
-			Files:               files,
-		})
+		skills = append(skills, skill)
 	}
 	return skills, nil
 }
 
-func loadSkillFiles(root, name string) ([]File, error) {
-	directory := filepath.Join(root, "skills", name)
+func loadSkill(root, sourcePath, name string) (Skill, error) {
+	files, err := loadSkillFiles(root, sourcePath)
+	if err != nil {
+		return Skill{}, err
+	}
+	frontmatter, err := parseSkill(files[0].Content)
+	if err != nil {
+		return Skill{}, fmt.Errorf("SKILL.md: %w", err)
+	}
+	if frontmatter.Name != name {
+		return Skill{}, errors.New("name must match its parent directory")
+	}
+	return Skill{
+		Name:                name,
+		Description:         frontmatter.Description,
+		License:             frontmatter.License,
+		Compatibility:       frontmatter.Compatibility,
+		Metadata:            frontmatter.Metadata,
+		AllowedTools:        frontmatter.AllowedTools,
+		AllowedToolsPresent: frontmatter.AllowedToolsPresent,
+		ClaudeFields:        frontmatter.ClaudeFields,
+		Files:               files,
+		SourcePath:          sourcePath,
+	}, nil
+}
+
+func loadSkillFiles(root, sourcePath string) ([]File, error) {
+	directory := filepath.Join(root, filepath.FromSlash(sourcePath))
 	files := []File{}
 	total := 0
 	err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
@@ -941,6 +969,206 @@ func loadSkillFiles(root, name string) ([]File, error) {
 		return nil, errors.New("SKILL.md must be valid UTF-8")
 	}
 	return files, nil
+}
+
+func loadPlugins(root string, skills []Skill) ([]Skill, []SourceRecord, []Diagnostic, error) {
+	directory := filepath.Join(root, "plugins")
+	info, err := os.Lstat(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return skills, nil, nil, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, nil, errors.New("plugins must be a real directory")
+	}
+	entries, err := readDirectory(directory, maxPlugins)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("plugins: %w", err)
+	}
+	seen := make(map[string]bool, len(skills))
+	for _, skill := range skills {
+		seen[skill.Name] = true
+	}
+	sources := []SourceRecord{}
+	diagnostics := []Diagnostic{}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		entryInfo, err := entry.Info()
+		if err != nil || !entryInfo.IsDir() || entryInfo.Mode()&os.ModeSymlink != 0 {
+			return nil, nil, nil, fmt.Errorf("plugins may contain real plugin directories only; found %q", entry.Name())
+		}
+		pluginPath := "plugins/" + entry.Name()
+		manifestPath := pluginPath + "/plugin.json"
+		manifest, err := rootfs.ReadSource(root, manifestPath, maxSourceBytes)
+		if err != nil {
+			diagnostics = append(diagnostics, Diagnostic{Path: manifestPath, Message: "plugin rejected: " + err.Error()})
+			continue
+		}
+		manifestDiagnostics, err := validatePluginManifest(manifestPath, manifest)
+		diagnostics = append(diagnostics, manifestDiagnostics...)
+		if err != nil {
+			diagnostics = append(diagnostics, Diagnostic{Path: manifestPath, Message: "plugin rejected: " + err.Error()})
+			continue
+		}
+		sources = append(sources, SourceRecord{Path: manifestPath, SHA256: rootfs.SHA256(manifest)})
+
+		skillRoot := filepath.Join(directory, entry.Name(), "skills")
+		skillRootInfo, err := os.Lstat(skillRoot)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || !skillRootInfo.IsDir() || skillRootInfo.Mode()&os.ModeSymlink != 0 {
+			diagnostics = append(diagnostics, Diagnostic{Path: pluginPath + "/skills", Message: "plugin skills skipped: must be a real directory"})
+			continue
+		}
+		skillEntries, err := readDirectory(skillRoot, maxPluginSkills)
+		if err != nil {
+			diagnostics = append(diagnostics, Diagnostic{Path: pluginPath + "/skills", Message: "plugin skills skipped: " + err.Error()})
+			continue
+		}
+		for _, skillEntry := range skillEntries {
+			if strings.HasPrefix(skillEntry.Name(), ".") {
+				continue
+			}
+			sourcePath := pluginPath + "/skills/" + skillEntry.Name()
+			skillInfo, err := skillEntry.Info()
+			if err != nil || !skillInfo.IsDir() || skillInfo.Mode()&os.ModeSymlink != 0 {
+				diagnostics = append(diagnostics, Diagnostic{Path: sourcePath, Message: "plugin skill skipped: must be a real directory"})
+				continue
+			}
+			name := skillEntry.Name()
+			if !validSkillName(name) {
+				diagnostics = append(diagnostics, Diagnostic{Path: sourcePath, Message: "plugin skill skipped: directory name must be 1-64 lowercase ASCII letters, numbers, and single hyphens"})
+				continue
+			}
+			if seen[name] {
+				diagnostics = append(diagnostics, Diagnostic{Path: sourcePath, Message: fmt.Sprintf("plugin skill skipped: skill name %q is already provided by an earlier source", name)})
+				continue
+			}
+			skill, err := loadSkill(root, sourcePath, name)
+			if err != nil {
+				diagnostics = append(diagnostics, Diagnostic{Path: sourcePath, Message: "plugin skill skipped: " + err.Error()})
+				continue
+			}
+			if len(skills) == maxSkills {
+				return nil, nil, nil, fmt.Errorf("agent may contain at most %d skills", maxSkills)
+			}
+			seen[name] = true
+			skills = append(skills, skill)
+		}
+	}
+	return skills, sources, diagnostics, nil
+}
+
+func validatePluginManifest(path string, content []byte) ([]Diagnostic, error) {
+	if !utf8.Valid(content) {
+		return nil, errors.New("must be valid UTF-8")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	var fields map[string]json.RawMessage
+	if err := decoder.Decode(&fields); err != nil || fields == nil {
+		return nil, errors.New("must be one JSON object")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("must contain one JSON value")
+	}
+	allowed := map[string]bool{"$schema": true, "name": true, "version": true, "description": true, "author": true, "homepage": true, "repository": true, "license": true, "keywords": true, "extensions": true}
+	diagnostics := []Diagnostic{}
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !allowed[key] {
+			diagnostics = append(diagnostics, Diagnostic{Path: path, Field: key, Message: "unsupported manifest field ignored"})
+		}
+	}
+	var schema string
+	if raw, ok := fields["$schema"]; !ok || json.Unmarshal(raw, &schema) != nil || schema != pluginSchema {
+		return diagnostics, fmt.Errorf("field %q must equal %q", "$schema", pluginSchema)
+	}
+	var name string
+	if raw, ok := fields["name"]; !ok || json.Unmarshal(raw, &name) != nil || len(name) > 64 || !pluginName.MatchString(name) || strings.Contains(name, "--") || strings.Contains(name, "..") {
+		return diagnostics, errors.New("field \"name\" must match the Agent Plugins v1 name format")
+	}
+	for _, key := range []string{"version", "description", "homepage", "repository", "license"} {
+		if raw, ok := fields[key]; ok {
+			var value string
+			if json.Unmarshal(raw, &value) != nil {
+				return diagnostics, fmt.Errorf("field %q must be a string", key)
+			}
+		}
+	}
+	if raw, ok := fields["keywords"]; ok {
+		var value []string
+		if json.Unmarshal(raw, &value) != nil || value == nil {
+			return diagnostics, errors.New("field \"keywords\" must be an array of strings")
+		}
+	}
+	if raw, ok := fields["author"]; ok {
+		if err := validatePluginObject(raw, map[string]bool{"name": true, "email": true, "url": true}); err != nil {
+			return diagnostics, fmt.Errorf("field \"author\": %w", err)
+		}
+	}
+	if raw, ok := fields["extensions"]; ok {
+		var extensions map[string]json.RawMessage
+		if json.Unmarshal(raw, &extensions) != nil || extensions == nil {
+			diagnostics = append(diagnostics, Diagnostic{Path: path, Field: "extensions", Message: "non-object extensions value ignored"})
+		} else {
+			namespaces := make([]string, 0, len(extensions))
+			for namespace := range extensions {
+				namespaces = append(namespaces, namespace)
+			}
+			sort.Strings(namespaces)
+			for _, namespace := range namespaces {
+				diagnostics = append(diagnostics, Diagnostic{Path: path, Field: "extensions." + namespace, Message: "unsupported extension namespace ignored"})
+			}
+		}
+	}
+	return diagnostics, nil
+}
+
+func validatePluginObject(raw json.RawMessage, allowed map[string]bool) error {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return errors.New("must be an object")
+	}
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := fields[key]
+		if !allowed[key] {
+			return fmt.Errorf("unsupported field %q", key)
+		}
+		var text string
+		if json.Unmarshal(value, &text) != nil {
+			return fmt.Errorf("field %q must be a string", key)
+		}
+	}
+	return nil
+}
+
+func readDirectory(path string, maxEntries int) ([]os.DirEntry, error) {
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("cannot read directory")
+	}
+	entries, readErr := directory.ReadDir(maxEntries + 1)
+	closeErr := directory.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) || closeErr != nil {
+		return nil, errors.New("cannot read directory")
+	}
+	if len(entries) > maxEntries {
+		return nil, fmt.Errorf("may contain at most %d entries", maxEntries)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	return entries, nil
 }
 
 func nameFromRoot(root string) string {

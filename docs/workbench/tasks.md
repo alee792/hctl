@@ -36,7 +36,36 @@ completed predecessor.
    and skips overlapping occurrences. Do not install or mutate launchd,
    systemd, crontab, or a hosted scheduler.
 
+## Directed follow-up
+
+**[GitHub #27](https://github.com/alee792/hctl/issues/27) — Map vendored Agent
+Plugins v1 MCP servers into native harness setup.** Keep this in `needs-triage`
+until the vendored-skill implementation supplies concrete collision,
+diagnostic, trust, and lifecycle evidence. Shape native unmanaged MCP mapping
+as its own slice; do not add installation, download, update, marketplace,
+credential, proxy, extension, or cross-client conversion behavior.
+
 ## Completed
+
+### [GitHub #26](https://github.com/alee792/hctl/issues/26) — Import vendored Agent Plugins v1 skills
+
+**Outcome:** An optional `plugins/` directory accepts local Agent Plugins v1
+directories with bounded manifests targeting the exact canonical schema. Hctl
+imports valid skills from fixed plugin `skills/` locations into the existing
+Claude and Codex native skill setup. Root skills and earlier lexical plugin
+directories win name collisions. Malformed plugins, invalid plugin skills,
+unsupported manifest fields, and ignored extension namespaces report precise
+warnings while independent valid components continue.
+
+**Evidence:** Project and setup tests cover missing locations, exact manifest
+validation, bounded deterministic discovery and precedence, failure isolation,
+diagnostic source paths, resource, mode, and manifest fingerprint changes,
+symlink denial, stale generated-skill cleanup, and both native harness targets. The credential-free
+[plugin example](../../examples/plugins) and
+[ADR 0014](../adr/0014-import-vendored-agent-plugin-skills.md) record the
+vendored-dependency boundary. `mcp.json`, installation, downloads, updates,
+marketplaces, extensions, credentials, and vendor conversion remain outside
+this phase.
 
 ### HCTL-012 — Add portable schedule source and one-shot dispatch
 

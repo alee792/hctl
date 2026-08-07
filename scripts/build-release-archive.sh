@@ -44,7 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-"$repo_root/scripts/build-hctl-binary.sh" --target darwin-arm64 --output "$stage/hctl"
+"$repo_root/scripts/build-hctl-binary.sh" --target darwin-arm64 --version "$version" --output "$stage/hctl"
 [ -x "$stage/hctl" ] || {
   echo "release archive did not produce an executable" >&2
   exit 1

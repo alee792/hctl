@@ -4,15 +4,21 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 usage() {
-  echo "usage: ./scripts/build-hctl-binary.sh --target <darwin-arm64|linux-amd64> --output FILE" >&2
+  echo "usage: ./scripts/build-hctl-binary.sh --target <darwin-arm64|linux-amd64> --version VERSION --output FILE" >&2
   exit 64
 }
 
-if [ "$#" -ne 4 ] || [ "$1" != "--target" ] || [ -z "$2" ] || [ "$3" != "--output" ] || [ -z "$4" ]; then
+if [ "$#" -ne 6 ] || [ "$1" != "--target" ] || [ -z "$2" ] || [ "$3" != "--version" ] || [ -z "$4" ] || [ "$5" != "--output" ] || [ -z "$6" ]; then
   usage
 fi
 target=$2
-requested_output=$4
+version=$4
+requested_output=$6
+
+if ! (cd "$repo_root" && go run -mod=readonly ./scripts/image-inputs validate-version "$version"); then
+  echo "binary version must be an exact semantic version without a v prefix: $version" >&2
+  exit 64
+fi
 
 case "$target" in
   darwin-arm64)
@@ -43,7 +49,8 @@ trap cleanup EXIT HUP INT TERM
 (
   cd "$repo_root"
   GOOS=$target_os GOARCH=$target_arch CGO_ENABLED=0 \
-    go build -mod=readonly -trimpath -buildvcs=false -ldflags=-buildid= \
+    go build -mod=readonly -trimpath -buildvcs=false \
+    -ldflags="-buildid= -X hctl/internal/version.Value=$version" \
     -o "$stage/hctl" ./cmd/hctl
 )
 [ -x "$stage/hctl" ] || {

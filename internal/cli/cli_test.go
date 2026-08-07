@@ -14,7 +14,23 @@ import (
 
 	"hctl/internal/dispatch"
 	"hctl/internal/schedule"
+	"hctl/internal/version"
 )
+
+func TestVersionCommandsPrintBuildVersion(t *testing.T) {
+	for _, args := range [][]string{{"version"}, {"--version"}} {
+		var output, stderr bytes.Buffer
+		if err := Run(args, strings.NewReader(""), &output, &stderr, ""); err != nil {
+			t.Fatalf("Run(%q): %v", args, err)
+		}
+		if got, want := output.String(), "hctl "+version.Value+"\n"; got != want {
+			t.Fatalf("Run(%q) output = %q, want %q", args, got, want)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("Run(%q) stderr = %q", args, stderr.String())
+		}
+	}
+}
 
 func TestHeadlessCommandIsNamedRun(t *testing.T) {
 	var output, stderr bytes.Buffer

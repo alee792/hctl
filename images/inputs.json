@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "target": {
+    "os": "linux",
+    "architecture": "amd64",
+    "abi": "glibc",
+    "compatible_base": "linux-amd64-glibc",
+    "base": {
+      "reference": "docker.io/library/ubuntu:24.04",
+      "digest": "sha256:019e8eb29a85e74d64925745884f2ec79aa27e3feab36353d24656f4d6b89467"
+    },
+    "runtime": {
+      "uid": 65532,
+      "gid": 65532,
+      "home": "/home/hctl",
+      "required_executables": [
+        "/bin/sh",
+        "/usr/bin/id"
+      ],
+      "certificate_bundle": "/etc/ssl/certs/ca-certificates.crt",
+      "writable_paths": [
+        "/home/hctl",
+        "/workspace"
+      ]
+    }
+  },
+  "hctl": {
+    "development_version": "0.9.0-dev"
+  },
+  "components": {
+    "claude": {
+      "version": "2.1.221",
+      "url": "https://downloads.claude.ai/claude-code-releases/2.1.221/linux-x64/claude",
+      "sha256": "60db8e88d42c24b5199c92cfd56ec88370c510c3789c6f364af748354f087ada",
+      "size": 288705544,
+      "format": "binary",
+      "license": "Anthropic-Commercial-Terms",
+      "publication_gate": "blocked-pending-permission"
+    },
+    "codex": {
+      "version": "0.144.1",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.144.1/codex-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "84091ae20c65fcc7d4120db97d1bd57d7ff8df9c7609fb781c78c2ebbd4f5a28",
+      "size": 109308813,
+      "format": "tar.gz",
+      "license": "Apache-2.0",
+      "publication_gate": "open"
+    },
+    "deno": {
+      "version": "2.9.4",
+      "url": "https://github.com/denoland/deno/releases/download/v2.9.4/deno-x86_64-unknown-linux-gnu.zip",
+      "sha256": "c24f955d9fbfe0ea5ae2b501c8e71ae76e31e4c9782390a54a284b3364fda725",
+      "size": 43834754,
+      "format": "zip",
+      "license": "MIT",
+      "publication_gate": "open"
+    },
+    "go": {
+      "version": "1.26.5",
+      "url": "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz",
+      "sha256": "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053",
+      "size": 66879095,
+      "format": "tar.gz",
+      "license": "BSD-3-Clause",
+      "publication_gate": "open"
+    },
+    "python": {
+      "version": "3.13.15+20260807",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260807/cpython-3.13.15%2B20260807-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "sha256": "faae10a9faa9bec06da009ac69326cc1d9691dc138fec6a1b69159dff1781f35",
+      "size": 34822151,
+      "format": "tar.gz",
+      "license": "PSF-2.0",
+      "publication_gate": "open"
+    },
+    "uv": {
+      "version": "0.11.30",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.11.30/uv-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "04bc7d180d6138bf6dc08387acf507a823f397a98fea55da36b0ccc7fbce3b68",
+      "size": 26274137,
+      "format": "tar.gz",
+      "license": "Apache-2.0 OR MIT",
+      "publication_gate": "open"
+    }
+  }
+}

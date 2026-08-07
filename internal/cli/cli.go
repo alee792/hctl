@@ -31,11 +31,13 @@ import (
 	"hctl/internal/setup"
 	"hctl/internal/stage"
 	"hctl/internal/tool"
+	"hctl/internal/version"
 )
 
 const help = `Usage: hctl <command> [arguments]
 
 Commands:
+  version                                 Print the hctl build version
   apply AGENT --harness <claude|codex>    Prepare tools and native files
   stage AGENT --harness <claude|codex>    Prepare a runnable filesystem tree
   run AGENT --harness <claude|codex>      Run configured conversational channels
@@ -48,6 +50,10 @@ Run "hctl <command> --help" for command details.
 `
 
 func Run(args []string, input io.Reader, output, stderr io.Writer, self string) error {
+	if len(args) == 1 && (args[0] == "version" || args[0] == "--version") {
+		_, err := fmt.Fprintf(output, "hctl %s\n", version.Value)
+		return err
+	}
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		_, err := io.WriteString(output, help)
 		return err
@@ -68,7 +74,7 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 	case "hook":
 		return runHook(args[1:], input, output)
 	default:
-		return fmt.Errorf("unknown command %q; expected apply, stage, run, channel, or schedule", args[0])
+		return fmt.Errorf("unknown command %q; expected version, apply, stage, run, channel, or schedule", args[0])
 	}
 }
 

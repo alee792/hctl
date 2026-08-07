@@ -112,6 +112,7 @@ assert_contains "$checksums" "hctl_0.0.0_darwin_arm64.tar.gz"
 )
 tar -xzf "$archive" -C "$install_prefix/bin"
 assert_file "$installed_hctl"
+[ "$("$installed_hctl" --version)" = "hctl 0.0.0" ] || fail "installed hctl does not report the exact release tag version"
 
 apply_output="$scratch/apply.out"
 apply_error="$scratch/apply.err"

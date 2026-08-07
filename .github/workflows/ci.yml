@@ -28,17 +28,23 @@ jobs:
       - name: Run repository checks
         run: ./scripts/check.sh
 
+      - name: Validate pinned image inputs
+        run: |
+          export PATH="$PWD/.tools/go/bin:$PATH"
+          go run -mod=readonly ./scripts/image-inputs check images/inputs.json
+
       - name: Build target binaries twice
         run: |
           mkdir -p dist repeat
           export PATH="$PWD/.tools/go/bin:$PWD/.tools/bin:$PATH"
-          ./scripts/build-hctl-binary.sh --target linux-amd64 --output dist/hctl_linux_amd64
-          ./scripts/build-hctl-binary.sh --target darwin-arm64 --output dist/hctl_darwin_arm64
-          ./scripts/build-hctl-binary.sh --target linux-amd64 --output repeat/hctl_linux_amd64
-          ./scripts/build-hctl-binary.sh --target darwin-arm64 --output repeat/hctl_darwin_arm64
+          version=$(go run -mod=readonly ./scripts/image-inputs development-version images/inputs.json)
+          ./scripts/build-hctl-binary.sh --target linux-amd64 --version "$version" --output dist/hctl_linux_amd64
+          ./scripts/build-hctl-binary.sh --target darwin-arm64 --version "$version" --output dist/hctl_darwin_arm64
+          ./scripts/build-hctl-binary.sh --target linux-amd64 --version "$version" --output repeat/hctl_linux_amd64
+          ./scripts/build-hctl-binary.sh --target darwin-arm64 --version "$version" --output repeat/hctl_darwin_arm64
           cmp dist/hctl_linux_amd64 repeat/hctl_linux_amd64
           cmp dist/hctl_darwin_arm64 repeat/hctl_darwin_arm64
-          ./dist/hctl_linux_amd64 --help >/dev/null
+          test "$(./dist/hctl_linux_amd64 --version)" = "hctl $version"
           (cd dist && sha256sum hctl_linux_amd64 hctl_darwin_arm64 >hctl_ci_SHA256SUMS)
 
       - name: Upload checked binaries

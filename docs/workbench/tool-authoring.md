@@ -166,7 +166,7 @@ func Execute(ctx context.Context, input Input) (Output, error) {
 Go host-only dependencies generate and validate JSON Schema; authored Go
 packages do not import hctl.
 
-## Apply and package behavior
+## Apply and staging behavior
 
 ### Generate only what the target requires
 
@@ -190,8 +190,9 @@ depending on the native harness process to inherit the author's shell `PATH`.
 
 Generated build glue, compiled Go hosts, and extracted host support files belong
 in an hctl cache, not among authored project files. They must be safe to delete
-and reproduce. A future `package` command may intentionally collect relocatable
-runtime artifacts; `apply` should not package by accident.
+and reproduce. The future `hctl stage` boundary from ADR 0027 may re-prepare and
+collect a selected execution closure at canonical final paths; `apply` should
+not stage by accident.
 
 The MVP now writes only `.hctl/apply/<harness>.json`. Apply migrates an intact
 legacy `.hctl/projections/<harness>.json` record and removes its duplicated
@@ -229,8 +230,9 @@ subprocess. This is a reliability boundary for trusted project code, not an OS
 sandbox or malicious-code-containment claim.
 
 `apply` necessarily prepares the local tool runtime because the generated
-harness setup must be immediately usable. A future `package` command may
-produce a relocatable artifact from the same conventions and adapters.
+harness setup must be immediately usable. A future `hctl stage` command may
+produce the bounded runnable filesystem selected by ADR 0027 from the same
+conventions and adapters.
 
 hctl keeps generated ownership, fingerprint state, and disposable tool-host
 cache output under `.hctl/`. That state is implementation output, never an
@@ -246,13 +248,12 @@ authored tool inventory.
    optional stronger isolation mode needed later?
 4. What graceful cancellation, restart, concurrency, and log-routing behavior
    is worth adding beyond the current bounded serial process contract?
-5. HCTL-001 resolved the first-install case: no `package` command is needed.
-   Another machine keeps the agent source and native lockfiles, installs the
-   required native tool runtimes, and reruns `apply`. The generated Go host,
-   generic host files, prepared dependency environments, executable receipt,
-   and all other `.hctl/cache/` contents remain local disposable output. Revisit
-   a relocatable package only after a concrete distribution need requires more
-   than this source-plus-apply contract.
+5. HCTL-001 resolved local first installation without a `package` command.
+   ADR 0027 now resolves the OCI distribution need with selective staging from
+   a pinned harness image. Raw `.hctl/cache/` contents remain local disposable
+   output rather than generally relocatable artifacts; implementation must
+   re-prepare them at canonical final paths and carry only the required runtime
+   closure.
 
 ## First spike result
 

@@ -24,9 +24,9 @@ operating workspace from its storage layout couples portable behavior to one
 repository convention and makes native `CLAUDE.md`, `AGENTS.md`, and MCP
 inheritance surprising.
 
-Keeping source and workspace explicit also supplies a stable composition seam
-for a future deployable image containing a harness, an agent project, and
-hctl. Image construction and deployment remain outside the MVP.
+Keeping source and workspace explicit also supplies the composition seam used
+by the staged filesystem contract in ADR 0027. OCI image construction and
+deployment remain outside hctl's boundary.
 
 ## Consequence
 
@@ -35,6 +35,10 @@ Generated MCP commands must preserve both paths so runtime verification loads
 the selected source against the correct workspace record. Authored language
 dependencies are resolved from agent source, while tool calls use the workspace
 as their process working directory.
+
+When hctl stages an agent, immutable source and the generated workspace occupy
+separate canonical paths. Runtime-owned workspace paths remain writable without
+making authored source mutable.
 
 This boundary controls native configuration discovery and default working
 context; it is not a security sandbox. Hctl does not claim that Claude Code or

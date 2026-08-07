@@ -31,6 +31,8 @@ files, CLI guidance, or product documentation.
 | Apply | Validate an agent project and prepare the native harness files and local tool runtime needed to use it in a chosen workspace. |
 | Harness setup | The generated instructions, skills, and MCP configuration that make an agent project usable in one native harness. Individual files are called generated harness files. |
 | Apply record | Generated hctl bookkeeping used to detect a stale or edited harness setup. It is not authored configuration or a tool inventory. |
+| Staged agent filesystem | A complete runnable filesystem tree prepared by hctl at canonical final paths for a downstream image builder. It contains immutable agent source, generated workspace setup, the pinned harness and hctl, and only the selected execution runtime closure. |
+| Hctl harness image | A published Codex- or Claude-specific image containing hctl, one pinned native harness, and all supported authored-tool build and execution inputs. Users may apply and ship it directly or use it as the first stage of a selective build. |
 | MCP | The protocol boundary through which a harness discovers and invokes tools. Local tool authors do not need to implement it. |
 | Managed tool | A tool whose requests cross an hctl-owned validation, policy, execution, and audit boundary. |
 | Native tool | A harness-provided tool that remains available but is not governed or observed by hctl. |
@@ -52,7 +54,7 @@ files, CLI guidance, or product documentation.
 | Proposal | A workspace-local, human-readable suggestion to change one existing UTF-8 instruction, skill, or managed-tool source file. Its immutable record holds provenance, the target's base content hash, and a diff; a later review record accepts or rejects it. It must not contain credentials, secrets, raw tool output, or conversation transcripts. |
 | Secretless operation broker | A future hctl-owned local process that resolves an opaque credential reference only for an authorized managed operation, uses the value itself against a constrained upstream target, and returns only safe results. It is an execution boundary, not a credential store, vault, or protection from peer processes or native harness capabilities running as the same OS user. |
 | Opaque credential reference | A bounded non-secret identifier that selects a credential inside the secretless operation broker. It is not a credential value, filesystem path, environment-variable name, command, or URI containing credentials. Its eventual author-facing syntax is deferred. |
-| Agent image | A possible future deployable package containing a harness, an agent project, and hctl. It composes the same source/workspace contract rather than redefining the agent project as a runtime. |
+| Agent image | A downstream OCI image made either by applying an agent in an hctl harness image or by copying a staged agent filesystem onto its documented compatible base. Hctl prepares filesystems but does not build, publish, sign, deploy, or operate OCI images. |
 
 Configuration may be added later only for settings a directory layout cannot
 express. It must not duplicate the filesystem inventory.

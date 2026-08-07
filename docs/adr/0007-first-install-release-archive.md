@@ -33,7 +33,9 @@ a module version, rather than consuming the checked released artifact. It does
 not improve the first cross-platform journey. A relocatable package would need
 to define how it bundles source, lockfiles, native runtimes, and caches, but
 the current source-plus-apply contract has no demonstrated need for that extra
-surface.
+surface. ADR 0027 later defines a bounded staged filesystem artifact for
+downstream OCI builds without changing this local installation journey or
+making arbitrary workspace caches portable.
 
 ## Consequence
 
@@ -43,4 +45,6 @@ publishing them, document the installation commands, and make the
 credential-free proof extract and use the archive. It must not introduce an
 agent-image or deployment system, copy `.hctl/cache/` between machines, add a
 `hctl package` command, or claim another platform. A future relocatable package
-or platform matrix needs a separate, evidence-backed decision.
+or platform matrix needs a separate, evidence-backed decision. ADR 0027
+supplies that separate decision for canonical staged filesystems; it does not
+add a general package command or supersede this release archive.

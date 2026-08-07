@@ -8,9 +8,10 @@ external input and governs only what crosses its managed boundary.
 
 An agent project is portable source, not a repository-bound runtime. Apply it
 to any chosen workspace: the agent files define behavior, while the workspace
-defines where the harness operates. A future deployable agent may package a
-harness, an agent project, and hctl into one image without changing that
-separation.
+defines where the harness operates. A pinned hctl harness image may apply an
+agent and ship as-is, or optionally stage only that agent's runtime closure for
+a smaller downstream image, without changing the source/workspace separation.
+Existing OCI build systems own image construction, publication, and deployment.
 
 ## Boundary
 

@@ -288,6 +288,7 @@ func filesForPolicy(p *project.Project, executable string, channelWritable bool)
 	instructions := header + "# " + p.Name + "\n\n" + strings.TrimSpace(string(p.Instructions)) + "\n\n## Tool boundary\n\nTools exposed by the hctl MCP server are managed. Native harness tools remain allowed and unmanaged.\n"
 	if p.DiscordChannel != nil {
 		instructions += "\n## Discord channel participation\n\nFor inputs explicitly marked as Discord messages, apply this participation policy before answering:\n\n" + strings.TrimSpace(string(p.DiscordChannel.Policy)) + "\n\nA Discord input marked `direct=true` is explicitly addressed to you; respond normally unless the user asks for silence. For other ambient guild messages, if no visible response is warranted, return exactly `" + channelconfig.NoReplyResult + "` and nothing else."
+		instructions += " If the managed `channel.request_input` tool is advertised in this channel-root session, use it only when a missing human choice materially changes the work and proceeding with a reasonable assumption would be risky. Otherwise proceed without asking. Supply only the documented semantic fields; never fabricate interaction or callback identifiers, channel-specific markup, components, or vendor payloads. The tool may be absent when the harness continuation strategy or channel responder cannot support it."
 		if channelWritable {
 			instructions += " This conversation already has workspace-write access in its isolated worktree. Complete requests normally; write access has already been granted."
 		} else {

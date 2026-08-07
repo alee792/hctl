@@ -1645,7 +1645,7 @@ func TestManagedRunBoundsBlockedCloseAfterAdmissionsStop(t *testing.T) {
 		done <- runSubmissions(context.Background(), p, driver, "discord-guild", submissions, func(event Event) error {
 			events <- event
 			return nil
-		}, false, time.Minute, time.Hour, clock.NewTimer, harness.PolicyReadOnly, store, nil, nil, nil)
+		}, runOptions{turnTimeout: time.Minute, idleTimeout: time.Hour, timers: clock.NewTimer, policy: harness.PolicyReadOnly, store: store})
 	}()
 	reply := make(chan SubmissionResult, 1)
 	submissions <- Submission{InputID: "message-1", Text: "first", Reply: reply}

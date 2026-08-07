@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+
+	"hctl/internal/interaction"
 )
 
 type Input struct {
@@ -20,7 +22,53 @@ type Event struct {
 	ItemID    string
 	Delta     string
 	Status    string
+	// RequestInput is internal structured control data, never a public dispatch
+	// payload. The dispatcher acknowledges it only after durable handoff.
+	RequestInput *RequestInputEvent
 }
+
+type RequestInputEvent struct {
+	CorrelationID string
+	Request       interaction.Request
+	Reply         chan<- RequestInputAcknowledgement
+	rootProof     *requestInputRootProof
+}
+
+type RequestInputAcknowledgement struct {
+	Accepted bool
+	Status   string
+}
+
+// RequestInputToolResult is chosen by a harness continuation strategy after a
+// successful durable acknowledgement. Generic MCP code only validates and
+// encodes its bounded disposition.
+type RequestInputToolResult struct {
+	Disposition RequestInputDisposition
+}
+
+type RequestInputDisposition string
+
+const (
+	RequestInputDeferred         RequestInputDisposition = "deferred"
+	RequestInputContinuationTurn RequestInputDisposition = "continuation_turn"
+)
+
+func (d RequestInputDisposition) Valid() bool {
+	return d == RequestInputDeferred || d == RequestInputContinuationTurn
+}
+
+type requestInputRootProof struct{}
+
+// NewRootRequestInputEvent is the harness-owned construction boundary for a
+// request whose root ancestry has already been proven by the adapter. A zero
+// RequestInputEvent carries no proof and is always rejected by dispatch.
+func NewRootRequestInputEvent(correlationID string, request interaction.Request, reply chan<- RequestInputAcknowledgement) *RequestInputEvent {
+	return &RequestInputEvent{CorrelationID: correlationID, Request: request, Reply: reply, rootProof: &requestInputRootProof{}}
+}
+
+// ProvenRoot is checked only by the dispatcher. Callers cannot set the proof
+// through a struct literal or serialized payload.
+func (e *RequestInputEvent) ProvenRoot() bool { return e != nil && e.rootProof != nil }
 
 type TurnResult struct {
 	SessionID string

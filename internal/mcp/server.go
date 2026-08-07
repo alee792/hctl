@@ -17,6 +17,7 @@ import (
 
 	"hctl/internal/connection/github"
 	"hctl/internal/harness"
+	"hctl/internal/interaction"
 	"hctl/internal/project"
 	"hctl/internal/setup"
 	"hctl/internal/tool"
@@ -64,6 +65,24 @@ func serveWithRuntime(source, workspace, harnessName string, input io.Reader, ou
 }
 
 func serveRequests(p *project.Project, runtime managedRuntime, githubClient *github.Client, input io.Reader, output, audit io.Writer) error {
+	return serveRequestsWithInput(p, runtime, githubClient, nil, input, output, audit)
+}
+
+// requestInputRuntime is intentionally process-local. Production MCP children
+// do not receive one until a channel root, harness continuation strategy, and
+// responder have established a trusted bridge to the dispatcher.
+type requestInputRuntime interface {
+	HarnessStrategyAvailable() bool
+	ResponderAvailable() bool
+	Capabilities() interaction.Capabilities
+	Request(context.Context, string, interaction.Request) (harness.RequestInputToolResult, error)
+}
+
+func requestInputAvailable(requests requestInputRuntime) bool {
+	return requests != nil && requests.HarnessStrategyAvailable() && requests.ResponderAvailable()
+}
+
+func serveRequestsWithInput(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, input io.Reader, output, audit io.Writer) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), maxLineBytes)
 	encoder := json.NewEncoder(output)
@@ -104,9 +123,12 @@ func serveRequests(p *project.Project, runtime managedRuntime, githubClient *git
 					tools = append(tools, definition)
 				}
 			}
+			if requestInputAvailable(requests) {
+				tools = append(tools, requestInputDefinition())
+			}
 			writeResult(encoder, request.ID, map[string]any{"tools": tools})
 		case "tools/call":
-			result, requestID, toolName, err := callManaged(p, runtime, githubClient, request.ID, request.Params, audit)
+			result, requestID, toolName, err := callManagedWithInput(p, runtime, githubClient, requests, request.ID, request.Params, audit)
 			if err != nil {
 				if auditErr := writeAudit(audit, p.AgentID, toolName, requestID, "failed"); auditErr != nil {
 					return auditErr
@@ -129,8 +151,11 @@ func serveRequests(p *project.Project, runtime managedRuntime, githubClient *git
 }
 
 func callManaged(p *project.Project, runtime managedRuntime, githubClient *github.Client, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
-	requestHash := sha256.Sum256(append(append([]byte{}, id...), params...))
-	requestID := hex.EncodeToString(requestHash[:8])
+	return callManagedWithInput(p, runtime, githubClient, nil, id, params, audit)
+}
+
+func callManagedWithInput(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
+	requestID := managedRequestID(id, nil)
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -140,11 +165,47 @@ func callManaged(p *project.Project, runtime managedRuntime, githubClient *githu
 		return nil, requestID, "unknown", errors.New("invalid managed tool call")
 	}
 	githubTool := p.GitHubConnection != nil && github.IsTool(call.Name)
-	if !portableToolName.MatchString(call.Name) && !githubTool {
+	requestInput := call.Name == requestInputToolName
+	if requestInput {
+		// Semantic request bytes must not influence audit correlation.
+		requestID = managedRequestID(id, []byte(requestInputToolName))
+	} else {
+		requestID = managedRequestID(id, params)
+	}
+	if !portableToolName.MatchString(call.Name) && !githubTool && !requestInput {
 		return nil, requestID, "unknown", errors.New("invalid managed tool call")
 	}
 	if err := writeAudit(audit, p.AgentID, call.Name, requestID, "requested"); err != nil {
 		return nil, requestID, call.Name, err
+	}
+	if requestInput {
+		if !requestInputAvailable(requests) {
+			return nil, requestID, call.Name, errors.New("interactive input is unavailable in this session")
+		}
+		request, err := interaction.DecodeRequest(call.Arguments)
+		if err != nil {
+			return nil, requestID, call.Name, errors.New("interactive input request does not match the managed contract")
+		}
+		resolution, err := interaction.Resolve(request, requests.Capabilities())
+		if err != nil {
+			return nil, requestID, call.Name, errors.New("interactive input request has no available rendering or fallback")
+		}
+		if err := writeAudit(audit, p.AgentID, call.Name, requestID, "authorized"); err != nil {
+			return nil, requestID, call.Name, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = resolution // The dispatcher recomputes this from trusted capabilities.
+		disposition, err := requests.Request(ctx, requestID, request)
+		if err != nil || !disposition.Disposition.Valid() {
+			return nil, requestID, call.Name, errors.New("interactive input request was rejected")
+		}
+		structured := map[string]any{"disposition": string(disposition.Disposition)}
+		return map[string]any{
+			"content":           []any{map[string]any{"type": "text", "text": string(disposition.Disposition)}},
+			"structuredContent": structured,
+			"isError":           false,
+		}, requestID, call.Name, nil
 	}
 	if call.Name != "echo" {
 		if err := writeAudit(audit, p.AgentID, call.Name, requestID, "authorized"); err != nil {
@@ -188,6 +249,11 @@ func callManaged(p *project.Project, runtime managedRuntime, githubClient *githu
 		"structuredContent": map[string]any{"text": arguments.Text},
 		"isError":           false,
 	}, requestID, call.Name, nil
+}
+
+func managedRequestID(id, correlation []byte) string {
+	requestHash := sha256.Sum256(append(append([]byte{}, id...), correlation...))
+	return hex.EncodeToString(requestHash[:8])
 }
 
 func writeAudit(audit io.Writer, agent, toolName, requestID, outcome string) error {

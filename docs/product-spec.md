@@ -393,15 +393,44 @@ prevents automatic worktree retirement. Status and audit expose only
 never prompts, answers, identifiers, continuation keys, paths, configuration,
 or credentials.
 
+The managed `channel.request_input` contract now exists behind a runtime
+capability gate. It accepts only the semantic request above and emits a typed
+harness event; the dispatcher then injects the active input, pseudonymous
+owner, tool-call correlation, continuation mode, and runtime target before
+calling the durable coordinator on its serialized state path. The dispatcher
+recomputes native-versus-fallback resolution from trusted responder
+capabilities and commits `requested` before acknowledging the harness bridge.
+MCP children, renderers, and channel adapters do not write dispatch state.
+
+Real advertisement requires a harness-owned root bridge, an available harness
+continuation strategy, and responder support for native rendering or the
+request's declared text fallback. A shared inherited MCP server cannot be
+enabled merely by configuration or a process-wide root flag. Structured
+harness events carry an opaque root proof produced by the harness-owned event
+constructor; zero or caller-assembled events fail before persistence.
+Schedules, explicit JSONL, ordinary native
+sessions, unavailable responders, and unproven subagent calls do not receive
+the capability. Because current native subagent inheritance does not expose
+trustworthy caller ancestry, unproven calls are rejected before persistence;
+true subagent tool-list isolation is deferred. Generated Claude and Codex
+channel instructions describe when to ask and forbid fabricated callback IDs
+or vendor markup, but those instructions are not the enforcement boundary.
+The selected harness strategy returns a bounded, content-free tool disposition
+after the durable commit, leaving deferred-tool versus continuation-turn
+semantics to issues #22 and #23. MCP does not manufacture that result. Audit
+correlation uses only the MCP request identity and tool name, not semantic
+request bytes. Tool responses, diagnostics, and audit never contain prompts,
+options, answers, fallback text, or vendor payloads.
+
 The two durable continuation modes are intentionally different. A
 **native deferred-tool continuation** later resumes the same logical tool call
 using a harness-native continuation identity. A **continuation turn** later
 opens another turn in the same native session with the normalized answer and
 request context. Neither is a blocking request. This lifecycle and coordinator
-do not themselves expose interactive input through the live runtime: the
-managed `channel.request_input` tool, Claude deferred-tool adapter, Codex
-continuation-turn adapter, and Discord renderer remain GitHub issues #21 through
-#24 respectively.
+do not themselves expose interactive input through the live runtime. The
+generic managed-tool and durable handoff infrastructure exists but remains
+disabled in production until a Claude or Codex continuation strategy and the
+Discord renderer are wired by GitHub issues #22 through #24.
 
 New and resumed channel-managed sessions run read-only in the shared workspace:
 Claude uses native plan permission mode, Codex uses a read-only sandbox with

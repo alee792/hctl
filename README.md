@@ -203,23 +203,31 @@ The intended optional two-stage pattern is:
 ```dockerfile
 FROM HCTL_CODEX_IMAGE AS build
 COPY . /agent
-RUN hctl stage /agent --harness codex --output /out
+RUN hctl stage /agent --harness codex --output /out/agent
 
 FROM DOCUMENTED_COMPATIBLE_BASE
-COPY --from=build /out/opt/ /opt/
-COPY --from=build --chown=65532:65532 /out/workspace/ /workspace/
-COPY --from=build --chown=65532:65532 /out/home/hctl/ /home/hctl/
+COPY --from=build /out/agent/opt/ /opt/
+COPY --from=build --chown=65532:65532 /out/agent/workspace/ /workspace/
+COPY --from=build --chown=65532:65532 /out/agent/home/hctl/ /home/hctl/
 USER 65532:65532
 ENTRYPOINT ["/opt/hctl/bin/agent-entrypoint"]
 ```
+
+The hctl harness image reserves `/out` as a writable directory for its
+non-root user. Each staged output is a new child such as `/out/agent`.
+
+See [Harness images](docs/harness-images.md) for complete direct and two-stage
+Codex Dockerfiles, the exact compatible-base digest, and the runtime
+authentication boundary.
 
 The final base must match the artifact ABI and provide the documented harness
 libraries, certificates, `/bin/sh`, `id`, and UID/GID 65532. The entrypoint
 fails instead of silently running as another identity. Keep `/workspace` and
 `/home/hctl` writable and durable when channel or harness state must survive a
 restart; do not mount an empty volume over the prepared workspace. The Codex
-and Claude hctl images and their exact compatible-base contracts are separate
-release work. Until those exist, `--command PATH` is useful only for a
+image is currently built but not published; the Claude image and exact-tag
+publication are separate release work. Until a harness image is published,
+`--command PATH` is useful only for a
 self-contained harness executable; a harness installed under
 `/opt/hctl/harness` is copied with that full runtime tree. Authored Python
 staging likewise requires the relocatable interpreter supplied at

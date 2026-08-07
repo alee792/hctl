@@ -17,7 +17,7 @@ jobs:
   check-and-build:
     name: Check and build artifacts
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -46,6 +46,11 @@ jobs:
           cmp dist/hctl_darwin_arm64 repeat/hctl_darwin_arm64
           test "$(./dist/hctl_linux_amd64 --version)" = "hctl $version"
           (cd dist && sha256sum hctl_linux_amd64 hctl_darwin_arm64 >hctl_ci_SHA256SUMS)
+
+      - name: Build and check unpushed Codex images
+        run: |
+          export PATH="$PWD/.tools/go/bin:$PWD/.tools/bin:$PATH"
+          ./scripts/check-codex-image.sh --hctl ./dist/hctl_linux_amd64
 
       - name: Upload checked binaries
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

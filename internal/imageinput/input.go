@@ -55,6 +55,8 @@ type RuntimeContract struct {
 	Home                string   `json:"home"`
 	RequiredExecutables []string `json:"required_executables"`
 	CertificateBundle   string   `json:"certificate_bundle"`
+	CertificateSource   string   `json:"certificate_source_component"`
+	SharedLibraries     []string `json:"required_shared_libraries"`
 	WritablePaths       []string `json:"writable_paths"`
 }
 
@@ -104,10 +106,11 @@ func (inputs Inputs) Validate() error {
 		return errors.New("image inputs base must be an official image reference pinned by a sha256 platform digest")
 	}
 	runtime := inputs.Target.Runtime
-	if runtime.UID != 65532 || runtime.GID != 65532 || runtime.Home != "/home/hctl" || runtime.CertificateBundle != "/etc/ssl/certs/ca-certificates.crt" {
+	if runtime.UID != 65532 || runtime.GID != 65532 || runtime.Home != "/home/hctl" || runtime.CertificateBundle != "/etc/ssl/certs/ca-certificates.crt" || runtime.CertificateSource != "python" {
 		return errors.New("image inputs runtime contract is invalid")
 	}
-	if strings.Join(runtime.RequiredExecutables, "\n") != "/bin/sh\n/usr/bin/id" || strings.Join(runtime.WritablePaths, "\n") != "/home/hctl\n/workspace" {
+	wantLibraries := "ld-linux-x86-64.so.2\nlibc.so.6\nlibdl.so.2\nlibgcc_s.so.1\nlibm.so.6\nlibpthread.so.0\nlibrt.so.1\nlibutil.so.1"
+	if strings.Join(runtime.RequiredExecutables, "\n") != "/bin/sh\n/usr/bin/id" || strings.Join(runtime.SharedLibraries, "\n") != wantLibraries || strings.Join(runtime.WritablePaths, "\n") != "/home/hctl\n/workspace" {
 		return errors.New("image inputs runtime paths must be canonical and ordered")
 	}
 	if version.Validate(inputs.HCTL.DevelopmentVersion) != nil {

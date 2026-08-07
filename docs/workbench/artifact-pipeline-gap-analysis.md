@@ -40,12 +40,12 @@ with minimal permissions.
 | --- | --- | --- |
 | Repository checks | `scripts/check.sh` runs formatting, tests, vet, lint, and vulnerability checks with repository-pinned tools; CI now invokes that same script on Linux. | Container acceptance and tag publication must remain downstream of this gate. |
 | Binary construction | One shared script builds deterministic `darwin-arm64` and `linux-amd64` binaries with a required exact version; CI rebuilds, compares, inspects `hctl --version`, checksums, and retains them. The exact-tag release script injects its clean tag version into the supported Darwin archive. | Image builds must consume the checked Linux binary rather than rebuild it through an unrelated path. |
-| Staged filesystem | `hctl stage` produces a deterministic, selective runtime tree and manifest. | It has unit and fake-process coverage but no real Linux image acceptance. |
-| Image definition | ADR 0027 fixes the harness-image and staged paths. `images/inputs.json` pins the Linux/amd64 Ubuntu 24.04 platform manifest and the UID, GID, home, shell, identity, certificate, and ABI contract. | There is no Dockerfile, OCI metadata, or executable acceptance of that contract. |
-| Harness inputs | One validated manifest pins official standalone Codex 0.144.1 and Claude Code 2.1.221 artifacts by URL, byte size, and SHA-256. A bounded fetch helper rejects unapproved sources, oversized content, and checksum drift. | Canonical extraction layouts remain to be proven. Claude distribution stays blocked pending explicit permission. |
-| Authored-tool runtimes | Staging knows the canonical Deno, Python/uv, and compiled Go closures. | The source image does not yet install pinned Linux runtimes at those paths. Python must have the exact `/opt/hctl/runtimes/python` base prefix. |
-| Compatible final base | The staged manifest reports OS, architecture, and detected libc; the image-input manifest fixes the clean base platform digest and generic runtime facilities. | A clean-base image must prove all harness and selected-runtime shared-library requirements and UID/GID 65532 behavior. |
-| Credential-free acceptance | Unit tests use fake harnesses and do not call a model. | CI needs real harness `--version`, apply, stage, entrypoint, managed MCP, runtime-selection, ownership, and credential-absence checks. |
+| Staged filesystem | `hctl stage` produces a deterministic, selective runtime tree and manifest. CI copies a tool-free Codex payload onto the clean base and starts its managed MCP server. | Language-specific runtime selection remains in the next matrix slice. |
+| Image definition | A thin Codex Dockerfile consumes a prepared, checksum-verified root filesystem and emits pinned OCI input labels without publishing. | Claude remains separate; tag publication metadata and provenance remain later work. |
+| Harness inputs | Codex 0.144.1 extraction and real `--version` are checked. Claude Code 2.1.221 remains pinned but its publication gate is blocked. | Resolve the allowed Claude build scope before adding its image. |
+| Authored-tool runtimes | The Codex source image installs Deno, Python/uv, and Go at canonical paths; Python reports the exact `/opt/hctl/runtimes/python` base prefix. | Focused fixtures must prove preparation and selective absence for each language. |
+| Compatible final base | The input manifest records the measured loader and shared-library union. CI checks those dependencies, the CA bundle, UID/GID 65532, direct apply, and the clean-base staged journey. | Keep the measured contract current when any binary input changes. |
+| Credential-free acceptance | CI uses the real Codex binary without credentials or model calls and proves source, direct, and tool-free staged images. | Runtime-matrix coverage remains. |
 | Supply chain | The local release archive gets a SHA-256 manifest. Harness and runtime inputs are checksum-pinned and fetched through one verifier. | Published images need immutable digests, SBOMs, provenance, and retained version metadata. |
 | Publication | No release or package workflow exists. | GHCR naming, tag policy, permissions, protected release environment, and failure/rollback behavior remain to be implemented. |
 
@@ -83,12 +83,11 @@ merely a mirror of an optional local container proof.
    build deterministic `linux-amd64` and `darwin-arm64` binaries through one
    script, smoke-test the Linux binary, and retain checksums as short-lived CI
    artifacts. This slice does not publish a release.
-2. **Pinned image inputs and version identity (partially complete).** The input
+2. **Pinned image inputs and version identity (complete).** The input
    manifest, exact hctl version injection and inspection, generic base
-   facilities, and checksum-verifying fetch helper are implemented. The Codex
-   vertical slice must measure and add the required shared-library closure
-   before the compatible-base contract is complete.
-3. **Codex vertical slice.** Build an unpushed Codex image and prove direct and
+   facilities, checksum-verifying fetch helper, and measured shared-library
+   closure are implemented.
+3. **Codex vertical slice (complete).** Build an unpushed Codex image and prove direct and
    two-stage tool-free journeys on `linux/amd64` without credentials or model
    calls.
 4. **Runtime matrix.** Add Deno-only, Python-only, Go-only, and mixed fixtures;

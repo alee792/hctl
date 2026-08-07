@@ -92,17 +92,13 @@ docker run --rm --entrypoint /bin/sh --env "EXPECTED_SHARED_LIBRARIES=$shared_li
   test -z "$(find /home/hctl -mindepth 1 -maxdepth 1 ! -name .codex -print -quit)"
   test -z "$(find /workspace -mindepth 1 -print -quit)"
   test ! -e /agent
-  codex --version | grep -F "'"$codex_version"'" >/dev/null
+  CODEX_HOME=/tmp/codex-version codex --version | grep -F "'"$codex_version"'" >/dev/null
   deno --version >/dev/null
   test "$(python -c "import sys; print(sys.base_prefix)")" = /opt/hctl/runtimes/python
   uv --version >/dev/null
   test "$(go env GOROOT)" = /opt/hctl/runtimes/go
   test -s /etc/ssl/certs/ca-certificates.crt
-  test ! -e /home/hctl/.codex/auth.json
-  test -z "$(find /home/hctl/.codex -mindepth 1 -maxdepth 1 ! -name tmp -print -quit)"
-  if [ -d /home/hctl/.codex/tmp ]; then
-    test -z "$(find /home/hctl/.codex/tmp -mindepth 1 -print -quit)"
-  fi
+  test -z "$(find /home/hctl/.codex -mindepth 1 -print -quit)"
   actual_libraries=$(for executable in deno uv python; do
     ldd "$(command -v "$executable")"
   done | awk "{ if (\$2 == \"=>\" && \$3 ~ /^\//) print \$1; else if (\$1 ~ /^\//) { count=split(\$1, parts, \"/\"); print parts[count] } }" | sort -u)

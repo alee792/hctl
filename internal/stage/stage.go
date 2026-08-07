@@ -450,6 +450,7 @@ func entrypointBytes(p *project.Project, harness string) []byte {
 
 func rejectBuildPaths(root string, request Request, prepared *project.Project) error {
 	prohibited := [][]byte{[]byte(root), []byte(prepared.SourceRoot), []byte(prepared.WorkspaceRoot), []byte(request.Project.SourceRoot), []byte(request.Project.WorkspaceRoot)}
+	finalAgent := "/opt/hctl/agents/" + prepared.Name
 	return filepath.WalkDir(filepath.Join(root, "workspace"), func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return errors.New("cannot inspect staged workspace")
@@ -465,12 +466,37 @@ func rejectBuildPaths(root string, request Request, prepared *project.Project) e
 			return errors.New("cannot inspect staged configuration")
 		}
 		for _, value := range prohibited {
-			if len(value) > 1 && bytes.Contains(data, value) {
+			if string(value) != finalAgent && string(value) != finalWorkspace && containsStandalonePath(data, value) {
 				return errors.New("staged configuration contains a build-only path")
 			}
 		}
 		return nil
 	})
+}
+
+func containsStandalonePath(data, value []byte) bool {
+	if len(value) <= 1 {
+		return false
+	}
+	offset := 0
+	for {
+		index := bytes.Index(data[offset:], value)
+		if index < 0 {
+			return false
+		}
+		index += offset
+		if index == 0 || !pathTokenByte(data[index-1]) {
+			return true
+		}
+		offset = index + 1
+	}
+}
+
+func pathTokenByte(value byte) bool {
+	return value == '/' || value == '.' || value == '_' || value == '-' ||
+		value >= '0' && value <= '9' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= 'a' && value <= 'z'
 }
 
 func collectFiles(root string) ([]ManifestFile, error) {

@@ -34,6 +34,26 @@ func TestHarnessVersionDoesNotMutateConfiguredHome(t *testing.T) {
 	}
 }
 
+func TestBuildPathDetectionRequiresAStandalonePathToken(t *testing.T) {
+	buildPath := []byte("/agent")
+	for _, data := range []string{
+		"command = \"/agent/tool\"",
+		"cwd=/agent",
+	} {
+		if !containsStandalonePath([]byte(data), buildPath) {
+			t.Fatalf("build path was not detected in %q", data)
+		}
+	}
+	for _, data := range []string{
+		"command = \"/opt/hctl/agents/agent\"",
+		"command = \"/prefix/agent/tool\"",
+	} {
+		if containsStandalonePath([]byte(data), buildPath) {
+			t.Fatalf("embedded path was rejected in %q", data)
+		}
+	}
+}
+
 func TestCreateStagesToolFreeAgentDeterministically(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "sample-agent")
 	writeTestFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Staged test agent.\n---\n\nBe concise.\n", 0o644)

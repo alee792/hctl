@@ -24,6 +24,18 @@ func TestHeadlessCommandIsNamedRun(t *testing.T) {
 	}
 }
 
+func TestClaudeDeferredHookCommandFailsClosedWithExitZeroResult(t *testing.T) {
+	for _, input := range []string{"not-json", `{}`, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"toolu_x","tool_input":{}}`} {
+		var output, stderr bytes.Buffer
+		if err := Run([]string{"hook", "claude-deferred-input"}, strings.NewReader(input), &output, &stderr, ""); err != nil {
+			t.Fatalf("malformed hook returned command failure: %v", err)
+		}
+		if !strings.Contains(output.String(), `"permissionDecision":"deny"`) || strings.Contains(output.String(), `"permissionDecision":"defer"`) {
+			t.Fatalf("malformed hook output = %q", output.String())
+		}
+	}
+}
+
 func TestRunRejectsInvalidSessionCapacity(t *testing.T) {
 	var output, stderr bytes.Buffer
 	err := Run([]string{"run", ".", "--harness", "codex", "--max-resident-sessions", "1", "--max-active-turns", "2"}, strings.NewReader(""), &output, &stderr, "")

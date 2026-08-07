@@ -60,9 +60,18 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 		return runSchedule(args[1:], output, stderr)
 	case "mcp":
 		return runMCP(args[1:], input, output, stderr)
+	case "hook":
+		return runHook(args[1:], input, output)
 	default:
 		return fmt.Errorf("unknown command %q; expected apply, run, channel, or schedule", args[0])
 	}
+}
+
+func runHook(args []string, input io.Reader, output io.Writer) error {
+	if len(args) != 1 || args[0] != "claude-deferred-input" {
+		return errors.New("unsupported internal hook")
+	}
+	return claude.RunDeferredHook(input, output, os.Getenv(claude.DeferredBrokerEnv))
 }
 
 func runSchedule(args []string, output, stderr io.Writer) error {

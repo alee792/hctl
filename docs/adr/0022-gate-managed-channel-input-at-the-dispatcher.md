@@ -14,8 +14,10 @@ of a channel-managed session, and only when the selected harness has a
 continuation strategy and the channel responder can render the request natively
 or use its declared text fallback. A shared inherited MCP server cannot enable
 the capability through configuration or a process-wide root flag. The
-production MCP child receives no bridge yet, so this capability is disabled
-until the Claude or Codex continuation and Discord responder slices provide it.
+Claude's MCP child receives a short-lived, root-owned broker only when a
+per-conversation responder bridge exists; ADR 0024 defines that native
+continuation. Codex uses its client-owned dynamic tool. Production exposure
+remains disabled until the Discord responder slice provides the bridge.
 
 An accepted tool call crosses a structured internal harness event. The harness
 event carries semantic request data and tool-call correlation. Only the
@@ -36,12 +38,11 @@ invent callback IDs or vendor markup. Instructions are guidance, not the
 capability boundary.
 
 Schedules, explicit JSONL runs, ordinary native sessions, missing responders,
-and missing harness strategies do not advertise the tool. Native subagents
-currently inherit the managed MCP configuration and neither supported harness
-exposes trustworthy caller ancestry to the MCP child. Therefore any call whose
-channel-root origin is not independently proven is rejected before coordinator
-persistence. Literal tool-list isolation for subagents remains deferred until
-harness adapters expose trustworthy ancestry.
+and missing harness strategies do not advertise the tool. Claude subagents may
+inherit the managed MCP listing, but their documented hook `agent_id` is denied
+before deferral or persistence. Codex proves the exact root thread and turn.
+Any call whose channel-root origin is not independently proven is rejected.
+Literal tool-list isolation for subagents remains deferred.
 
 The selected harness strategy returns a bounded, content-free disposition only
 after the durable commit. MCP merely encodes that typed disposition, leaving
@@ -61,10 +62,9 @@ the dispatch conversation's atomic queue and interaction invariants. A typed
 harness event preserves each harness's ownership of tool continuation while
 keeping persistence in the dispatcher.
 
-The current adapters cannot yet prove subagent ancestry or park and resume a
-real tool call. Landing the generic seam disabled avoids advertising a
-capability that cannot complete while making later harness and responder work
-testable against one contract.
+ADR 0023 supplies Codex continuation turns. ADR 0024 proves Claude root
+ancestry and parks and resumes the same native tool call. Both remain behind
+the generic capability seam until a compatible responder is bound.
 
 ## Consequences
 

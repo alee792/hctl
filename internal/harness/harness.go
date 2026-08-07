@@ -28,10 +28,11 @@ type Event struct {
 }
 
 type RequestInputEvent struct {
-	CorrelationID string
-	Request       interaction.Request
-	Reply         chan<- RequestInputAcknowledgement
-	rootProof     *requestInputRootProof
+	CorrelationID   string
+	ContinuationKey string
+	Request         interaction.Request
+	Reply           chan<- RequestInputAcknowledgement
+	rootProof       *requestInputRootProof
 }
 
 type RequestInputAcknowledgement struct {
@@ -64,7 +65,13 @@ type requestInputRootProof struct{}
 // request whose root ancestry has already been proven by the adapter. A zero
 // RequestInputEvent carries no proof and is always rejected by dispatch.
 func NewRootRequestInputEvent(correlationID string, request interaction.Request, reply chan<- RequestInputAcknowledgement) *RequestInputEvent {
-	return &RequestInputEvent{CorrelationID: correlationID, Request: request, Reply: reply, rootProof: &requestInputRootProof{}}
+	return NewDeferredRootRequestInputEvent(correlationID, "", request, reply)
+}
+
+// NewDeferredRootRequestInputEvent additionally correlates a native harness
+// tool call with its durable continuation record.
+func NewDeferredRootRequestInputEvent(correlationID, continuationKey string, request interaction.Request, reply chan<- RequestInputAcknowledgement) *RequestInputEvent {
+	return &RequestInputEvent{CorrelationID: correlationID, ContinuationKey: continuationKey, Request: request, Reply: reply, rootProof: &requestInputRootProof{}}
 }
 
 // ProvenRoot is checked only by the dispatcher. Callers cannot set the proof
@@ -90,6 +97,16 @@ type OpenRequest struct {
 	ResumeID            string
 	Policy              ExecutionPolicy
 	ManagedRequestInput bool
+	Deferred            *DeferredToolResume
+}
+
+// DeferredToolResume describes one already-durable native deferred tool call.
+// Its sensitive updated input remains in the owning harness adapter.
+type DeferredToolResume struct {
+	ToolUseID    string
+	ToolName     string
+	InputDigest  string
+	UpdatedInput []byte
 }
 
 type Driver interface {
@@ -103,6 +120,12 @@ type Driver interface {
 // session. Manager owns capacity and lifecycle around this narrow side effect.
 type ContinuationTurnDriver interface {
 	ContinueTurn(context.Context, OpenRequest, string, interaction.ContinuationIntent, func(Event)) interaction.ContinuationResult
+}
+
+// NativeDeferredToolDriver resumes an exact tool invocation inside an already
+// persisted native session. Manager owns scheduling, capacity, and lifecycle.
+type NativeDeferredToolDriver interface {
+	ResumeDeferredTool(context.Context, OpenRequest, string, interaction.ContinuationIntent, func(Event)) interaction.ContinuationResult
 }
 
 type Session interface {

@@ -312,6 +312,16 @@ func filesForPolicy(p *project.Project, executable string, channelWritable bool)
 			return generatedSetup{}, errors.New("cannot encode Claude MCP configuration")
 		}
 		files[".mcp.json"] = generatedFile{Content: append(configBytes, '\n'), Mode: 0o644}
+		if p.DiscordChannel != nil {
+			commandHook := map[string]any{"type": "command", "command": executable, "args": []string{"hook", "claude-deferred-input"}}
+			matcher := map[string]any{"matcher": `^mcp__managed__channel\.request_input$`, "hooks": []any{commandHook}}
+			hookSettings := map[string]any{"hooks": map[string]any{"PreToolUse": []any{matcher}}}
+			hookBytes, err := json.MarshalIndent(hookSettings, "", "  ")
+			if err != nil {
+				return generatedSetup{}, errors.New("cannot encode Claude deferred hook configuration")
+			}
+			files[".claude/hctl-settings.json"] = generatedFile{Content: append(hookBytes, '\n'), Mode: 0o644}
+		}
 		for _, skill := range p.Skills {
 			for _, file := range skill.Files {
 				if file.Path == "agents/openai.yaml" {
@@ -603,7 +613,7 @@ func readApplyRecord(root, relative string) (applyRecord, bool, error) {
 
 func allowedPath(harness, path string) bool {
 	if harness == "claude" {
-		if path == "CLAUDE.md" || path == ".mcp.json" {
+		if path == "CLAUDE.md" || path == ".mcp.json" || path == ".claude/hctl-settings.json" {
 			return true
 		}
 		return generatedSkillPath(path, ".claude/skills/") || generatedSubagentPath(path, ".claude/agents/", ".md") || project.IsHarnessFilePath(harness, path)

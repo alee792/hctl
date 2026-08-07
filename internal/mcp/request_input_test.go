@@ -10,6 +10,7 @@ import (
 
 	"hctl/internal/connection/github"
 	"hctl/internal/harness"
+	"hctl/internal/harness/claude"
 	"hctl/internal/interaction"
 	"hctl/internal/project"
 )
@@ -65,6 +66,23 @@ func TestRequestInputCapabilityGatingAndRedaction(t *testing.T) {
 				t.Fatalf("bridge/result = %#v / %#v", test.bridge, result)
 			}
 		})
+	}
+}
+
+func TestClaudeDeferredBrokerEnvironmentCannotAdvertiseOrExecuteWithoutOwner(t *testing.T) {
+	p := &project.Project{AgentID: "test-agent", MaxToolInput: 1024}
+	request := validRequestInput()
+	t.Setenv(claude.DeferredBrokerEnv, "/missing/hctl-broker.sock")
+	if requestInputAvailable(nil) {
+		t.Fatal("unowned broker environment advertised managed input")
+	}
+	arguments, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := json.RawMessage(`{"name":"channel.request_input","arguments":` + string(arguments) + `}`)
+	if result, _, _, err := callManagedWithInput(p, nil, github.NewClient(nil), nil, json.RawMessage(`8`), params, io.Discard); err == nil || result != nil {
+		t.Fatalf("unowned broker result = %#v, %v", result, err)
 	}
 }
 

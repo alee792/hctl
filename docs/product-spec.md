@@ -405,28 +405,45 @@ MCP children, renderers, and channel adapters do not write dispatch state.
 Real advertisement requires a harness-owned root bridge, an available harness
 continuation strategy, and responder support for native rendering or the
 request's declared text fallback. A shared inherited MCP server cannot be
-enabled merely by configuration or a process-wide root flag. Structured
-harness events carry an opaque root proof produced by the harness-owned event
-constructor; zero or caller-assembled events fail before persistence.
+enabled merely by configuration or a process-wide root flag. Claude's exact
+`PreToolUse` hook denies events containing its documented subagent `agent_id`;
+an eligible root deferral becomes a structured harness event carrying opaque
+proof produced by the harness-owned constructor. Zero or caller-assembled
+events fail before persistence.
 Schedules, explicit JSONL, ordinary native
 sessions, unavailable responders, and unproven subagent calls do not receive
-the capability. Because current native subagent inheritance does not expose
-trustworthy caller ancestry, unproven calls are rejected before persistence;
-true subagent tool-list isolation is deferred. Generated Claude and Codex
+the capability. Claude and Codex independently prove root ancestry before
+persistence; true subagent tool-list isolation is deferred. Generated Claude and Codex
 channel instructions describe when to ask and forbid fabricated callback IDs
 or vendor markup, but those instructions are not the enforcement boundary.
 The selected harness strategy returns a bounded, content-free tool disposition
 after the durable commit, leaving deferred-tool versus continuation-turn
-semantics to issues #22 and #23. MCP does not manufacture that result. Audit
+semantics to ADRs 0024 and 0023. MCP does not manufacture that result. Audit
 correlation uses only the MCP request identity and tool name, not semantic
-request bytes. Tool responses, diagnostics, and audit never contain prompts,
-options, answers, fallback text, or vendor payloads.
+request bytes. The resumed Claude tool response necessarily returns its
+normalized answer to the original model turn; diagnostics and audit never
+contain prompts, options, answers, fallback text, or vendor payloads.
 
 The two durable continuation modes are intentionally different. A
 **native deferred-tool continuation** later resumes the same logical tool call
 using a harness-native continuation identity. A **continuation turn** later
 opens another turn in the same native session with the normalized answer and
 request context. Neither is a blocking request.
+
+Claude implements `native_deferred_tool` with its documented headless
+`PreToolUse` deferral protocol. Hctl commits the request, closes the process,
+and retains no capacity while awaiting an answer. After answer acceptance the
+generic manager restart scheduler claims the continuation exactly once,
+resumes the persisted Claude session without a new user prompt, and replays the
+exact tool identity and semantic input through a short-lived owner-only broker.
+The initial deferred result is trusted only after consuming an exact,
+single-use hook receipt recorded after successful broker delivery. A resumed
+turn succeeds only after the broker atomically confirms one delivered allow
+decision and one delivered exact MCP answer; attempted but disconnected broker
+responses are uncertain rather than complete.
+Only after lifecycle completion is durable does the manager publish the
+terminal turn event. A known unavailable or lost retained session fails
+deterministically; an ambiguous resumed process is never retried.
 
 Codex implements `continuation_turn` through app-server's documented
 experimental dynamic-tool and thread APIs. Only a channel-managed root with a

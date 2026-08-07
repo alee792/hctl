@@ -53,19 +53,35 @@ type Manager struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 
-	mu           sync.Mutex
-	workers      map[string]*managedConversation
-	elevating    map[string]bool
-	continuing   map[string]Lifecycle
-	resumeQueued map[string]bool
-	closed       bool
-	err          error
-	done         chan struct{}
-	doneOnce     sync.Once
-	stopped      chan struct{}
-	closeOnce    sync.Once
-	continueWG   sync.WaitGroup
-	diagnostics  []string
+	mu                  sync.Mutex
+	workers             map[string]*managedConversation
+	elevating           map[string]bool
+	continuing          map[string]Lifecycle
+	resumeQueued        map[string]bool
+	closed              bool
+	err                 error
+	done                chan struct{}
+	doneOnce            sync.Once
+	stopped             chan struct{}
+	closeOnce           sync.Once
+	continueWG          sync.WaitGroup
+	diagnostics         []string
+	requestInputFactory func(string) RequestInputHandler
+}
+
+// ConfigureRequestInput installs the trusted channel-root bridge before
+// admission starts. Each handler remains bound to one conversation.
+func (m *Manager) ConfigureRequestInput(factory func(string) RequestInputHandler) error {
+	if factory == nil {
+		return errors.New("managed request-input factory is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || len(m.workers) != 0 || m.requestInputFactory != nil {
+		return errors.New("managed request-input must be configured before channel admission")
+	}
+	m.requestInputFactory = factory
+	return nil
 }
 
 type WorkspaceProvider interface {
@@ -456,7 +472,9 @@ func (m *Manager) InteractionContinuation(conversation string) (interaction.Cont
 	if err := ValidateConversation(conversation); err != nil {
 		return nil, err
 	}
-	if _, ok := m.driver.(harness.ContinuationTurnDriver); !ok {
+	_, turn := m.driver.(harness.ContinuationTurnDriver)
+	_, deferred := m.driver.(harness.NativeDeferredToolDriver)
+	if !turn && !deferred {
 		return nil, errors.New("selected harness does not support continuation turns")
 	}
 	return &managerContinuation{manager: m, conversation: conversation}, nil
@@ -545,7 +563,21 @@ type managerContinuation struct {
 
 func (c *managerContinuation) Resume(ctx context.Context, intent interaction.ContinuationIntent) interaction.ContinuationResult {
 	m := c.manager
-	if intent.Mode != interaction.ContinuationTurn {
+	var continueTurn func(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
+	switch intent.Mode {
+	case interaction.ContinuationTurn:
+		driver, ok := m.driver.(harness.ContinuationTurnDriver)
+		if !ok {
+			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+		}
+		continueTurn = driver.ContinueTurn
+	case interaction.ContinuationNativeDeferredTool:
+		driver, ok := m.driver.(harness.NativeDeferredToolDriver)
+		if !ok || intent.ContinuationKey == "" {
+			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+		}
+		continueTurn = driver.ResumeDeferredTool
+	default:
 		return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
 	}
 	if err := m.startDurableWorker(c.conversation); err != nil {
@@ -604,11 +636,13 @@ func (c *managerContinuation) Resume(ctx context.Context, intent interaction.Con
 		}
 		m.mu.Unlock()
 	}()
-	driver := m.driver.(harness.ContinuationTurnDriver)
 	emitErr := error(nil)
-	result := driver.ContinueTurn(turnCtx, harness.OpenRequest{Root: p.WorkspaceRoot, Policy: policy}, snapshot.sessionID, intent, func(event harness.Event) {
+	result := continueTurn(turnCtx, harness.OpenRequest{Root: p.WorkspaceRoot, Policy: policy}, snapshot.sessionID, intent, func(event harness.Event) {
 		if emitErr == nil {
 			emitErr = m.emit(c.conversation, fromHarness(event, intent.InputID))
+			if emitErr != nil {
+				_ = m.failDispatchEventDelivery(emitErr)
+			}
 		}
 	})
 	if emitErr != nil {
@@ -621,8 +655,8 @@ func (c *managerContinuation) Committed(intent interaction.ContinuationIntent, r
 	if result.Effect != interaction.EffectSucceeded || result.ResultTurnID == "" {
 		return errors.New("continuation commit result is invalid")
 	}
-	if err := c.manager.emit(c.conversation, Event{SchemaVersion: 1, Type: "turn.completed", Harness: c.manager.driver.Name(), Conversation: c.conversation, InputID: intent.InputID, SessionID: result.ResultSessionID, TurnID: result.ResultTurnID, Status: string(interaction.ContinuationTurn)}); err != nil {
-		return err
+	if err := c.manager.emit(c.conversation, Event{SchemaVersion: 1, Type: "turn.completed", Harness: c.manager.driver.Name(), Conversation: c.conversation, InputID: intent.InputID, SessionID: result.ResultSessionID, TurnID: result.ResultTurnID, Status: string(intent.Mode)}); err != nil {
+		return c.manager.failDispatchEventDelivery(err)
 	}
 	return c.manager.wakeInteraction(c.conversation)
 }
@@ -939,6 +973,13 @@ func (m *Manager) run(worker *managedConversation) {
 		}
 	}
 	if err == nil {
+		m.mu.Lock()
+		factory := m.requestInputFactory
+		m.mu.Unlock()
+		var requestInputs RequestInputHandler
+		if factory != nil {
+			requestInputs = factory(worker.conversation)
+		}
 		err = runSubmissions(m.ctx, p, m.driver, worker.conversation, worker.submissions, func(event Event) error {
 			m.mu.Lock()
 			switch event.Type {
@@ -952,7 +993,7 @@ func (m *Manager) run(worker *managedConversation) {
 		}, runOptions{
 			turnTimeout: m.turnTimeout, idleTimeout: m.idleTimeout, timers: m.timers,
 			policy: policy, store: m.store, capacity: m.capacity,
-			forceHibernate: worker.hibernate, wake: worker.wake,
+			forceHibernate: worker.hibernate, wake: worker.wake, requestInputs: requestInputs,
 		})
 	}
 	m.capacity.unregister(worker.conversation)
@@ -963,14 +1004,27 @@ func (m *Manager) run(worker *managedConversation) {
 		delete(m.workers, worker.conversation)
 	}
 	close(worker.done)
-	if err != nil && !closing && errors.Is(err, errDispatchEventDelivery) && m.err == nil {
-		m.err = err
+	m.mu.Unlock()
+	if err != nil && !closing && errors.Is(err, errDispatchEventDelivery) {
+		_ = m.failDispatchEventDelivery(err)
+	}
+}
+
+// failDispatchEventDelivery applies the runtime-wide fatal boundary shared by
+// ordinary workers and continuation delivery. Once controller outcomes cannot
+// be accounted for safely, no further admission or capacity grant is allowed.
+func (m *Manager) failDispatchEventDelivery(cause error) error {
+	failure := errors.Join(errDispatchEventDelivery, cause)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err == nil {
+		m.err = failure
 		m.closed = true
 		m.capacity.shutdown()
 		m.cancel()
 		m.doneOnce.Do(func() { close(m.done) })
 	}
-	m.mu.Unlock()
+	return m.err
 }
 
 func (m *Manager) workerError(worker *managedConversation) error {

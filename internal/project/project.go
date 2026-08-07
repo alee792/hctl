@@ -1,3 +1,15 @@
+// Package project loads and validates portable hctl agent projects.
+//
+// Loading is side-effect free. The package reads bounded project sources,
+// rejects paths that escape the source tree, imports supported Agent Plugin
+// skills and MCP declarations, and computes the fingerprint used to bind
+// generated state to an exact source revision. Invalid optional plugin MCP
+// declarations are reported as diagnostics so the rest of a valid plugin can
+// remain available.
+//
+// Package project describes plugin MCP servers but does not start, authorize,
+// supervise, or communicate with them. Native harness configuration and
+// persistent plugin data directories are handled by package setup.
 package project
 
 import (

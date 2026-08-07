@@ -14,7 +14,9 @@ files, CLI guidance, or product documentation.
 | Instructions | Always-on authored guidance applied to the native harness. |
 | Skill | An open Agent Skills directory containing `SKILL.md` and optional supporting files loaded when relevant. A skill is not itself a callable tool. |
 | Skill resource | A regular file beneath a skill directory, commonly under `scripts/`, `references/`, or `assets/`. Hctl copies resources into native project skill directories without interpreting their content. |
-| Plugin | A vendored Agent Plugins v1 dependency under `plugins/`. In the current phase hctl validates its local `plugin.json` and imports skills from its fixed `skills/` location; MCP servers, installation, updates, marketplaces, and extensions remain outside the supported component set. |
+| Plugin | A vendored Agent Plugins v1 dependency under `plugins/`. Hctl validates its local `plugin.json`, imports skills from its fixed `skills/` location, and maps supported optional `mcp.json` servers into native harness configuration. Installation, updates, marketplaces, credentials, and extensions remain unsupported. |
+| Plugin MCP server | A native, unmanaged stdio or streamable-HTTP server declared by a vendored plugin. Hctl validates and generates its project configuration but does not start, authorize, proxy, supervise, observe, retry, or audit it. |
+| Plugin data | A private persistent workspace directory dedicated to one agent-and-plugin identity and supplied to its stdio MCP servers as `PLUGIN_DATA`. It is runtime state, not hctl-owned generated output, and is preserved when configuration is removed. |
 | Tool | A function the model can call through a declared, schema-validated input and output contract. |
 | Tool file | Source under `tools/` that exports one tool using a supported language contract. Its path registers it by convention; there is no separate hctl manifest. |
 | Tool host | An hctl-owned, long-lived language process that loads tool files and exposes them through MCP. Authors write functions, not host protocol code. |

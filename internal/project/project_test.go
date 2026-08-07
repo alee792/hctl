@@ -2,6 +2,7 @@ package project
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -717,6 +718,310 @@ func TestPluginManifestValidationAndIsolation(t *testing.T) {
 			}
 			if len(loaded.Skills) != 2 || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, "ignored") {
 				t.Fatalf("extensions were not ignored: skills=%#v diagnostics=%#v", loaded.Skills, loaded.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestLoadPluginMCPServersDeterministically(t *testing.T) {
+	root := agent(t, "portable")
+	write(t, filepath.Join(root, "plugins", "alpha", "plugin.json"), pluginManifest("alpha"))
+	writeBytes(t, filepath.Join(root, "plugins", "alpha", "bin", "server"), []byte("one\n"), 0o755)
+	write(t, filepath.Join(root, "plugins", "alpha", "work", ".keep"), "keep\n")
+	write(t, filepath.Join(root, "plugins", "alpha", "mcp.json"), `{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "zeta": {"type":"streamable-http","url":"https://example.com/mcp","headers":{"X-Package":"visible"}},
+    "local": {"type":"stdio","command":"./bin/server","args":["--root=${PLUGIN_ROOT}","${PLUGIN_DATA}"],"env":{"CACHE":"${PLUGIN_DATA}/cache"},"cwd":"./work"},
+    "legacy": {"type":"sse","url":"https://example.com/events"},
+    "bad": {"type":"stdio","command":"node","future":true}
+  }
+}`)
+	write(t, filepath.Join(root, "plugins", "zeta", "plugin.json"), pluginManifest("zeta"))
+	write(t, filepath.Join(root, "plugins", "zeta", "mcp.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"local":{"type":"stdio","command":"node"},"managed":{"type":"stdio","command":"node"}}}`)
+
+	loaded, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.PluginMCPServers) != 2 || loaded.PluginMCPServers[0].Name != "local" || loaded.PluginMCPServers[1].Name != "zeta" {
+		t.Fatalf("plugin MCP order = %#v", loaded.PluginMCPServers)
+	}
+	local := loaded.PluginMCPServers[0]
+	if local.Command != "./bin/server" || local.CWD != "./work" || local.Env["CACHE"] != "${PLUGIN_DATA}/cache" || local.DataPath == "" {
+		t.Fatalf("stdio server = %#v", local)
+	}
+	if got := fmt.Sprint(loaded.Diagnostics); !strings.Contains(got, "unsupported field") || !strings.Contains(got, "SSE transport") || !strings.Contains(got, "earlier source") {
+		t.Fatalf("MCP diagnostics = %#v", loaded.Diagnostics)
+	}
+}
+
+func TestPluginMCPValidationIsIsolatedAndFingerprintTracksAcceptedInputs(t *testing.T) {
+	root := agent(t, "portable")
+	pluginRoot := filepath.Join(root, "plugins", "example")
+	write(t, filepath.Join(pluginRoot, "plugin.json"), pluginManifest("example"))
+	write(t, filepath.Join(pluginRoot, "skills", "review", "SKILL.md"), "---\nname: review\ndescription: Review.\n---\n")
+	mcpPath := filepath.Join(pluginRoot, "mcp.json")
+	write(t, mcpPath, `{"$schema":"wrong","mcpServers":{}}`)
+	invalid, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invalid.Skills) != 2 || len(invalid.PluginMCPServers) != 0 || len(invalid.Diagnostics) != 1 {
+		t.Fatalf("invalid MCP component was not isolated: %#v", invalid)
+	}
+	write(t, mcpPath, `{"$schema":"wrong-again","mcpServers":{}}`)
+	changedInvalid, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedInvalid.SourceFingerprint != invalid.SourceFingerprint {
+		t.Fatal("rejected MCP input changed the source fingerprint")
+	}
+	write(t, mcpPath, `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{}}`)
+	empty, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.SourceFingerprint == invalid.SourceFingerprint || len(empty.PluginMCPServers) != 0 {
+		t.Fatal("accepted empty MCP component did not change the source fingerprint")
+	}
+	write(t, mcpPath, `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"remote":{"type":"streamable-http","url":"https://example.com/one"}}}`)
+	accepted, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.SourceFingerprint == invalid.SourceFingerprint || len(accepted.PluginMCPServers) != 1 {
+		t.Fatal("accepted MCP input did not change the source fingerprint")
+	}
+	write(t, mcpPath, `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"remote":{"type":"streamable-http","url":"https://example.com/two"}}}`)
+	changedAccepted, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedAccepted.SourceFingerprint == accepted.SourceFingerprint {
+		t.Fatal("accepted MCP value did not change the source fingerprint")
+	}
+}
+
+func TestPluginMCPHarnessSafetyAndDataIdentity(t *testing.T) {
+	root := agent(t, "portable")
+	pluginRoot := filepath.Join(root, "plugins", "example")
+	write(t, filepath.Join(pluginRoot, "plugin.json"), pluginManifest("example"))
+	write(t, filepath.Join(pluginRoot, "mcp.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"command-secret":{"type":"stdio","command":"${AWS_SECRET_ACCESS_KEY}"},"literal":{"type":"stdio","command":"node","args":["${OTHER}"]},"secret-header":{"type":"streamable-http","url":"https://example.com/mcp","headers":{"Authorization":"${AWS_SECRET_ACCESS_KEY}"}},"upper":{"type":"streamable-http","url":"HTTPS://example.com/mcp"}}}`)
+
+	claude, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claude.PluginMCPServers) != 1 || claude.PluginMCPServers[0].Name != "upper" || !strings.Contains(fmt.Sprint(claude.Diagnostics), "Claude project configuration would expand") {
+		t.Fatalf("Claude expansion safety = servers %#v diagnostics %#v", claude.PluginMCPServers, claude.Diagnostics)
+	}
+	codex, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(codex.PluginMCPServers) != 4 || codex.PluginMCPServers[0].Command != "${AWS_SECRET_ACCESS_KEY}" || codex.PluginMCPServers[1].Args[0] != "${OTHER}" || codex.PluginMCPServers[2].Headers["Authorization"] != "${AWS_SECRET_ACCESS_KEY}" {
+		t.Fatalf("Codex literal placeholder support = %#v", codex.PluginMCPServers)
+	}
+
+	other := agent(t, "portable")
+	write(t, filepath.Join(other, "plugins", "example", "plugin.json"), pluginManifest("example"))
+	write(t, filepath.Join(other, "plugins", "example", "mcp.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"literal":{"type":"stdio","command":"node"}}}`)
+	otherLoaded, err := Load(other, "codex", codex.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherLoaded.PluginMCPServers[0].DataPath == codex.PluginMCPServers[0].DataPath {
+		t.Fatal("different agent sources shared plugin data identity")
+	}
+}
+
+func TestRelocatedPluginKeepsSelectedDataIdentity(t *testing.T) {
+	base := t.TempDir()
+	source := filepath.Join(base, "source")
+	relocated := filepath.Join(base, "relocated")
+	workspace := filepath.Join(base, "workspace")
+	for _, root := range []string{source, relocated} {
+		write(t, filepath.Join(root, "instructions.md"), instructions("Portable."))
+		write(t, filepath.Join(root, "plugins", "example", "plugin.json"), pluginManifest("example"))
+		write(t, filepath.Join(root, "plugins", "example", "mcp.json"), `{"$schema":"`+pluginMCPSchema+`","mcpServers":{"local":{"type":"stdio","command":"node"}}}`)
+	}
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := Load(source, "codex", workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadRelocated(relocated, "codex", workspace, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AgentID != selected.AgentID || loaded.PluginMCPServers[0].DataPath != selected.PluginMCPServers[0].DataPath {
+		t.Fatalf("relocation changed plugin data identity: selected=%#v relocated=%#v", selected.PluginMCPServers, loaded.PluginMCPServers)
+	}
+}
+
+func TestPluginMCPRejectsUnsafeValuesPerServer(t *testing.T) {
+	tests := map[string]struct {
+		server string
+		want   string
+	}{
+		"remote cleartext":        {`{"type":"streamable-http","url":"http://example.com/mcp"}`, "must use HTTPS"},
+		"remote user info":        {`{"type":"streamable-http","url":"https://user@example.com/mcp"}`, "without user information"},
+		"remote fragment":         {`{"type":"streamable-http","url":"https://example.com/mcp#fragment"}`, "without user information"},
+		"invalid header value":    {`{"type":"streamable-http","url":"https://example.com/mcp","headers":{"X-Test":"one\r\ntwo"}}`, "invalid HTTP header"},
+		"duplicate headers":       {`{"type":"streamable-http","url":"https://example.com/mcp","headers":{"X-Test":"one","x-test":"two"}}`, "duplicate name"},
+		"exact duplicate headers": {`{"type":"streamable-http","url":"https://example.com/mcp","headers":{"X-Test":"one","X-Test":"two"}}`, "duplicate name"},
+		"reserved env":            {`{"type":"stdio","command":"node","env":{"PLUGIN_ROOT":"bad"}}`, "must not configure PLUGIN_ROOT"},
+		"reserved data env":       {`{"type":"stdio","command":"node","env":{"PLUGIN_DATA":"bad"}}`, "must not configure PLUGIN_DATA"},
+		"escaping cwd":            {`{"type":"stdio","command":"node","cwd":"${PLUGIN_DATA}/../escape"}`, "normalized"},
+		"command shell text":      {`{"type":"stdio","command":"node --flag"}`, "bare executable name"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := agent(t, "portable")
+			write(t, filepath.Join(root, "plugins", "example", "plugin.json"), pluginManifest("example"))
+			write(t, filepath.Join(root, "plugins", "example", "mcp.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"bad":`+test.server+`}}`)
+			loaded, err := Load(root, "claude")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(loaded.PluginMCPServers) != 0 || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, test.want) {
+				t.Fatalf("unsafe server was not isolated with %q: %#v", test.want, loaded.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestPluginMCPComponentValidationAndBounds(t *testing.T) {
+	for name, content := range map[string]string{
+		"malformed":          `{`,
+		"wrong kind":         `[]`,
+		"extra field":        `{"$schema":"` + pluginMCPSchema + `","mcpServers":{},"future":true}`,
+		"wrong servers kind": `{"$schema":"` + pluginMCPSchema + `","mcpServers":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := agent(t, "portable")
+			write(t, filepath.Join(root, "plugins", "example", "plugin.json"), pluginManifest("example"))
+			write(t, filepath.Join(root, "plugins", "example", "skills", "review", "SKILL.md"), "---\nname: review\ndescription: Review.\n---\n")
+			write(t, filepath.Join(root, "plugins", "example", "mcp.json"), content)
+			loaded, err := Load(root, "codex")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(loaded.Skills) != 2 || len(loaded.PluginMCPServers) != 0 || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, "component skipped") {
+				t.Fatalf("invalid component was not isolated: %#v", loaded)
+			}
+		})
+	}
+
+	t.Run("server bound", func(t *testing.T) {
+		root := agent(t, "portable")
+		write(t, filepath.Join(root, "plugins", "example", "plugin.json"), pluginManifest("example"))
+		servers := map[string]any{}
+		for index := 0; index <= maxPluginMCPServers; index++ {
+			servers[fmt.Sprintf("server-%02d", index)] = map[string]any{"type": "stdio", "command": "node"}
+		}
+		content, err := json.Marshal(map[string]any{"$schema": pluginMCPSchema, "mcpServers": servers})
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeBytes(t, filepath.Join(root, "plugins", "example", "mcp.json"), content, 0o644)
+		loaded, err := Load(root, "codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.PluginMCPServers) != 0 || !strings.Contains(fmt.Sprint(loaded.Diagnostics), "at most") {
+			t.Fatalf("MCP server bound was not isolated: %#v", loaded.Diagnostics)
+		}
+	})
+
+	t.Run("loopback HTTP accepted", func(t *testing.T) {
+		root := agent(t, "portable")
+		write(t, filepath.Join(root, "plugins", "example", "plugin.json"), pluginManifest("example"))
+		write(t, filepath.Join(root, "plugins", "example", "mcp.json"), `{"$schema":"`+pluginMCPSchema+`","mcpServers":{"local":{"type":"streamable-http","url":"HTTP://127.0.0.1:8080/mcp"}}}`)
+		loaded, err := Load(root, "codex")
+		if err != nil || len(loaded.PluginMCPServers) != 1 {
+			t.Fatalf("loopback HTTP was rejected: servers=%#v err=%v", loaded.PluginMCPServers, err)
+		}
+	})
+}
+
+func TestPluginMCPCommandContentAndModeChangeFingerprint(t *testing.T) {
+	root := agent(t, "portable")
+	pluginRoot := filepath.Join(root, "plugins", "example")
+	write(t, filepath.Join(pluginRoot, "plugin.json"), pluginManifest("example"))
+	command := filepath.Join(pluginRoot, "server")
+	writeBytes(t, command, []byte("one\n"), 0o644)
+	write(t, filepath.Join(pluginRoot, "mcp.json"), `{"$schema":"`+pluginMCPSchema+`","mcpServers":{"local":{"type":"stdio","command":"./server"}}}`)
+	first, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBytes(t, command, []byte("two\n"), 0o644)
+	second, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.SourceFingerprint == first.SourceFingerprint {
+		t.Fatal("plugin command content did not change fingerprint")
+	}
+	if err := os.Chmod(command, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	third, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.SourceFingerprint == second.SourceFingerprint {
+		t.Fatal("plugin command executable intent did not change fingerprint")
+	}
+}
+
+func TestPluginMCPFileSymlinkIsIsolated(t *testing.T) {
+	root := agent(t, "portable")
+	pluginRoot := filepath.Join(root, "plugins", "example")
+	write(t, filepath.Join(pluginRoot, "plugin.json"), pluginManifest("example"))
+	outside := filepath.Join(t.TempDir(), "mcp.json")
+	write(t, outside, `{"$schema":"`+pluginMCPSchema+`","mcpServers":{}}`)
+	if err := os.Symlink(outside, filepath.Join(pluginRoot, "mcp.json")); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.PluginMCPServers) != 0 || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, "without symlinks") {
+		t.Fatalf("symlinked MCP component was not isolated: %#v", loaded.Diagnostics)
+	}
+}
+
+func TestPluginMCPRejectsSymlinkedCommandAndCWD(t *testing.T) {
+	for _, target := range []string{"command", "cwd"} {
+		t.Run(target, func(t *testing.T) {
+			root := agent(t, "portable")
+			pluginRoot := filepath.Join(root, "plugins", "example")
+			write(t, filepath.Join(pluginRoot, "plugin.json"), pluginManifest("example"))
+			outside := t.TempDir()
+			server := `{"type":"stdio","command":"node","cwd":"./linked"}`
+			if target == "command" {
+				write(t, filepath.Join(outside, "server"), "outside\n")
+				if err := os.Symlink(filepath.Join(outside, "server"), filepath.Join(pluginRoot, "server")); err != nil {
+					t.Fatal(err)
+				}
+				server = `{"type":"stdio","command":"./server"}`
+			} else if err := os.Symlink(outside, filepath.Join(pluginRoot, "linked")); err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(pluginRoot, "mcp.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"bad":`+server+`}}`)
+			loaded, err := Load(root, "claude")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(loaded.PluginMCPServers) != 0 || !strings.Contains(fmt.Sprint(loaded.Diagnostics), "symlink") {
+				t.Fatalf("symlinked %s was not isolated: %#v", target, loaded.Diagnostics)
 			}
 		})
 	}

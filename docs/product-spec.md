@@ -134,10 +134,50 @@ Accepted plugin manifests and consumed skill resources participate in the
 source fingerprint and generate through the same native Claude and Codex skill
 paths as root skills.
 
-This first Agent Plugins slice does not read `mcp.json`, download or update
-plugins, resolve marketplaces, convert vendor formats, interpret extensions,
-or map plugin data into other hctl concepts. Native plugin MCP mapping is a
-separate phase; see [ADR 0014](adr/0014-import-vendored-agent-plugin-skills.md).
+See [ADR 0019](adr/0019-import-vendored-agent-plugin-skills.md) for the initial
+vendored-skills decision.
+
+An accepted plugin may also contain a bounded, regular UTF-8 `mcp.json` with
+the exact canonical Agent Plugins v1.0.0 MCP schema identifier. Missing
+`mcp.json` is normal. A malformed top-level MCP document disables only that
+component; an invalid server disables only itself. Hctl supports `stdio` and
+`streamable-http`; valid SSE declarations warn and are skipped. Plugin
+directories and server names are processed lexically. The first exact server
+name wins, `managed` is reserved for hctl, and collisions are skipped without
+renaming.
+
+A stdio command is one bare executable name or a plugin-relative `./` path.
+Plugin-relative commands and plugin-root working directories must remain within
+the real plugin tree without symlinks. The optional working directory is rooted
+at `./`, `${PLUGIN_ROOT}`, or `${PLUGIN_DATA}` and defaults to the plugin root.
+Hctl expands the exact `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` placeholders once
+in arguments, environment values, and working directories, then supplies both
+variables in the server environment. A plugin may not override them. Before
+native setup is written, hctl creates a private persistent data directory at a
+deterministic agent-and-plugin-specific path beneath workspace
+`.hctl/plugin-data/`; hctl normalizes and verifies that directory as owner-only
+and does not delete plugin data when configuration is removed.
+
+Remote URLs are absolute HTTP(S), contain no user information or fragment, and
+use HTTPS unless their host is `localhost` or a loopback IP literal. Header
+names and values must be valid HTTP and may not collide case-insensitively.
+Headers are literal package-visible values: hctl performs no expansion and they
+must not contain secrets.
+
+Accepted plugin servers are emitted as native project MCP configuration. Claude
+Code receives `.mcp.json`; Codex receives `.codex/config.toml`, where plugin
+servers remain optional and use prompt approval. The harness owns startup,
+approval, transport, authentication, retries, and runtime behavior. Hctl does
+not proxy, supervise, authorize, observe, or audit plugin MCP calls. Accepted
+server values and any consumed plugin-relative command bytes and executable
+intent participate in the source fingerprint. See [ADR 0020](adr/0020-map-plugin-mcp-through-native-harness-configuration.md).
+
+Codex preserves unsupported placeholder-like text literally. Claude project
+MCP configuration performs its own environment expansion in commands,
+arguments, environment values, URLs, and headers. To prevent accidental ambient-secret
+substitution and preserve the portable literal-value contract, hctl skips a
+Claude plugin server containing such text after portable expansion and emits a
+warning.
 
 `name` and `description` are required. Names contain 1-64 lowercase ASCII
 letters, digits, and single hyphens, without a leading or trailing hyphen.
@@ -428,20 +468,21 @@ hctl apply ~/agents/reviewer --workspace ~/Code/example --harness claude
 cd ~/Code/example && claude
 ```
 
-The agent project supplies instructions, skills, tools, subagents,
-harness-specific files, and native dependency files. The workspace supplies
-harness-visible working files and is
+The agent project supplies instructions, skills, tools, subagents, vendored
+plugins, harness-specific files, and native dependency files. The workspace
+supplies harness-visible working files and is
 the working directory for the harness and authored tools. Generated harness
-files, apply records, dispatch state, and runtime caches belong to the
-workspace. Source discovery and dependency preparation remain rooted in the
-agent project.
+files, apply records, plugin data, dispatch state, and runtime caches belong to
+the workspace. Source discovery and dependency preparation remain rooted in
+the agent project.
 
 Claude receives `CLAUDE.md`, `.mcp.json`, `.claude/skills/`, and
 `.claude/agents/`. Codex receives `AGENTS.md`, `.codex/config.toml`,
 `.agents/skills/`, and `.codex/agents/`. Generated MCP configuration uses the
-resolved `hctl` executable, agent-source, and workspace paths. Hctl generates
-skills only at this project scope; it does not modify user, administrator,
-enterprise, or plugin skill locations.
+resolved `hctl` executable, agent-source, and workspace paths. Supported
+vendored plugin servers join these native MCP files without joining hctl's
+managed tool boundary. Hctl generates skills only at this project scope; it
+does not modify user, administrator, enterprise, or plugin skill locations.
 
 Codex project configuration remains subject to Codex's native repository-trust
 flow. Apply does not edit the user's global Codex configuration or silently

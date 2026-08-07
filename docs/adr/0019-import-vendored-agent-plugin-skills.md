@@ -1,4 +1,4 @@
-# ADR 0014: Import vendored Agent Plugin skills
+# ADR 0019: Import vendored Agent Plugin skills
 
 - Status: accepted
 

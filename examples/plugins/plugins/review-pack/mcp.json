@@ -1,0 +1,15 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "review-notes": {
+      "type": "stdio",
+      "command": "./bin/review-notes",
+      "args": [
+        "${PLUGIN_DATA}/notes.json"
+      ],
+      "env": {
+        "REVIEW_GUIDE": "${PLUGIN_ROOT}/skills/review/SKILL.md"
+      }
+    }
+  }
+}

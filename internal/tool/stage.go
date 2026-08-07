@@ -178,6 +178,12 @@ func pruneDenoBuildCache(workspaceRoot, cache string) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
+		if name == "node_compat_bin" {
+			if err := removeGeneratedTreeWithSymlinks(directory, name); err != nil {
+				return fmt.Errorf("cannot discard Deno Node compatibility shim: %w", err)
+			}
+			continue
+		}
 		if name != "gen" && !strings.Contains(name, "analysis_cache") && !strings.HasPrefix(name, "v8_code_cache") && !strings.HasPrefix(name, "check_cache") && !strings.HasPrefix(name, "fast_check_cache") {
 			continue
 		}
@@ -316,6 +322,25 @@ func removeGeneratedTree(root, relative string) error {
 		return nil
 	}); err != nil {
 		return err
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return errors.New("cannot remove generated runtime path")
+	}
+	return nil
+}
+
+// removeGeneratedTreeWithSymlinks removes a known generated directory without
+// following links within it. Deno's node_compat_bin contains a link back to the
+// build-time Deno executable and is not part of the read-only tool host.
+func removeGeneratedTreeWithSymlinks(root, relative string) error {
+	cleaned, err := rootfs.CleanRelative(filepath.ToSlash(relative))
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(root, filepath.FromSlash(cleaned))
+	info, err := os.Lstat(target)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("generated runtime path must be a real directory")
 	}
 	if err := os.RemoveAll(target); err != nil {
 		return errors.New("cannot remove generated runtime path")

@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -146,6 +147,13 @@ func TestPruneDenoBuildCacheMaterializesContainedSymlinks(t *testing.T) {
 	if err := os.Symlink("real", filepath.Join(packageDirectory, "linked")); err != nil {
 		t.Fatal(err)
 	}
+	shimDirectory := filepath.Join(denoDirectory, "node_compat_bin")
+	if err := os.Mkdir(shimDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "deno"), filepath.Join(shimDirectory, "node")); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := pruneDenoBuildCache(workspace, cache); err != nil {
 		t.Fatal(err)
@@ -157,6 +165,9 @@ func TestPruneDenoBuildCacheMaterializesContainedSymlinks(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(linked, "module.js"))
 	if err != nil || string(data) != "export {};\n" {
 		t.Fatalf("materialized Deno file = %q, %v", data, err)
+	}
+	if _, err := os.Lstat(shimDirectory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Deno Node compatibility shim remains: %v", err)
 	}
 }
 

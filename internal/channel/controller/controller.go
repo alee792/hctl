@@ -342,6 +342,23 @@ func (c *Controller) interactionCoordinator(surfaceID, conversation string) (*in
 		return nil, "", err
 	}
 	c.mu.Lock()
+	// Coordinator construction crosses into the manager without c.mu held.
+	// Treat the captured surface pointer as the conversation generation: a
+	// completed reset may remove it, and a later admission may install a new
+	// surface with the same external identifiers. Never publish a coordinator
+	// into either generation after reset or close wins that race.
+	if c.closed {
+		c.mu.Unlock()
+		return nil, "", dispatch.ErrManagerClosed
+	}
+	if c.resetting[surfaceID] {
+		c.mu.Unlock()
+		return nil, "", dispatch.ErrConversationBusy
+	}
+	if c.surfaces[surfaceID] != current || c.byConversation[conversation] != current {
+		c.mu.Unlock()
+		return nil, "", dispatch.ErrRequestInputUnavailable
+	}
 	if existing := c.coordinators[conversation]; existing != nil {
 		coordinator = existing
 	} else {
@@ -503,6 +520,8 @@ func (c *Controller) Reset(surfaceID, conversationID string) error {
 	if c.surfaces[surfaceID] == current {
 		delete(c.surfaces, surfaceID)
 		delete(c.byConversation, conversationID)
+		delete(c.coordinators, conversationID)
+		delete(c.rendered, conversationID)
 	}
 	c.mu.Unlock()
 	return nil
@@ -616,7 +635,7 @@ func (c *Controller) handleDispatch(conversation string, event dispatch.Event) {
 		continuationID := event.InputID + ":write"
 		current.turns[continuationID] = &pendingTurn{target: turn.target, writeContinuation: true}
 		c.mu.Unlock()
-		_, _ = fmt.Fprintf(c.audit, "%s turn suppressed input_id=%s class=write_access_requested\n", c.auditPrefix, event.InputID)
+		_, _ = fmt.Fprintf(c.audit, "%s turn suppressed class=write_access_requested\n", c.auditPrefix)
 		go c.continueWritable(current, conversation, continuationID)
 		return
 	}
@@ -629,7 +648,7 @@ func (c *Controller) handleDispatch(conversation string, event dispatch.Event) {
 		return
 	}
 	if suppressedControl(content) == channelconfig.NoReplyResult {
-		_, _ = fmt.Fprintf(c.audit, "%s turn suppressed input_id=%s class=no_reply\n", c.auditPrefix, event.InputID)
+		_, _ = fmt.Fprintf(c.audit, "%s turn suppressed class=no_reply\n", c.auditPrefix)
 		return
 	}
 	outcome := Outcome{InputID: event.InputID, Target: turn.target, Parts: parts, Truncated: truncated}
@@ -637,7 +656,7 @@ func (c *Controller) handleDispatch(conversation string, event dispatch.Event) {
 		outcome.Parts = nil
 		outcome.Failure = FailureWriteAccess
 	} else if content == "" {
-		_, _ = fmt.Fprintf(c.audit, "%s turn empty input_id=%s class=%s\n", c.auditPrefix, event.InputID, event.Type)
+		_, _ = fmt.Fprintf(c.audit, "%s turn empty class=%s\n", c.auditPrefix, event.Type)
 		outcome.Failure = terminalFailure(event.Type)
 	}
 	c.deliver(outcome)
@@ -655,7 +674,7 @@ func (c *Controller) continueWritable(current *surface, conversation, inputID st
 	if err == nil && result.Status == "completed" {
 		return
 	}
-	_, _ = fmt.Fprintf(c.audit, "%s elevation failed input_id=%s class=workspace_failure\n", c.auditPrefix, inputID)
+	_, _ = fmt.Fprintf(c.audit, "%s elevation failed class=workspace_failure\n", c.auditPrefix)
 	if turn != nil {
 		c.deliver(Outcome{InputID: inputID, Target: turn.target, Failure: FailureWorkspace})
 	}
@@ -663,7 +682,7 @@ func (c *Controller) continueWritable(current *surface, conversation, inputID st
 
 func (c *Controller) deliver(outcome Outcome) {
 	if err := c.delivery.Deliver(outcome); err != nil {
-		_, _ = fmt.Fprintf(c.audit, "%s delivery failed input_id=%s class=uncertain\n", c.auditPrefix, outcome.InputID)
+		_, _ = fmt.Fprintf(c.audit, "%s delivery failed class=uncertain\n", c.auditPrefix)
 	}
 }
 

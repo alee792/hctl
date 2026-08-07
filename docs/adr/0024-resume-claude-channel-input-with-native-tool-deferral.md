@@ -31,8 +31,10 @@ retained session ID, and exact native tool-use ID. It opens
 broker retains the original request digest and complete updated input outside
 the Claude environment. The environment contains only its short-lived socket
 path. The replayed hook requires the same tool ID, name, and digest before the
-broker returns `allow`; the resumed MCP call must present byte-equivalent
-hook-produced input before the broker returns the normalized answer.
+broker returns `allow`; the resumed MCP call must present canonically equivalent
+hook-produced JSON before the broker returns the normalized answer.
+Canonicalization is bounded, rejects duplicate keys and multiple values, and
+does not weaken the exact tool ID, request digest, or normalized-answer checks.
 Successful continuation additionally requires one successfully delivered
 `allow` hook response and one successfully delivered exact MCP answer. Broker
 state distinguishes an attempted response from a completed socket write. A

@@ -12,6 +12,7 @@ import (
 
 	"hctl/internal/channelconfig"
 	"hctl/internal/dispatch"
+	"hctl/internal/interaction"
 )
 
 func TestControllerBuffersSeparateItemsAndDeliversNormalReply(t *testing.T) {
@@ -179,6 +180,8 @@ func TestControllerClassifiesCompletedTurnWithoutOutput(t *testing.T) {
 
 func TestControllerDelegatesStatusAndIdleReset(t *testing.T) {
 	c, managed, _ := testController(t, 100)
+	c.coordinators["conversation"] = &interaction.Coordinator{}
+	c.rendered["conversation"] = "old-interaction"
 	managed.statuses["conversation"] = dispatch.ConversationStatus{State: dispatch.LifecycleHibernated}
 	managed.capacity = dispatch.CapacityStatus{ActiveLimit: 2, ResidentLimit: 4}
 	if got := c.Status("conversation"); !reflect.DeepEqual(got, Status{Conversation: managed.statuses["conversation"], Capacity: managed.capacity}) {
@@ -189,6 +192,55 @@ func TestControllerDelegatesStatusAndIdleReset(t *testing.T) {
 	}
 	if !reflect.DeepEqual(managed.resets, []string{"conversation"}) {
 		t.Fatalf("resets = %#v", managed.resets)
+	}
+	if c.coordinators["conversation"] != nil || c.rendered["conversation"] != "" {
+		t.Fatalf("reset retained old interaction lifecycle: coordinator=%v rendered=%q", c.coordinators["conversation"] != nil, c.rendered["conversation"])
+	}
+}
+
+func TestControllerDoesNotPublishCoordinatorAcrossResetGeneration(t *testing.T) {
+	c, _, _ := testController(t, 100)
+	creation := &blockingInteractionManager{started: make(chan struct{}), release: make(chan struct{})}
+	c.interactionMgr = creation
+	c.adapter = fakeInteractionAdapter{}
+	original := &surface{conversation: "conversation", turns: map[string]*pendingTurn{}}
+	c.surfaces["surface"] = original
+	c.byConversation["conversation"] = original
+
+	type result struct {
+		coordinator *interaction.Coordinator
+		err         error
+	}
+	created := make(chan result, 1)
+	go func() {
+		coordinator, _, err := c.interactionCoordinator("surface", "conversation")
+		created <- result{coordinator: coordinator, err: err}
+	}()
+	<-creation.started
+
+	if err := c.Reset("surface", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	// Reuse the same external identifiers before construction returns. Pointer
+	// identity is the generation token that distinguishes this new surface.
+	replacement := &surface{conversation: "conversation", turns: map[string]*pendingTurn{}}
+	c.mu.Lock()
+	c.surfaces["surface"] = replacement
+	c.byConversation["conversation"] = replacement
+	c.mu.Unlock()
+	close(creation.release)
+
+	got := <-created
+	if got.coordinator != nil || !errors.Is(got.err, dispatch.ErrRequestInputUnavailable) {
+		t.Fatalf("stale coordinator result = coordinator:%v err:%v", got.coordinator != nil, got.err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.coordinators["conversation"] != nil {
+		t.Fatal("pre-reset coordinator was published into the replacement generation")
+	}
+	if c.surfaces["surface"] != replacement || c.byConversation["conversation"] != replacement {
+		t.Fatal("replacement surface generation changed")
 	}
 }
 
@@ -344,6 +396,39 @@ type fakeSubmission struct {
 	submission   dispatch.Submission
 }
 
+type fakeInteractionAdapter struct{}
+
+func (fakeInteractionAdapter) Render(context.Context, interaction.RenderIntent) interaction.EffectOutcome {
+	return interaction.EffectSucceeded
+}
+func (fakeInteractionAdapter) Capabilities() interaction.Capabilities {
+	return interaction.Capabilities{}
+}
+func (fakeInteractionAdapter) Owner(surfaceID string) interaction.Owner {
+	return interaction.Owner{SurfaceKey: surfaceID, PrincipalKey: "principal"}
+}
+func (fakeInteractionAdapter) RecoverTarget(string, string) (any, bool) { return nil, false }
+
+type blockingInteractionManager struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (*blockingInteractionManager) ConfigureRequestInput(func(string) dispatch.RequestInputHandler) error {
+	return nil
+}
+func (m *blockingInteractionManager) NewInteractionCoordinator(string, interaction.Renderer, func() time.Time) (*interaction.Coordinator, error) {
+	close(m.started)
+	<-m.release
+	return &interaction.Coordinator{}, nil
+}
+func (*blockingInteractionManager) ScheduleInteractionResume(string) error { return nil }
+func (*blockingInteractionManager) ScheduleInteractionExpiry(string) error { return nil }
+func (*blockingInteractionManager) CancelInteractionExpiry(string)         {}
+func (*blockingInteractionManager) ConfigureInteractionReady(func(string) bool) error {
+	return nil
+}
+
 type fakeManager struct {
 	mu            sync.Mutex
 	submitted     []fakeSubmission
@@ -467,5 +552,36 @@ func TestContinuationTurnParkingAuditIsContentFree(t *testing.T) {
 	}
 	if len(delivery.outcomes) != 1 || strings.Join(delivery.outcomes[0].Parts, "") != "Final answer." {
 		t.Fatalf("outcomes = %#v", delivery.outcomes)
+	}
+}
+
+func TestControllerAuditNeverIncludesInputIdentifiersOrContent(t *testing.T) {
+	var audit strings.Builder
+	delivery := &fakeTransport{err: errors.New("ambiguous")}
+	c, err := NewWithManager(context.Background(), newFakeManager(), delivery, 100, &audit, "Test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
+
+	submit(t, c, "one", "one", "discord-message-secret", "target")
+	c.handleDispatch("one", dispatch.Event{Type: "agent.output.delta", InputID: "discord-message-secret", ItemID: "item", Delta: channelconfig.NoReplyResult})
+	c.handleDispatch("one", dispatch.Event{Type: "turn.completed", InputID: "discord-message-secret"})
+	submit(t, c, "two", "two", "empty-message-secret", "target")
+	c.handleDispatch("two", dispatch.Event{Type: "turn.completed", InputID: "empty-message-secret"})
+	submit(t, c, "three", "three", "delivery-message-secret", "target")
+	c.handleDispatch("three", dispatch.Event{Type: "agent.output.delta", InputID: "delivery-message-secret", ItemID: "item", Delta: "semantic secret"})
+	c.handleDispatch("three", dispatch.Event{Type: "turn.completed", InputID: "delivery-message-secret"})
+
+	got := audit.String()
+	for _, forbidden := range []string{"discord-message-secret", "empty-message-secret", "delivery-message-secret", "semantic secret", channelconfig.NoReplyResult} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("audit exposed %q: %s", forbidden, got)
+		}
+	}
+	for _, class := range []string{"class=no_reply", "class=turn.completed", "class=uncertain"} {
+		if !strings.Contains(got, class) {
+			t.Fatalf("audit omitted safe classification %q: %s", class, got)
+		}
 	}
 }

@@ -89,7 +89,15 @@ func TestDeferredMCPResultRequiresExactEphemeralEnvelope(t *testing.T) {
 	if err := RunDeferredHook(strings.NewReader(hookJSON(t, "toolu_exact", requestBytes)), &hookOutput, broker.path); err != nil {
 		t.Fatal(err)
 	}
-	got, err := RequestDeferredBrokerResult(broker.path, updated)
+	var hookResponse struct {
+		HookSpecificOutput struct {
+			UpdatedInput json.RawMessage `json:"updatedInput"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(hookOutput.Bytes(), &hookResponse); err != nil || len(hookResponse.HookSpecificOutput.UpdatedInput) == 0 {
+		t.Fatalf("hook response = %q, %v", hookOutput.String(), err)
+	}
+	got, err := RequestDeferredBrokerResult(broker.path, hookResponse.HookSpecificOutput.UpdatedInput)
 	if err != nil || len(got.Fields) != 1 || got.Fields[0].Confirmed == nil || !*got.Fields[0].Confirmed {
 		t.Fatalf("decoded = %#v, %v", got, err)
 	}
@@ -99,6 +107,14 @@ func TestDeferredMCPResultRequiresExactEphemeralEnvelope(t *testing.T) {
 	}
 	if _, err := RequestDeferredBrokerResult("/missing/broker.sock", updated); err == nil {
 		t.Fatal("missing exact ephemeral state was accepted")
+	}
+	duplicate := bytes.Replace(updated, []byte(`"kind":"confirm"`), []byte(`"kind":"confirm","kind":"confirm"`), 1)
+	resume, err := validateDeferredResume("toolu_exact", digest, updated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeDeferredToolResult(duplicate, resume); err == nil {
+		t.Fatal("duplicate-key deferred input was accepted")
 	}
 }
 

@@ -166,4 +166,91 @@ docker run --rm --entrypoint /bin/sh "$staged_image" -c '
     | grep -F "\"name\":\"hctl-managed\"" >/dev/null
 '
 
-printf '%s\n' "PASS Codex source, direct, and tool-free staged images"
+for runtime in deno python go; do
+  context="$work/runtime-$runtime"
+  mkdir -p "$context/agent"
+  cp -R "$repo_root/images/codex/acceptance/fixtures/$runtime/." "$context/agent/"
+  case "$runtime" in
+    deno)
+      cp "$repo_root/agents/maintainer/deno.json" "$repo_root/agents/maintainer/deno.lock" "$context/agent/"
+      ;;
+    python)
+      cp "$repo_root/agents/maintainer/pyproject.toml" "$repo_root/agents/maintainer/uv.lock" "$context/agent/"
+      ;;
+    go)
+      cp "$repo_root/agents/maintainer/go.mod" "$context/agent/"
+      ;;
+  esac
+
+  runtime_image="hctl-codex-staged-$runtime:acceptance"
+  docker build --platform linux/amd64 \
+    --build-arg "SOURCE_IMAGE=$source_image" \
+    --build-arg "BASE_IMAGE=$base_image" \
+    --tag "$runtime_image" \
+    --file "$repo_root/images/codex/acceptance/runtime-staged.Dockerfile" \
+    "$context"
+
+  if docker run --rm "$runtime_image" >"$work/staged-$runtime-entrypoint.out" 2>&1; then
+    echo "$runtime staged image entrypoint unexpectedly completed" >&2
+    exit 1
+  fi
+  grep -F "agent has no configured channels; use --input jsonl or add channels/discord.md" "$work/staged-$runtime-entrypoint.out" >/dev/null
+
+  docker run --rm --entrypoint /bin/sh --env "EXPECTED_RUNTIME=$runtime" "$runtime_image" -c '
+    set -eu
+    test "$(id -u):$(id -g)" = "65532:65532"
+    test -x /opt/hctl/bin/agent-entrypoint
+    test -x /opt/hctl/harness/bin/codex
+    test -f /workspace/.codex/config.toml
+    test -s /etc/ssl/certs/ca-certificates.crt
+    test -z "$(find /home/hctl/.codex -mindepth 1 -print -quit)"
+
+    case "$EXPECTED_RUNTIME" in
+      deno)
+        test -x /opt/hctl/runtimes/deno/bin/deno
+        test ! -e /opt/hctl/runtimes/python
+        test ! -e /opt/hctl/runtimes/uv
+        test ! -e /opt/hctl/runtimes/go
+        test -z "$(find /workspace/.hctl/cache/tools -path "*/go/host" -type f -print -quit)"
+        grep -F "\"deno\"" /opt/hctl/artifact.json >/dev/null
+        for absent in python uv go-host; do
+          if grep -F "\"$absent\"" /opt/hctl/artifact.json >/dev/null; then exit 1; fi
+        done
+        ;;
+      python)
+        test -n "$(find /opt/hctl/runtimes/python/bin -type f -perm -111 -print -quit)"
+        test -x /opt/hctl/runtimes/uv/bin/uv
+        test ! -e /opt/hctl/runtimes/deno
+        test ! -e /opt/hctl/runtimes/go
+        test -n "$(find /workspace/.hctl/cache/tools -path "*/python-venv/bin/python" -type f -perm -111 -print -quit)"
+        test -z "$(find /workspace/.hctl/cache/tools -path "*/go/host" -type f -print -quit)"
+        grep -F "\"python\"" /opt/hctl/artifact.json >/dev/null
+        grep -F "\"uv\"" /opt/hctl/artifact.json >/dev/null
+        for absent in deno go-host; do
+          if grep -F "\"$absent\"" /opt/hctl/artifact.json >/dev/null; then exit 1; fi
+        done
+        ;;
+      go)
+        test ! -e /opt/hctl/runtimes
+        go_host=$(find /workspace/.hctl/cache/tools -path "*/go/host" -type f -perm -111 -print -quit)
+        test -n "$go_host"
+        test -z "$(find /workspace/.hctl/cache/tools \( -name main.go -o -name go.mod -o -name go.sum \) -type f -print -quit)"
+        grep -F "\"go-host\"" /opt/hctl/artifact.json >/dev/null
+        for absent in deno python uv; do
+          if grep -F "\"$absent\"" /opt/hctl/artifact.json >/dev/null; then exit 1; fi
+        done
+        ;;
+    esac
+
+    result=$(printf "%s\n" \
+      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}" \
+      "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}" \
+      "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"runtime-probe\",\"arguments\":{}}}" \
+      | timeout 10 /opt/hctl/bin/hctl mcp serve /opt/hctl/agents/agent --workspace /workspace --harness codex)
+    printf "%s\n" "$result" | grep -F "\"name\":\"runtime-probe\"" >/dev/null
+    printf "%s\n" "$result" | grep -F "\"runtime\":\"$EXPECTED_RUNTIME\"" >/dev/null
+    printf "%s\n" "$result" | grep -F "\"isError\":false" >/dev/null
+  '
+done
+
+printf '%s\n' "PASS Codex source, direct, tool-free, Deno-only, Python-only, and Go-only staged images"

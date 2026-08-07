@@ -92,6 +92,7 @@ docker run --rm --entrypoint /bin/sh --env "EXPECTED_SHARED_LIBRARIES=$shared_li
   test -z "$(find /home/hctl -mindepth 1 -maxdepth 1 ! -name .codex -print -quit)"
   test -z "$(find /workspace -mindepth 1 -print -quit)"
   test ! -e /agent
+  mkdir -p /tmp/codex-version
   CODEX_HOME=/tmp/codex-version codex --version | grep -F "'"$codex_version"'" >/dev/null
   deno --version >/dev/null
   test "$(python -c "import sys; print(sys.base_prefix)")" = /opt/hctl/runtimes/python

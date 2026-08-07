@@ -29,7 +29,7 @@ const (
 	finalHome      = "/home/hctl"
 	finalHCTL      = "/opt/hctl/bin/hctl"
 	manifestPath   = "opt/hctl/artifact.json"
-	maxStagedFile  = 256 << 20
+	maxStagedFile  = 384 << 20
 	maxStagedFiles = 65536
 	maxStagedBytes = int64(2 << 30)
 	runtimeUID     = 65532

@@ -82,7 +82,12 @@ func trigger(ctx context.Context, p *project.Project, driver harness.Driver, nam
 	}
 	var err error
 	if turnTimeout > 0 {
-		err = dispatch.RunTaskWithTurnTimeout(ctx, p, driver, conversationID(name), dispatch.Submission{InputID: inputID, Text: string(source.Prompt)}, emit, turnTimeout)
+		runtime, runtimeErr := dispatch.NewTaskRuntime(p, driver, turnTimeout, 1)
+		if runtimeErr != nil {
+			return result, runtimeErr
+		}
+		defer runtime.Close()
+		err = runtime.Run(ctx, conversationID(name), dispatch.Submission{InputID: inputID, Text: string(source.Prompt)}, emit)
 	} else {
 		err = dispatch.RunTask(ctx, p, driver, conversationID(name), dispatch.Submission{InputID: inputID, Text: string(source.Prompt)}, emit)
 	}

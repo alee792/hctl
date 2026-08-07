@@ -12,6 +12,8 @@ occurrence starts a fresh native-harness session so recurring work does not
 silently inherit old model context. The supplied input ID makes retries
 deduplicatable. Automatic clocks, deployment registration, output delivery,
 and per-turn deadline policy were separated from the initial schedule slice.
+[ADR 0026](0026-run-schedules-from-a-foreground-utc-clock.md) subsequently
+implements the foreground UTC clock through a shared task runtime.
 
 ## Decision
 

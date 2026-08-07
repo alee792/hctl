@@ -17,20 +17,33 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-1. **HCTL-015 — Add a foreground local schedule clock.** One-shot dispatch and
-   task-turn deadlines are now proven. Assess a foreground UTC five-field cron
-   runner that reuses the same trigger path, does no downtime backfill, and
-   skips overlapping occurrences. Do not install or mutate launchd, systemd,
-   crontab, or a hosted scheduler.
+No task is currently ready.
 
 ## Ordered next
 
 Do not start these concurrently. Shape each item using evidence from the
 completed predecessor.
 
-No additional item is ordered behind HCTL-015.
+No additional item is ordered.
 
 ## Completed
+
+### [GitHub #43](https://github.com/alee792/hctl/issues/43) — Run schedules from a foreground local clock
+
+**Outcome:** `hctl schedule run` evaluates the already-applied schedule set in
+UTC from one explicit foreground process. One shared task runtime serializes
+durable state, admits different schedules up to a bounded active-turn limit,
+skips same-schedule overlap including capacity waiters, and preserves fresh
+sessions and per-turn deadlines. Current-minute evaluation performs no
+backfill, a canonical runtime lock excludes a second clock, and signal shutdown
+drains admitted work without installing a service.
+
+**Evidence:** Deterministic clock and timer tests cover exact startup minutes,
+forward and backward movement, repeated wakes, overlap, capacity, deadline
+isolation, recovery, shutdown, output failure, stable occurrence identity, and
+lock scoping. Fake Claude and Codex CLI acceptance proves fresh task execution
+and model-output suppression. See
+[ADR 0026](../adr/0026-run-schedules-from-a-foreground-utc-clock.md).
 
 ### [GitHub #42](https://github.com/alee792/hctl/issues/42) — Add durable per-turn deadlines to task dispatch
 
@@ -48,8 +61,8 @@ durable deadline classification, generic-uncertainty compatibility, and fresh
 later execution without real sleeps. A literal CLI fake-process test
 proves process termination and lifecycle output; focused schedule, dispatcher,
 CLI, Discord, and JSONL tests plus `./scripts/check.sh` preserve adjacent
-behavior. Portable schedule source and the foreground-clock boundary are
-unchanged.
+behavior. That slice left portable schedule source and the foreground-clock
+boundary unchanged.
 
 ### [GitHub #27](https://github.com/alee792/hctl/issues/27) — Map vendored Agent Plugins v1 MCP servers
 

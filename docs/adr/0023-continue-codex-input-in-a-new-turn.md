@@ -1,6 +1,9 @@
 # ADR 0023: Continue Codex channel input in a new turn
 
 - Status: accepted
+- Integrated by: [ADR 0025](0025-render-discord-input-with-bounded-native-components.md)
+- Acceptance: credentialed Codex passed on 2026-08-07; see
+  [interactive-input acceptance](../workbench/interactive-input-acceptance.md)
 
 ## Decision
 
@@ -73,6 +76,6 @@ tool keeps dispatch state in hctl and closes the ancestry gap identified by ADR
   operation broker decision is unchanged.
 - Fake app-server and child-process tests provide live-style evidence for
   process exit, same-thread resume, bounded continuation input, and final
-  controller delivery. Credentialed Discord end-to-end acceptance belongs to
-  issue #25 after issue #24 wires rendering and answer callbacks; this slice
-  does not claim that pass.
+  controller delivery. ADR 0025 supplies rendering and answer callbacks; the
+  linked acceptance record distinguishes credential-free coverage from the
+  credentialed Codex pass.

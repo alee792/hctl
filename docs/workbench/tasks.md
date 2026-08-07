@@ -183,9 +183,9 @@ Discord's official
 [`Interactions` contract](https://docs.discord.com/developers/interactions/receiving-and-responding),
 [product specification](../product-spec.md), and
 [ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md), and
-[historical ADR 0012](../adr/0012-use-a-conversational-discord-gateway-channel.md). The README,
-product specification, glossary, status, task list, and credential-free example
-record the implemented contract.
+[ADR 0012](../adr/0012-use-signed-discord-http-interactions.md), now
+superseded by
+[ADR 0028](../adr/0028-use-a-conversational-discord-gateway-channel.md).
 
 ### HCTL-010 — Add an anonymous public GitHub connection
 
@@ -367,22 +367,16 @@ Any product fix discovered live also needs a credential-free regression test.
 
 **Context:** [Codex live acceptance](codex-live-acceptance.md).
 
+## Superseded
+
 ### HCTL-013 — Run live Discord Interactions acceptance
 
-**Blocked by:** A disposable Discord application, a user-controlled public HTTPS
-endpoint forwarding only `/interactions` to the loopback runner, one registered
-application command, and explicit authorization to use them.
-
-**Outcome:** Repeat the credential-free journey against Discord: endpoint PING,
-one authorized `message` command, visible defer, bounded original edit and
-followup, an unauthorized-user rejection, and one controlled restart/recovery
-observation. Record the hctl revision, Discord application context, exact
-credential-safe procedure, timings, and discrepancies without retaining
-signatures, tokens, message bodies, or credentials. Any product correction also
-needs a credential-free regression test.
-
-**Context:** [Discord source example](../../examples/discord/README.md) and
-[ADR 0012](../adr/0012-use-a-conversational-discord-gateway-channel.md).
+**Status:** Superseded before live acceptance by the conversational Gateway
+decision in
+[ADR 0028](../adr/0028-use-a-conversational-discord-gateway-channel.md). Do not
+provision a public Interactions endpoint for this task. Current credentialed
+evidence is recorded in the [Discord](discord-live-acceptance.md) and
+[interactive-input](interactive-input-acceptance.md) acceptance records.
 
 ## Start only with human direction
 

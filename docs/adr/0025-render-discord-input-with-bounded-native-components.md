@@ -2,6 +2,10 @@
 
 - Status: accepted
 - Date: 2026-08-07
+- Integrates: [ADR 0021](0021-persist-durable-interactive-input-lifecycles.md),
+  [ADR 0022](0022-gate-managed-channel-input-at-the-dispatcher.md),
+  [ADR 0023](0023-continue-codex-input-in-a-new-turn.md), and
+  [ADR 0024](0024-resume-claude-channel-input-with-native-tool-deferral.md)
 
 ## Decision
 
@@ -59,4 +63,8 @@ payloads and tokens never enter dispatcher state, model input, or audit.
 - Delivery-pending guild interactions are reconstructable on restart. DM
   delivery is reconstructed when that authorized DM surface next appears.
   Delivery-intended and delivery-uncertain state is never automatically sent.
-- Credentialed Discord, Claude, and Codex acceptance remains issue #25.
+- Credential-free stitched acceptance covers Discord, Claude, and Codex.
+  Credentialed Codex passed; credentialed Claude was unavailable because the
+  installed CLI had no authenticated account. The
+  [acceptance record](../workbench/interactive-input-acceptance.md) preserves
+  the exact evidence and limits.

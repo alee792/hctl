@@ -1,6 +1,7 @@
 # ADR 0008: Keep agent proposals workspace-local and inert
 
 - Status: accepted
+- Implementation: deferred; no proposal command or managed proposal tool exists
 
 ## Decision
 

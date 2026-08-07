@@ -1,6 +1,10 @@
 # ADR 0024: Resume Claude channel input with native tool deferral
 
 - Status: accepted
+- Integrated by: [ADR 0025](0025-render-discord-input-with-bounded-native-components.md)
+- Acceptance: credential-free stitched coverage passed; credentialed Claude was
+  unavailable on 2026-08-07; see
+  [interactive-input acceptance](../workbench/interactive-input-acceptance.md)
 
 ## Decision
 
@@ -63,8 +67,8 @@ return, because outcomes can no longer be accounted for safely.
 
 The hook fragment is passed only by hctl's headless Claude adapter. MCP
 advertises the tool only when the manager has installed a trusted
-per-conversation bridge with a compatible responder. Discord rendering and
-answer intake remain separate adapter work.
+per-conversation bridge with a compatible responder. ADR 0025 specifies the
+separate Discord rendering and answer-intake behavior.
 
 ## Consequences
 

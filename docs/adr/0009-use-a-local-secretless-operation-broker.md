@@ -1,6 +1,8 @@
 # ADR 0009: Use a local secretless operation broker
 
 - Status: accepted
+- Implementation: deferred; no secretless operation broker exists
+- Amended by: [ADR 0028](0028-use-a-conversational-discord-gateway-channel.md)
 
 ## Decision
 
@@ -137,7 +139,7 @@ constrained operations rather than forwarding model-side authority.
 
 This ADR does not govern credentials consumed exclusively inside a built-in
 channel transport and never exposed as a model-invocable operation; that trusted
-boundary is specified separately by ADR 0012. When a concrete secret-bearing
+boundary is specified separately by ADR 0028. When a concrete secret-bearing
 managed tool is prioritized,
 its proposal must choose the backend and local authorization UX, specify the
 operation-specific allowlist and result schema, test only fake credentials and

@@ -1,6 +1,9 @@
 # ADR 0022: Gate managed channel input at the dispatcher
 
 - Status: accepted
+- Integrated by: [ADR 0023](0023-continue-codex-input-in-a-new-turn.md),
+  [ADR 0024](0024-resume-claude-channel-input-with-native-tool-deferral.md),
+  and [ADR 0025](0025-render-discord-input-with-bounded-native-components.md)
 
 ## Decision
 
@@ -17,7 +20,7 @@ the capability through configuration or a process-wide root flag. The
 Claude's MCP child receives a short-lived, root-owned broker only when a
 per-conversation responder bridge exists; ADR 0024 defines that native
 continuation. Codex uses its client-owned dynamic tool. Production exposure
-remains disabled until the Discord responder slice provides the bridge.
+became available when ADR 0025 supplied the Discord responder bridge.
 
 An accepted tool call crosses a structured internal harness event. The harness
 event carries semantic request data and tool-call correlation. Only the
@@ -68,8 +71,8 @@ the generic capability seam until a compatible responder is bound.
 
 ## Consequences
 
-- Vendor-specific rendering and real resume behavior remain outside this
-  decision.
+- Vendor-specific rendering and real resume behavior are specified separately
+  by ADRs 0023 through 0025.
 - Parallel and repeated requests fail through the coordinator's one-pending
   invariant after the first durable commit.
 - Capability negotiation is performed again at the trusted dispatcher seam;

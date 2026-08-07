@@ -176,7 +176,7 @@ func TestPruneDenoBuildCacheRejectsEscapingSymlink(t *testing.T) {
 	}
 
 	err := pruneDenoBuildCache(workspace, cache)
-	if err == nil || !strings.Contains(err.Error(), "escapes its root") {
+	if err == nil || !strings.Contains(err.Error(), "resolves outside its root") {
 		t.Fatalf("escaping Deno symlink error = %v", err)
 	}
 }

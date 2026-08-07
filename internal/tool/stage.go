@@ -479,7 +479,12 @@ func materializeContainedRuntimeSymlinks(root string) error {
 			return errors.New("prepared runtime cache contains an unresolved symlink")
 		}
 		if !pathWithin(canonicalRoot, resolved) {
-			return errors.New("prepared runtime cache symlink escapes its root")
+			relativePath, pathErr := filepath.Rel(root, path)
+			relativeTarget, targetErr := filepath.Rel(canonicalRoot, resolved)
+			if pathErr != nil || targetErr != nil {
+				return errors.New("prepared runtime cache symlink escapes its root")
+			}
+			return fmt.Errorf("prepared runtime cache symlink %q resolves outside its root as %q", filepath.ToSlash(relativePath), filepath.ToSlash(relativeTarget))
 		}
 		return nil
 	}); err != nil {

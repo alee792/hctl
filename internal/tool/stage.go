@@ -178,6 +178,12 @@ func pruneDenoBuildCache(workspaceRoot, cache string) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
+		if name == "node_compat_bin" {
+			if err := removeGeneratedTreeWithSymlinks(directory, name); err != nil {
+				return fmt.Errorf("cannot discard Deno Node compatibility shim: %w", err)
+			}
+			continue
+		}
 		if name != "gen" && !strings.Contains(name, "analysis_cache") && !strings.HasPrefix(name, "v8_code_cache") && !strings.HasPrefix(name, "check_cache") && !strings.HasPrefix(name, "fast_check_cache") {
 			continue
 		}
@@ -205,6 +211,9 @@ func pruneDenoBuildCache(workspaceRoot, cache string) error {
 		if err := removeGeneratedTree(directory, filepath.ToSlash(relative)); err != nil {
 			return errors.New("cannot discard Deno registry metadata")
 		}
+	}
+	if err := materializeContainedRuntimeSymlinks(directory); err != nil {
+		return fmt.Errorf("cannot materialize Deno runtime cache: %w", err)
 	}
 	return nil
 }
@@ -320,6 +329,25 @@ func removeGeneratedTree(root, relative string) error {
 	return nil
 }
 
+// removeGeneratedTreeWithSymlinks removes a known generated directory without
+// following links within it. Deno's node_compat_bin contains a link back to the
+// build-time Deno executable and is not part of the read-only tool host.
+func removeGeneratedTreeWithSymlinks(root, relative string) error {
+	cleaned, err := rootfs.CleanRelative(filepath.ToSlash(relative))
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(root, filepath.FromSlash(cleaned))
+	info, err := os.Lstat(target)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("generated runtime path must be a real directory")
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return errors.New("cannot remove generated runtime path")
+	}
+	return nil
+}
+
 func copyRuntimeExecutable(root, source, relative string) error {
 	resolved, err := filepath.EvalSymlinks(source)
 	if err != nil {
@@ -396,6 +424,10 @@ func copyRuntimeTree(root, source, destination string) error {
 }
 
 func materializeRuntimeSymlinks(root string) error {
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return errors.New("cannot resolve prepared environment")
+	}
 	paths := []string{}
 	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -423,7 +455,7 @@ func materializeRuntimeSymlinks(root string) error {
 			return errors.New("prepared environment symlink target is unavailable")
 		}
 		if info.IsDir() {
-			if !pathWithin(root, resolved) {
+			if !pathWithin(canonicalRoot, resolved) {
 				return errors.New("prepared environment directory symlink escapes its root")
 			}
 			if err := os.Remove(path); err != nil {
@@ -449,6 +481,41 @@ func materializeRuntimeSymlinks(root string) error {
 		}
 	}
 	return nil
+}
+
+func materializeContainedRuntimeSymlinks(root string) error {
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return errors.New("cannot resolve prepared runtime cache")
+	}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return errors.New("cannot inspect prepared runtime cache")
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return errors.New("cannot inspect prepared runtime cache")
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return nil
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return errors.New("prepared runtime cache contains an unresolved symlink")
+		}
+		if !pathWithin(canonicalRoot, resolved) {
+			relativePath, pathErr := filepath.Rel(root, path)
+			relativeTarget, targetErr := filepath.Rel(canonicalRoot, resolved)
+			if pathErr != nil || targetErr != nil {
+				return errors.New("prepared runtime cache symlink escapes its root")
+			}
+			return fmt.Errorf("prepared runtime cache symlink %q resolves outside its root as %q", filepath.ToSlash(relativePath), filepath.ToSlash(relativeTarget))
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return materializeRuntimeSymlinks(root)
 }
 
 func copyLocalRuntimeTree(source, destination string) error {

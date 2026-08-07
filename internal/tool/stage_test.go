@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -128,6 +129,66 @@ func TestStageRejectsNoncanonicalPythonRuntime(t *testing.T) {
 	err := copyPythonRuntime(t.TempDir(), t.TempDir(), "cache", pythonRuntime{BasePrefix: t.TempDir()}, true)
 	if err == nil || !strings.Contains(err.Error(), "/opt/hctl/runtimes/python") {
 		t.Fatalf("noncanonical Python runtime error = %v", err)
+	}
+}
+
+func TestPruneDenoBuildCacheMaterializesContainedSymlinks(t *testing.T) {
+	workspace := t.TempDir()
+	cache := "cache"
+	denoDirectory := filepath.Join(workspace, cache, "deno-dir")
+	packageDirectory := filepath.Join(denoDirectory, "npm", "package")
+	realDirectory := filepath.Join(packageDirectory, "real")
+	if err := os.MkdirAll(realDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDirectory, "module.js"), []byte("export {};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(packageDirectory, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	shimDirectory := filepath.Join(denoDirectory, "node_compat_bin")
+	if err := os.Mkdir(shimDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "deno"), filepath.Join(shimDirectory, "node")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pruneDenoBuildCache(workspace, cache); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(packageDirectory, "linked")
+	if info, err := os.Lstat(linked); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("materialized Deno directory = %v, %v", info, err)
+	}
+	data, err := os.ReadFile(filepath.Join(linked, "module.js"))
+	if err != nil || string(data) != "export {};\n" {
+		t.Fatalf("materialized Deno file = %q, %v", data, err)
+	}
+	if _, err := os.Lstat(shimDirectory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Deno Node compatibility shim remains: %v", err)
+	}
+}
+
+func TestPruneDenoBuildCacheRejectsEscapingSymlink(t *testing.T) {
+	workspace := t.TempDir()
+	cache := "cache"
+	denoDirectory := filepath.Join(workspace, cache, "deno-dir")
+	if err := os.MkdirAll(filepath.Join(denoDirectory, "npm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.js")
+	if err := os.WriteFile(outside, []byte("outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(denoDirectory, "npm", "outside.js")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := pruneDenoBuildCache(workspace, cache)
+	if err == nil || !strings.Contains(err.Error(), "resolves outside its root") {
+		t.Fatalf("escaping Deno symlink error = %v", err)
 	}
 }
 

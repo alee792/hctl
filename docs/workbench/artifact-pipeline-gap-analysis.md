@@ -40,12 +40,12 @@ with minimal permissions.
 | --- | --- | --- |
 | Repository checks | `scripts/check.sh` runs formatting, tests, vet, lint, and vulnerability checks with repository-pinned tools; CI now invokes that same script on Linux. | Container acceptance and tag publication must remain downstream of this gate. |
 | Binary construction | One shared script builds deterministic `darwin-arm64` and `linux-amd64` binaries with a required exact version; CI rebuilds, compares, inspects `hctl --version`, checksums, and retains them. The exact-tag release script injects its clean tag version into the supported Darwin archive. | Image builds must consume the checked Linux binary rather than rebuild it through an unrelated path. |
-| Staged filesystem | `hctl stage` produces a deterministic, selective runtime tree and manifest. CI copies a tool-free Codex payload onto the clean base and starts its managed MCP server. | Language-specific runtime selection remains in the next matrix slice. |
+| Staged filesystem | `hctl stage` produces a deterministic, selective runtime tree and manifest. CI copies tool-free and focused Codex runtime payloads onto the clean base, starts each managed MCP server, and calls each authored runtime. | Repeat this proof for Claude if its image build is authorized. |
 | Image definition | A thin Codex Dockerfile consumes a prepared, checksum-verified root filesystem and emits pinned OCI input labels without publishing. | Claude remains separate; tag publication metadata and provenance remain later work. |
 | Harness inputs | Codex 0.144.1 extraction and real `--version` are checked. Claude Code 2.1.221 remains pinned but its publication gate is blocked. | Resolve the allowed Claude build scope before adding its image. |
-| Authored-tool runtimes | The Codex source image installs Deno, Python/uv, and Go at canonical paths; Python reports the exact `/opt/hctl/runtimes/python` base prefix. | Focused fixtures must prove preparation and selective absence for each language. |
+| Authored-tool runtimes | The Codex source image installs Deno, Python/uv, and Go at canonical paths; Python reports the exact `/opt/hctl/runtimes/python` base prefix. Focused staged fixtures prove Deno-only, Python-only, Go-only, and tool-free execution closures. | Repeat the same matrix for Claude if its image build is authorized. |
 | Compatible final base | The input manifest records the measured loader and shared-library union. CI checks those dependencies, the CA bundle, UID/GID 65532, direct apply, and the clean-base staged journey. | Keep the measured contract current when any binary input changes. |
-| Credential-free acceptance | CI uses the real Codex binary without credentials or model calls and proves source, direct, and tool-free staged images. | Runtime-matrix coverage remains. |
+| Credential-free acceptance | CI uses the real Codex binary without credentials or model calls and proves source, direct, and all focused staged-runtime images. | Equivalent Claude coverage remains subject to its publication gate. |
 | Supply chain | The local release archive gets a SHA-256 manifest. Harness and runtime inputs are checksum-pinned and fetched through one verifier. | Published images need immutable digests, SBOMs, provenance, and retained version metadata. |
 | Publication | No release or package workflow exists. | GHCR naming, tag policy, permissions, protected release environment, and failure/rollback behavior remain to be implemented. |
 
@@ -90,8 +90,10 @@ merely a mirror of an optional local container proof.
 3. **Codex vertical slice (complete).** Build an unpushed Codex image and prove direct and
    two-stage tool-free journeys on `linux/amd64` without credentials or model
    calls.
-4. **Runtime matrix.** Add Deno-only, Python-only, Go-only, and mixed fixtures;
-   prove both successful execution and absence of unused runtimes/build inputs.
+4. **Runtime matrix (complete).** Deno-only, Python-only, and Go-only fixtures
+   join the existing tool-free case; CI proves successful execution and absence
+   of unused runtimes and build inputs. Language-combination variants remain
+   out of scope for issue #48.
 5. **Claude vertical slice.** Build and test the equivalent image only within
    the authorization established for the proprietary harness.
 6. **Tag publication.** Publish the existing archive and authorized GHCR images

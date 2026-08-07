@@ -14,6 +14,7 @@ import (
 	"hctl/internal/channelconfig"
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
+	"hctl/internal/interaction"
 	"hctl/internal/project"
 	"hctl/internal/worktree"
 )
@@ -56,17 +57,40 @@ type Delivery interface {
 	Deliver(Outcome) error
 }
 
+type InteractionAdapter interface {
+	interaction.Renderer
+	Capabilities() interaction.Capabilities
+	Owner(surfaceID string) interaction.Owner
+	RecoverTarget(surfaceID, inputID string) (any, bool)
+}
+
+type interactionManager interface {
+	ConfigureRequestInput(func(string) dispatch.RequestInputHandler) error
+	NewInteractionCoordinator(string, interaction.Renderer, func() time.Time) (*interaction.Coordinator, error)
+	ScheduleInteractionResume(string) error
+	ScheduleInteractionExpiry(string) error
+	CancelInteractionExpiry(string)
+	ConfigureInteractionReady(func(string) bool) error
+}
+
+type InitialSurface struct {
+	SurfaceID      string
+	ConversationID string
+}
+
 type Config struct {
-	Project        *project.Project
-	Driver         harness.Driver
-	TurnTimeout    time.Duration
-	IdleTimeout    time.Duration
-	MaxResident    int
-	MaxActive      int
-	MaxOutputRunes int
-	Executable     string
-	Audit          io.Writer
-	AuditPrefix    string
+	Project         *project.Project
+	Driver          harness.Driver
+	TurnTimeout     time.Duration
+	IdleTimeout     time.Duration
+	MaxResident     int
+	MaxActive       int
+	MaxOutputRunes  int
+	Executable      string
+	Audit           io.Writer
+	AuditPrefix     string
+	Interactions    InteractionAdapter
+	InitialSurfaces []InitialSurface
 }
 
 type Status struct {
@@ -110,6 +134,9 @@ type Controller struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	manager        Manager
+	interactionMgr interactionManager
+	adapter        InteractionAdapter
+	driver         harness.Driver
 	delivery       Delivery
 	audit          io.Writer
 	auditPrefix    string
@@ -119,6 +146,8 @@ type Controller struct {
 	surfaces       map[string]*surface
 	byConversation map[string]*surface
 	resetting      map[string]bool
+	coordinators   map[string]*interaction.Coordinator
+	rendered       map[string]string
 	closed         bool
 }
 
@@ -134,23 +163,47 @@ func New(ctx context.Context, config Config, delivery Delivery) (*Controller, er
 	}
 	controllerCtx, cancel := context.WithCancel(ctx)
 	c := newWithManager(controllerCtx, cancel, nil, delivery, config.MaxOutputRunes, config.Audit, config.AuditPrefix)
+	for _, initial := range config.InitialSurfaces {
+		if initial.SurfaceID == "" || initial.ConversationID == "" || c.surfaces[initial.SurfaceID] != nil || c.byConversation[initial.ConversationID] != nil {
+			cancel()
+			return nil, errors.New("initial channel surface is invalid")
+		}
+		registered := &surface{conversation: initial.ConversationID, turns: map[string]*pendingTurn{}}
+		c.surfaces[initial.SurfaceID] = registered
+		c.byConversation[initial.ConversationID] = registered
+	}
 	emit := func(conversation string, event dispatch.Event) error {
 		c.handleDispatch(conversation, event)
 		return nil
 	}
 	workspaceManager, _ := worktree.New(controllerCtx, config.Project, config.Executable)
 	var managed *dispatch.Manager
+	var configured interactionManager
+	configure := func(manager *dispatch.Manager) error {
+		configured = manager
+		c.interactionMgr = manager
+		c.adapter = config.Interactions
+		c.driver = config.Driver
+		if config.Interactions == nil {
+			return nil
+		}
+		if err := manager.ConfigureRequestInput(c.requestInputHandler); err != nil {
+			return err
+		}
+		return manager.ConfigureInteractionReady(c.interactionReady)
+	}
 	var err error
 	if workspaceManager != nil {
-		managed, err = dispatch.NewManagerWithWorkspaceAndLimits(controllerCtx, config.Project, config.Driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, workspaceManager)
+		managed, err = dispatch.NewManagerWithWorkspaceAndLimitsConfigured(controllerCtx, config.Project, config.Driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, workspaceManager, configure)
 	} else {
-		managed, err = dispatch.NewManagerWithLimits(controllerCtx, config.Project, config.Driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit)
+		managed, err = dispatch.NewManagerWithLimitsConfigured(controllerCtx, config.Project, config.Driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, configure)
 	}
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 	c.manager = managed
+	c.interactionMgr = configured
 	for _, diagnostic := range managed.Diagnostics() {
 		_, _ = fmt.Fprintf(c.audit, "%s worktree reconciliation: %s\n", c.auditPrefix, diagnostic)
 	}
@@ -180,8 +233,207 @@ func newWithManager(ctx context.Context, cancel context.CancelFunc, managed Mana
 	return &Controller{
 		ctx: ctx, cancel: cancel, manager: managed, delivery: delivery, audit: audit,
 		auditPrefix: auditPrefix, maxOutputRunes: maxOutputRunes,
-		surfaces: map[string]*surface{}, byConversation: map[string]*surface{}, resetting: map[string]bool{},
+		surfaces: map[string]*surface{}, byConversation: map[string]*surface{}, resetting: map[string]bool{}, coordinators: map[string]*interaction.Coordinator{}, rendered: map[string]string{},
 	}
+}
+
+type interactionRequesterFunc func(interaction.OpenRequest) error
+
+func (f interactionRequesterFunc) Request(open interaction.OpenRequest) error { return f(open) }
+
+func (c *Controller) requestInputHandler(conversation string) dispatch.RequestInputHandler {
+	coordinator, surfaceID, err := c.interactionCoordinator("", conversation)
+	if err != nil {
+		return nil
+	}
+	continuation := interaction.ContinuationTurn
+	if _, ok := c.driver.(harness.NativeDeferredToolDriver); ok {
+		continuation = interaction.ContinuationNativeDeferredTool
+	}
+	return dispatch.CoordinatorRequestInputHandler{
+		Coordinator: interactionRequesterFunc(func(open interaction.OpenRequest) error {
+			if err := coordinator.Request(open); err != nil {
+				return err
+			}
+			return c.interactionMgr.ScheduleInteractionExpiry(conversation)
+		}), Owner: c.adapter.Owner(surfaceID), Continuation: continuation,
+		Capabilities: c.adapter.Capabilities(),
+	}
+}
+
+func (c *Controller) interactionReady(conversation string) bool {
+	coordinator, surfaceID, err := c.interactionCoordinator("", conversation)
+	if err != nil {
+		return false
+	}
+	pending, ok, err := coordinator.Pending()
+	if err != nil || !ok {
+		return true
+	}
+	if pending.Owner != c.adapter.Owner(surfaceID) {
+		return false
+	}
+	return c.attachPendingTurn(surfaceID, conversation, pending)
+}
+
+func (c *Controller) attachPendingTurn(surfaceID, conversation string, pending interaction.PendingInteraction) bool {
+	target, ok := c.adapter.RecoverTarget(surfaceID, pending.InputID)
+	if !ok {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := c.byConversation[conversation]
+	if current == nil || c.surfaces[surfaceID] != current {
+		return false
+	}
+	if current.turns[pending.InputID] == nil {
+		turn := &pendingTurn{target: target}
+		if pending.Continuation == interaction.ContinuationTurn {
+			turn.parkedTurnID = "recovered"
+		}
+		current.turns[pending.InputID] = turn
+	}
+	return true
+}
+
+func (c *Controller) interactionCoordinator(surfaceID, conversation string) (*interaction.Coordinator, string, error) {
+	if c.interactionMgr == nil || c.adapter == nil || conversation == "" {
+		return nil, "", dispatch.ErrRequestInputUnavailable
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, "", dispatch.ErrManagerClosed
+	}
+	current := c.byConversation[conversation]
+	if current == nil && surfaceID != "" {
+		if occupied := c.surfaces[surfaceID]; occupied != nil && occupied.conversation != conversation {
+			c.mu.Unlock()
+			return nil, "", errors.New("channel surface changed conversation identity")
+		}
+		current = &surface{conversation: conversation, turns: map[string]*pendingTurn{}}
+		c.surfaces[surfaceID] = current
+		c.byConversation[conversation] = current
+	}
+	if current == nil {
+		c.mu.Unlock()
+		return nil, "", dispatch.ErrRequestInputUnavailable
+	}
+	if surfaceID == "" {
+		for candidate, registered := range c.surfaces {
+			if registered == current {
+				surfaceID = candidate
+				break
+			}
+		}
+	} else if c.surfaces[surfaceID] != current {
+		c.mu.Unlock()
+		return nil, "", interaction.ErrInteractionOwner
+	}
+	if coordinator := c.coordinators[conversation]; coordinator != nil {
+		c.mu.Unlock()
+		return coordinator, surfaceID, nil
+	}
+	c.mu.Unlock()
+
+	coordinator, err := c.interactionMgr.NewInteractionCoordinator(conversation, c.adapter, time.Now)
+	if err != nil {
+		return nil, "", err
+	}
+	c.mu.Lock()
+	if existing := c.coordinators[conversation]; existing != nil {
+		coordinator = existing
+	} else {
+		c.coordinators[conversation] = coordinator
+	}
+	c.mu.Unlock()
+	return coordinator, surfaceID, nil
+}
+
+func (c *Controller) PendingInteraction(surfaceID, conversation string) (interaction.PendingInteraction, bool, error) {
+	coordinator, registered, err := c.interactionCoordinator(surfaceID, conversation)
+	if err != nil {
+		return interaction.PendingInteraction{}, false, err
+	}
+	pending, ok, err := coordinator.Pending()
+	if err != nil || !ok {
+		return pending, ok, err
+	}
+	if pending.Owner != c.adapter.Owner(registered) {
+		return interaction.PendingInteraction{}, false, interaction.ErrInteractionOwner
+	}
+	if !c.attachPendingTurn(registered, conversation, pending) {
+		return interaction.PendingInteraction{}, false, dispatch.ErrRequestInputUnavailable
+	}
+	return pending, true, nil
+}
+
+func (c *Controller) AcceptInteraction(surfaceID, conversation string, attempt interaction.AnswerAttempt) (interaction.AnswerDisposition, error) {
+	coordinator, registered, err := c.interactionCoordinator(surfaceID, conversation)
+	if err != nil {
+		return "", err
+	}
+	pending, _, _ := coordinator.Pending()
+	attempt.Owner = c.adapter.Owner(registered)
+	disposition, err := coordinator.AcceptAnswer(attempt)
+	if err == nil {
+		c.interactionMgr.CancelInteractionExpiry(conversation)
+	}
+	if err == nil && disposition == interaction.AnswerCancelled {
+		c.mu.Lock()
+		if current := c.byConversation[conversation]; current != nil {
+			delete(current.turns, pending.InputID)
+		}
+		delete(c.rendered, conversation)
+		c.mu.Unlock()
+	}
+	return disposition, err
+}
+
+func (c *Controller) ContinueInteraction(conversation string) error {
+	if c.interactionMgr == nil {
+		return dispatch.ErrRequestInputUnavailable
+	}
+	return c.interactionMgr.ScheduleInteractionResume(conversation)
+}
+
+// RenderInteraction safely attempts the one durable pending delivery. It is
+// idempotent across the normal parked event and restart recovery.
+func (c *Controller) RenderInteraction(surfaceID, conversation string) (bool, error) {
+	coordinator, _, err := c.interactionCoordinator(surfaceID, conversation)
+	if err != nil {
+		return false, err
+	}
+	pending, ok, err := coordinator.Pending()
+	if err != nil || !ok {
+		return ok, err
+	}
+	c.renderInteraction(conversation, pending.InputID, coordinator, pending.InteractionID)
+	return true, nil
+}
+
+func (c *Controller) renderInteraction(conversation, inputID string, coordinator *interaction.Coordinator, interactionID string) {
+	c.mu.Lock()
+	if c.rendered[conversation] == interactionID {
+		c.mu.Unlock()
+		return
+	}
+	c.rendered[conversation] = interactionID
+	c.mu.Unlock()
+	go func() {
+		if err := coordinator.Render(c.ctx, interactionID); err != nil {
+			if _, pending, _ := coordinator.Pending(); !pending {
+				c.interactionMgr.CancelInteractionExpiry(conversation)
+				c.mu.Lock()
+				if current := c.byConversation[conversation]; current != nil {
+					delete(current.turns, inputID)
+				}
+				delete(c.rendered, conversation)
+				c.mu.Unlock()
+			}
+		}
+	}()
 }
 
 func (c *Controller) Submit(ctx context.Context, incoming Inbound) (dispatch.SubmissionResult, error) {
@@ -280,6 +532,41 @@ func (c *Controller) handleDispatch(conversation string, event dispatch.Event) {
 		c.mu.Unlock()
 		return
 	}
+	if event.Type == "interaction.expired" {
+		if current := c.byConversation[conversation]; current != nil {
+			delete(current.turns, event.InputID)
+		}
+		delete(c.rendered, conversation)
+		c.mu.Unlock()
+		return
+	}
+	if event.Type == "interaction.parked" {
+		current := c.byConversation[conversation]
+		if current != nil && event.Status == string(harness.RequestInputContinuationTurn) {
+			if turn := current.turns[event.InputID]; turn != nil {
+				turn.outputs = nil
+				turn.byItem = nil
+				turn.runes = 0
+				turn.truncated = false
+				turn.parkedTurnID = event.TurnID
+				if turn.parkedTurnID == "" {
+					turn.parkedTurnID = turn.originalTurnID
+				}
+			}
+		}
+		coordinator := c.coordinators[conversation]
+		interactionID := ""
+		if coordinator != nil {
+			if pending, ok, err := coordinator.Pending(); err == nil && ok {
+				interactionID = pending.InteractionID
+			}
+		}
+		c.mu.Unlock()
+		if coordinator != nil && interactionID != "" {
+			c.renderInteraction(conversation, event.InputID, coordinator, interactionID)
+		}
+		return
+	}
 	current := c.byConversation[conversation]
 	if current == nil {
 		c.mu.Unlock()
@@ -295,20 +582,6 @@ func (c *Controller) handleDispatch(conversation string, event dispatch.Event) {
 			turn.originalTurnID = event.TurnID
 		} else if event.TurnID != turn.parkedTurnID {
 			turn.continuationTurnID = event.TurnID
-		}
-		c.mu.Unlock()
-		return
-	}
-	if event.Type == "interaction.parked" && event.Status == string(harness.RequestInputContinuationTurn) {
-		// Any pre-request agent prose belongs to the parked control turn. The
-		// resumed turn supplies the eventual user-visible answer.
-		turn.outputs = nil
-		turn.byItem = nil
-		turn.runes = 0
-		turn.truncated = false
-		turn.parkedTurnID = event.TurnID
-		if turn.parkedTurnID == "" {
-			turn.parkedTurnID = turn.originalTurnID
 		}
 		c.mu.Unlock()
 		return
@@ -348,6 +621,7 @@ func (c *Controller) handleDispatch(conversation string, event dispatch.Event) {
 		return
 	}
 	delete(current.turns, event.InputID)
+	delete(c.rendered, conversation)
 	c.mu.Unlock()
 
 	if event.Type != "turn.completed" {

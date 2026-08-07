@@ -134,7 +134,11 @@ type FieldAnswer struct {
 // model-authored layout requests; zero means the adapter does not support that
 // dimension.
 type Capabilities struct {
-	Kinds                   []Kind
+	Kinds []Kind
+	// FormFieldKinds is intentionally distinct from Kinds: an adapter may
+	// render a request kind at the top level without being able to embed that
+	// same field kind in its native form primitive.
+	FormFieldKinds          []Kind
 	MaxRequestBytes         int
 	MaxPromptBytes          int
 	MaxFields               int
@@ -578,8 +582,12 @@ func unsupportedReason(request Request, capabilities Capabilities) DegradationRe
 		fields = []Field{*request.Field}
 	}
 	if request.Kind == KindForm {
+		formSupported := make(map[Kind]bool, len(capabilities.FormFieldKinds))
+		for _, kind := range capabilities.FormFieldKinds {
+			formSupported[kind] = true
+		}
 		for _, field := range fields {
-			if !supported[field.Kind] {
+			if !formSupported[field.Kind] {
 				return ReasonFormFieldKind
 			}
 		}

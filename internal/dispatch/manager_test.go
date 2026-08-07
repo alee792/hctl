@@ -94,6 +94,31 @@ func TestManagerOwnsIndependentConversationLifecycles(t *testing.T) {
 	}
 }
 
+func TestManagerConfiguresRequestInputBeforeRecoveredWorkersStart(t *testing.T) {
+	p := testProject(t)
+	driver := newNamedManagerDriver("codex")
+	configured := false
+	manager, err := NewManagerWithLimitsConfigured(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(string, Event) error { return nil }, func(manager *Manager) error {
+		if driver.openCount() != 0 {
+			t.Fatal("recovered worker opened before request-input configuration")
+		}
+		configured = true
+		return manager.ConfigureRequestInput(func(string) RequestInputHandler { return nil })
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	if !configured {
+		t.Fatal("request-input configuration was skipped")
+	}
+	if result, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-1", Text: "after configuration"}); err != nil || result.Status != "queued" {
+		t.Fatalf("submit = %#v, %v", result, err)
+	}
+	driver.waitStarted(t, "message-1")
+	driver.release("message-1")
+}
+
 func TestManagerParkingReleasesCapacityAndPreservesSuccessor(t *testing.T) {
 	p := testProject(t)
 	driver := newNamedManagerDriver("codex")
@@ -278,6 +303,7 @@ func TestManagerColdRestartAndShutdownPreserveWaitingLifecycle(t *testing.T) {
 			}
 			ref := conversationRef{agentID: p.AgentID, harness: driver.Name(), id: "discord-guild", fingerprint: p.SourceFingerprint}
 			pending := storeTestLifecycle(test.name)
+			pending.ExpiresAt = time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 			if _, _, err := store.accept(ref, pending.InputID, "origin"); err != nil {
 				t.Fatal(err)
 			}
@@ -1848,6 +1874,9 @@ func TestManagerOwnsCodexContinuationCapacityAndCommitsBeforeTerminalEvent(t *te
 	}
 	confirmed := true
 	if _, err := coordinator.AcceptAnswer(interaction.AnswerAttempt{InteractionID: pending.ID, Owner: pending.Owner, Answer: interaction.Answer{SchemaVersion: interaction.SchemaVersion, Action: interaction.ActionSubmit, Fields: []interaction.FieldAnswer{{FieldID: "approved", Confirmed: &confirmed}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ScheduleInteractionResume("discord-guild"); err != nil {
 		t.Fatal(err)
 	}
 	driver.waitContinuation(t)

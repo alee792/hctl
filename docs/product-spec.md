@@ -353,6 +353,34 @@ vendor payloads, layout nesting, URLs, executable code, credential references,
 or A2UI surface schema. A future renderer may adapt this semantic contract
 without changing what the model is allowed to request.
 
+Capabilities distinguish supported top-level request kinds from the bounded
+field kinds that a native form may contain. Discord's first renderer supports
+confirmations, non-freeform choices, text, and text-only forms of at most five
+fields. It uses buttons or string selects for choices and an Answer button
+followed by a modal for text input. Date/time, freeform choices, and mixed forms
+degrade. The authored fallback is only introductory text: hctl appends and
+parses one transport-neutral grammar using exact confirmations, one-based
+choice ordinals, whole text replies, canonical date/time values, keyed form
+lines, and exact allowed cancellation. A freeform choice is exactly
+`other=TEXT`; choose-many may combine option ordinals and one freeform value as
+`1,2;other=TEXT`. The freeform value counts as one selection, including an
+explicit empty `other=` when the field permits zero-length text. A fallback
+reply must correlate to the current bot request and enters answer acceptance
+rather than ordinary input.
+
+The renderer command is deliberately narrower than the controller's pending
+interaction snapshot. Expiry, continuation mode, and lifecycle phase support
+recovery and authorization but are not exposed through the renderer seam.
+
+Discord component and modal identifiers are bounded opaque digest handles plus
+trusted positional slots. Callback decoding verifies the selected application,
+authorized human, exact surface and durable owner, current pending request,
+action, and request shape before mapping slots back to semantic IDs. The final
+normalized answer commits before Discord acknowledgement, and continuation is
+scheduled only after the acknowledgement attempt. Raw Discord payloads remain
+inside the adapter. REST errors after a render attempt are ambiguous and are
+not retried.
+
 Each dispatch conversation may persist at most one nonterminal interactive
 request in the same owner-only conversation record as its triggering input,
 queue, native session mapping, and worktree assignment. The shared conversation
@@ -457,7 +485,9 @@ a bounded controller-owned `hctl.channel_input_answer` JSON envelope containing
 the exact request correlation and normalized answer. This is not
 `turn/steer`, a live native input waiter, MCP elicitation, or same-tool-call
 resume. Resume ambiguity follows the durable no-retry rule. Production
-advertisement remains disabled until the Discord responder is wired.
+advertisement is enabled only for a channel-managed Discord root whose selected
+adapter advertises a compatible native renderer or deterministic text fallback
+codec.
 
 New and resumed channel-managed sessions run read-only in the shared workspace:
 Claude uses native plan permission mode, Codex uses a read-only sandbox with

@@ -67,6 +67,8 @@ type Manager struct {
 	continueWG          sync.WaitGroup
 	diagnostics         []string
 	requestInputFactory func(string) RequestInputHandler
+	interactionReady    func(string) bool
+	expiryStops         map[string]chan struct{}
 }
 
 // ConfigureRequestInput installs the trusted channel-root bridge before
@@ -81,6 +83,19 @@ func (m *Manager) ConfigureRequestInput(factory func(string) RequestInputHandler
 		return errors.New("managed request-input must be configured before channel admission")
 	}
 	m.requestInputFactory = factory
+	return nil
+}
+
+func (m *Manager) ConfigureInteractionReady(ready func(string) bool) error {
+	if ready == nil {
+		return errors.New("interaction readiness check is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || len(m.workers) != 0 || m.interactionReady != nil {
+		return errors.New("interaction readiness must be configured before channel admission")
+	}
+	m.interactionReady = ready
 	return nil
 }
 
@@ -121,17 +136,29 @@ func NewManagerWithWorkspace(ctx context.Context, p *project.Project, driver har
 }
 
 func NewManagerWithWorkspaceAndLimits(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, workspaces WorkspaceProvider) (*Manager, error) {
+	return NewManagerWithWorkspaceAndLimitsConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, workspaces, nil)
+}
+
+func NewManagerWithWorkspaceAndLimitsConfigured(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, workspaces WorkspaceProvider, configure func(*Manager) error) (*Manager, error) {
 	if workspaces == nil {
 		return nil, errors.New("managed writable workspace provider is required")
 	}
-	return newManager(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newIdleTimer, workspaces)
+	return newManagerConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newIdleTimer, workspaces, configure)
 }
 
 func NewManagerWithLimits(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error) (*Manager, error) {
-	return newManager(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newIdleTimer, nil)
+	return NewManagerWithLimitsConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, nil)
+}
+
+func NewManagerWithLimitsConfigured(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, configure func(*Manager) error) (*Manager, error) {
+	return newManagerConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newIdleTimer, nil, configure)
 }
 
 func newManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, timers idleTimerFactory, workspaces WorkspaceProvider) (*Manager, error) {
+	return newManagerConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, timers, workspaces, nil)
+}
+
+func newManagerConfigured(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, timers idleTimerFactory, workspaces WorkspaceProvider, configure func(*Manager) error) (*Manager, error) {
 	if p == nil || driver == nil {
 		return nil, errors.New("managed sessions require a project and harness driver")
 	}
@@ -165,12 +192,17 @@ func newManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 	manager := &Manager{
 		project: p, driver: driver, turnTimeout: turnTimeout, idleTimeout: idleTimeout, timers: timers, capacity: capacity, workspaces: workspaces, emit: emit,
 		store: store, ctx: managerCtx, cancel: cancel,
-		workers: map[string]*managedConversation{}, elevating: map[string]bool{}, continuing: map[string]Lifecycle{}, resumeQueued: map[string]bool{}, done: make(chan struct{}), stopped: make(chan struct{}),
+		workers: map[string]*managedConversation{}, elevating: map[string]bool{}, continuing: map[string]Lifecycle{}, resumeQueued: map[string]bool{}, expiryStops: map[string]chan struct{}{}, done: make(chan struct{}), stopped: make(chan struct{}),
 	}
 	if err := manager.reconcileWorkspaces(managerCtx); err != nil {
 		cancel()
 		return nil, err
 	}
+	type interactionExpiry struct {
+		conversation string
+		expiresAt    time.Time
+	}
+	var expiries []interactionExpiry
 	for _, conversation := range store.interactionConversations(manager.reference("")) {
 		coordinator, coordinatorErr := interaction.NewCoordinator(store.interactionStore(manager.reference(conversation)), noInteractionRenderer{}, noInteractionContinuation{}, time.Now)
 		if coordinatorErr != nil {
@@ -181,8 +213,23 @@ func newManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 			manager.Close()
 			return nil, recoverErr
 		}
+		if pending, ok, loadErr := coordinator.Pending(); loadErr == nil && ok && (pending.Phase == interaction.PhaseRequested || pending.Phase == interaction.PhaseRendered) {
+			expiries = append(expiries, interactionExpiry{conversation: conversation, expiresAt: pending.ExpiresAt})
+		}
+	}
+	if configure != nil {
+		if err := configure(manager); err != nil {
+			manager.Close()
+			return nil, err
+		}
+	}
+	for _, expiry := range expiries {
+		manager.scheduleInteractionExpiry(expiry.conversation, expiry.expiresAt)
 	}
 	for _, conversation := range store.runnable(manager.reference("")) {
+		if manager.interactionReady != nil && !manager.interactionReady(conversation) {
+			continue
+		}
 		if err := manager.startDurableWorker(conversation); err != nil {
 			manager.Close()
 			return nil, err
@@ -194,6 +241,9 @@ func newManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 		return nil, err
 	}
 	for _, conversation := range resumable {
+		if manager.interactionReady != nil && !manager.interactionReady(conversation) {
+			continue
+		}
 		if err := manager.scheduleInteractionResume(conversation); err != nil {
 			manager.Close()
 			return nil, err
@@ -488,24 +538,78 @@ func (m *Manager) NewInteractionCoordinator(conversation string, renderer intera
 	if err != nil {
 		return nil, err
 	}
-	store := &resumeSchedulingStore{Store: m.store.interactionStore(m.reference(conversation)), schedule: func() error { return m.scheduleInteractionResume(conversation) }}
-	return interaction.NewCoordinator(store, renderer, continuation, now)
+	return interaction.NewCoordinator(m.store.interactionStoreWithWake(m.reference(conversation), func() error { return m.wakeInteraction(conversation) }), renderer, continuation, now)
 }
 
-type resumeSchedulingStore struct {
-	interaction.Store
-	schedule func() error
+func (m *Manager) ScheduleInteractionExpiry(conversation string) error {
+	state, err := m.store.loadInteraction(m.reference(conversation))
+	if err != nil || state.Pending == nil || state.Pending.Phase != interaction.PhaseRequested && state.Pending.Phase != interaction.PhaseRendered {
+		return err
+	}
+	m.scheduleInteractionExpiry(conversation, state.Pending.ExpiresAt)
+	return nil
 }
 
-func (s *resumeSchedulingStore) Update(id string, mutate func(*interaction.Lifecycle) error) error {
-	if err := s.Store.Update(id, mutate); err != nil {
-		return err
+func (m *Manager) scheduleInteractionExpiry(conversation string, expiresAt time.Time) {
+	m.mu.Lock()
+	if m.closed || m.expiryStops[conversation] != nil {
+		m.mu.Unlock()
+		return
 	}
-	state, err := s.Load()
-	if err != nil || state.Pending == nil || state.Pending.Phase != interaction.PhaseAnswered || state.Pending.Resume != interaction.ResumePending || state.Pending.Answer == nil || state.Pending.Answer.Action == interaction.ActionCancel {
-		return err
+	stop := make(chan struct{})
+	m.expiryStops[conversation] = stop
+	m.continueWG.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			if m.expiryStops[conversation] == stop {
+				delete(m.expiryStops, conversation)
+			}
+			m.mu.Unlock()
+			m.continueWG.Done()
+		}()
+		delay := time.Until(expiresAt)
+		if delay < 0 {
+			delay = 0
+		}
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-timer.C:
+		}
+		coordinator, err := interaction.NewCoordinator(
+			m.store.interactionStoreWithWake(m.reference(conversation), func() error { return m.wakeInteraction(conversation) }),
+			noInteractionRenderer{}, noInteractionContinuation{}, time.Now,
+		)
+		if err == nil {
+			pending, ok, pendingErr := coordinator.Pending()
+			if pendingErr == nil && ok && coordinator.Expire() == nil {
+				if emitErr := m.emit(conversation, Event{SchemaVersion: 1, Type: "interaction.expired", Conversation: conversation, InputID: pending.InputID}); emitErr != nil {
+					_ = m.failDispatchEventDelivery(emitErr)
+				}
+			}
+		}
+	}()
+}
+
+func (m *Manager) CancelInteractionExpiry(conversation string) {
+	m.mu.Lock()
+	if stop := m.expiryStops[conversation]; stop != nil {
+		delete(m.expiryStops, conversation)
+		close(stop)
 	}
-	return s.schedule()
+	m.mu.Unlock()
+}
+
+// ScheduleInteractionResume starts continuation after a channel adapter has
+// attempted its acknowledgement. Startup uses the same idempotent scheduler.
+func (m *Manager) ScheduleInteractionResume(conversation string) error {
+	return m.scheduleInteractionResume(conversation)
 }
 
 func (m *Manager) scheduleInteractionResume(conversation string) error {

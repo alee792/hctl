@@ -44,10 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-(
-  cd "$repo_root"
-  GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -mod=readonly -trimpath -buildvcs=false -o "$stage/hctl" ./cmd/hctl
-)
+"$repo_root/scripts/build-hctl-binary.sh" --target darwin-arm64 --output "$stage/hctl"
 [ -x "$stage/hctl" ] || {
   echo "release archive did not produce an executable" >&2
   exit 1

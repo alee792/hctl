@@ -17,26 +17,39 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-No implementation item is ready. HCTL-014 must be shaped from HCTL-012's
-observed dispatcher behavior before coding starts.
+1. **HCTL-015 — Add a foreground local schedule clock.** One-shot dispatch and
+   task-turn deadlines are now proven. Assess a foreground UTC five-field cron
+   runner that reuses the same trigger path, does no downtime backfill, and
+   skips overlapping occurrences. Do not install or mutate launchd, systemd,
+   crontab, or a hosted scheduler.
 
 ## Ordered next
 
 Do not start these concurrently. Shape each item using evidence from the
 completed predecessor.
 
-1. **HCTL-014 — Add per-turn dispatch deadlines.** Shape an operator runtime
-   deadline at the dispatcher/session seam after HCTL-012. It must persist timeout
-   as uncertain, abort the affected native process, and state whether later
-   queued input can safely reopen a session. Do not put deployment policy in
-   portable agent source.
-2. **HCTL-015 — Add a foreground local schedule clock.** After one-shot
-   dispatch and turn deadlines are proven, assess a foreground UTC five-field
-   cron runner that reuses the same trigger path, does no downtime backfill,
-   and skips overlapping occurrences. Do not install or mutate launchd,
-   systemd, crontab, or a hosted scheduler.
+No additional item is ordered behind HCTL-015.
 
 ## Completed
+
+### [GitHub #42](https://github.com/alee792/hctl/issues/42) — Add durable per-turn deadlines to task dispatch
+
+**Outcome:** `hctl schedule trigger` now accepts a positive, bounded
+`--turn-timeout` distinct from its existing overall `--timeout`. The task-only
+deadline starts after durable activation, aborts a stalled native process,
+records the occurrence as uncertain with a separate bounded deadline reason,
+and returns a clear error. Retrying that stable occurrence ID returns the
+retained classification without another model turn, while a later occurrence
+opens a fresh native session.
+
+**Evidence:** A controllable dispatcher timer and context-insensitive fake
+session prove explicit abort, durable uncertainty, duplicate suppression, and
+durable deadline classification, generic-uncertainty compatibility, and fresh
+later execution without real sleeps. A literal CLI fake-process test
+proves process termination and lifecycle output; focused schedule, dispatcher,
+CLI, Discord, and JSONL tests plus `./scripts/check.sh` preserve adjacent
+behavior. Portable schedule source and the foreground-clock boundary are
+unchanged.
 
 ### [GitHub #27](https://github.com/alee792/hctl/issues/27) — Map vendored Agent Plugins v1 MCP servers
 

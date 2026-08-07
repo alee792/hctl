@@ -214,15 +214,17 @@ a generated custom subagent, and session resume in a fresh external workspace.
   body is the task prompt. Apply starts no clock. `hctl schedule trigger`
   accepts a caller-owned occurrence ID, reuses bounded turn dispatcher deduplication,
   opens a fresh native session for each accepted occurrence, reports lifecycle
-  status, and discards model text.
+  status, and discards model text. Its independent operator-selected turn
+  deadline aborts a stalled task process, retains the occurrence as uncertain,
+  persists `deadline_exceeded` as a separate bounded reason for duplicate
+  reporting, and leaves later occurrences free to open fresh sessions.
 
 ## Retained product horizon
 
 These are later product promises, not MVP implementation work:
 
-- Advance the remaining schedule runtime as separate bounded slices: per-turn
-  dispatch deadlines, then a foreground local clock. Completing that sequence
-  is not permission to add live credentials, contact GitHub or Discord,
+- Advance the remaining schedule runtime with a foreground local clock. That
+  work is not permission to add live credentials, contact GitHub or Discord,
   publish, deploy, or replace native harness behavior.
 - Future channel adapters feed the same session-aware turn dispatcher exercised by
   local input. Network adapters verify their source before acceptance.
@@ -275,8 +277,11 @@ in ADR 0009; its backend and credential-owner decision remain deferred because
 the first GitHub slice is anonymous. HCTL-010 and HCTL-011 are complete.
 HCTL-012's schedule source and one-shot dispatch are complete. Each occurrence
 uses a fresh native-harness task session, while its stable input ID deduplicates
-retries of that occurrence. Per-turn dispatch deadlines and a foreground local
-clock are separate follow-ups.
+retries of that occurrence. HCTL-014 now gives the native task turn a separate
+bounded deadline: expiry aborts the affected process, durably retains an
+uncertain result with a distinct deadline reason, and does not prevent a later
+occurrence from opening a fresh session. A foreground local clock remains a
+separate follow-up.
 Portable sandbox and image/runtime authoring are deferred: the native harnesses
 do not expose equivalent sandbox contracts, native lockfiles already cover
 authored-tool runtimes, and hctl does not own deployment. Do not implement

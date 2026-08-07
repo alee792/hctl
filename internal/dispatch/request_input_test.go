@@ -85,7 +85,7 @@ func TestFakeHarnessEventParksThroughDurableCoordinatorBeforeAcknowledgement(t *
 	events := make(chan Event, 32)
 	go func() {
 		done <- runSubmissions(ctx, p, driver, "discord-guild", submissions, func(event Event) error { events <- event; return nil }, runOptions{
-			turnTimeout: time.Minute, idleTimeout: time.Hour, timers: newIdleTimer,
+			turnTimeout: time.Minute, idleTimeout: time.Hour, timers: newTimer,
 			policy: harness.PolicyReadOnly, store: store, requestInputs: handler,
 		})
 	}()

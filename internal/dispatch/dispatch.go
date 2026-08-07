@@ -22,12 +22,15 @@ const (
 	maxInputBytes       = 32 << 10
 	maxInputLine        = maxInputBytes + 4096
 	harnessCloseTimeout = 5 * time.Second
+	maxTaskTurnTimeout  = 30 * time.Minute
 )
 
 var (
 	conversationName         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	inputName                = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$`)
 	errDispatchEventDelivery = errors.New("cannot write dispatch events")
+	// ErrTurnDeadlineExceeded reports a task-only native turn deadline.
+	ErrTurnDeadlineExceeded = errors.New("harness turn exceeded its deadline")
 )
 
 type Submission struct {
@@ -42,28 +45,30 @@ type Submission struct {
 type SubmissionResult struct {
 	Status    string
 	Duplicate bool
+	Reason    string
 }
 
 type turnMessage struct {
-	event  *harness.Event
-	result harness.TurnResult
-	err    error
-	done   bool
+	event    *harness.Event
+	result   harness.TurnResult
+	err      error
+	done     bool
+	deadline bool
 }
 
-type idleTimer interface {
+type dispatchTimer interface {
 	C() <-chan time.Time
 	Stop() bool
 }
 
-type realIdleTimer struct{ timer *time.Timer }
+type realTimer struct{ timer *time.Timer }
 
-func (t realIdleTimer) C() <-chan time.Time { return t.timer.C }
-func (t realIdleTimer) Stop() bool          { return t.timer.Stop() }
+func (t realTimer) C() <-chan time.Time { return t.timer.C }
+func (t realTimer) Stop() bool          { return t.timer.Stop() }
 
-type idleTimerFactory func(time.Duration) idleTimer
+type timerFactory func(time.Duration) dispatchTimer
 
-func newIdleTimer(after time.Duration) idleTimer { return realIdleTimer{timer: time.NewTimer(after)} }
+func newTimer(after time.Duration) dispatchTimer { return realTimer{timer: time.NewTimer(after)} }
 
 type Event struct {
 	SchemaVersion int    `json:"schema_version"`
@@ -78,6 +83,7 @@ type Event struct {
 	Delta         string `json:"delta,omitempty"`
 	Bytes         int    `json:"bytes,omitempty"`
 	Status        string `json:"status,omitempty"`
+	Reason        string `json:"reason,omitempty"`
 }
 
 func (e Event) Terminal() bool {
@@ -150,6 +156,19 @@ func RunSubmissionsWithTurnTimeout(ctx context.Context, p *project.Project, driv
 // session for every accepted input. Durable dispatch outcomes still deduplicate
 // retries within the supplied conversation.
 func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submission Submission, emit func(Event) error) error {
+	return runTask(ctx, p, driver, conversationID, submission, emit, 0, nil)
+}
+
+// RunTaskWithTurnTimeout drives one fresh-session task while bounding its
+// native harness turn independently from the caller's overall context.
+func RunTaskWithTurnTimeout(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submission Submission, emit func(Event) error, timeout time.Duration) error {
+	if timeout <= 0 || timeout > maxTaskTurnTimeout {
+		return errors.New("task turn timeout must be positive and at most 30m")
+	}
+	return runTask(ctx, p, driver, conversationID, submission, emit, timeout, newTimer)
+}
+
+func runTask(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submission Submission, emit func(Event) error, timeout time.Duration, timers timerFactory) error {
 	if err := validateDispatch(conversationID, emit); err != nil {
 		return err
 	}
@@ -160,20 +179,21 @@ func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, con
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, runOptions{freshSessions: true, policy: harness.PolicyDefault, store: store})
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, runOptions{freshSessions: true, turnTimeout: timeout, timers: timers, taskDeadline: timeout > 0, policy: harness.PolicyDefault, store: store})
 }
 
 type runOptions struct {
 	freshSessions  bool
 	turnTimeout    time.Duration
 	idleTimeout    time.Duration
-	timers         idleTimerFactory
+	timers         timerFactory
 	policy         harness.ExecutionPolicy
 	store          *conversationStore
 	capacity       *capacityCoordinator
 	forceHibernate <-chan struct{}
 	wake           <-chan struct{}
 	requestInputs  RequestInputHandler
+	taskDeadline   bool
 }
 
 func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, options runOptions) error {
@@ -201,7 +221,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	turnHeld := false
 	residentHeld := false
 	parkedDisposition := harness.RequestInputDisposition("")
-	var idle idleTimer
+	var idle dispatchTimer
 	var idleC <-chan time.Time
 	turns := make(chan turnMessage, 64)
 	defer func() {
@@ -299,7 +319,7 @@ dispatchLoop:
 				return err
 			}
 			active = &next
-			go runTurn(ctx, process, next, turns, turnTimeout)
+			go runTurn(ctx, process, next, turns, turnTimeout, timers, options.taskDeadline)
 		}
 		if inputOpen && active == nil && snapshot.queueLen == 0 && process != nil && idleTimeout > 0 && idle == nil {
 			idle = timers(idleTimeout)
@@ -415,8 +435,12 @@ dispatchLoop:
 				continue
 			}
 			if duplicate {
-				replySubmission(ctx, result, SubmissionResult{Status: status, Duplicate: true})
-				sink.emit(Event{Type: "input.duplicate", InputID: result.InputID, Bytes: result.bytes, Status: status})
+				reason, reasonErr := store.outcomeReason(ref, result.InputID)
+				if reasonErr != nil {
+					return reasonErr
+				}
+				replySubmission(ctx, result, SubmissionResult{Status: status, Duplicate: true, Reason: reason})
+				sink.emit(Event{Type: "input.duplicate", InputID: result.InputID, Bytes: result.bytes, Status: status, Reason: reason})
 				continue
 			}
 			if status == string(LifecycleWaiting) {
@@ -454,6 +478,20 @@ dispatchLoop:
 			if !message.done {
 				continue
 			}
+			if message.deadline {
+				terminalSessionID, err := store.completeWithReason(ref, active.ID, "uncertain", session.OutcomeReasonDeadlineExceeded, "", freshSessions)
+				if err != nil {
+					return err
+				}
+				completedID := active.ID
+				active = nil
+				process = nil
+				sink.emit(Event{Type: "turn.uncertain", InputID: completedID, SessionID: terminalSessionID, TurnID: completedID, Status: "deadline_exceeded", Reason: session.OutcomeReasonDeadlineExceeded})
+				if sink.err != nil {
+					return fmt.Errorf("%w: %v", errDispatchEventDelivery, sink.err)
+				}
+				return ErrTurnDeadlineExceeded
+			}
 			if message.err != nil {
 				snapshot, _ := store.snapshot(ref)
 				sink.emit(Event{Type: "driver.process_failed", InputID: active.ID, SessionID: snapshot.sessionID, Status: "process_failure"})
@@ -475,7 +513,7 @@ dispatchLoop:
 				if process != nil {
 					closeTimers := timers
 					if closeTimers == nil {
-						closeTimers = newIdleTimer
+						closeTimers = newTimer
 					}
 					if err := closeHarness(process, harnessCloseTimeout, closeTimers); err != nil {
 						return err
@@ -543,7 +581,7 @@ dispatchLoop:
 	}
 }
 
-func closeHarness(process harness.Session, timeout time.Duration, timers idleTimerFactory) error {
+func closeHarness(process harness.Session, timeout time.Duration, timers timerFactory) error {
 	closed := make(chan error, 1)
 	go func() { closed <- process.Close() }()
 	timer := timers(timeout)
@@ -624,12 +662,44 @@ func validateInput(value Submission) string {
 	return ""
 }
 
-func runTurn(ctx context.Context, process harness.Session, input session.Input, messages chan<- turnMessage, timeout time.Duration) {
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
+func runTurn(ctx context.Context, process harness.Session, input session.Input, messages chan<- turnMessage, timeout time.Duration, timers timerFactory, abortOnDeadline bool) {
+	if !abortOnDeadline {
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		runHarnessTurn(ctx, process, input, messages)
+		return
 	}
+
+	turnCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	timer := timers(timeout)
+	defer timer.Stop()
+	completed := make(chan turnMessage, 1)
+	go func() {
+		emit := func(event harness.Event) {
+			copy := event
+			select {
+			case messages <- turnMessage{event: &copy}:
+			case <-turnCtx.Done():
+			}
+		}
+		result, err := process.RunTurn(turnCtx, harness.Input{ID: input.ID, Text: input.Text}, emit)
+		completed <- turnMessage{result: result, err: err, done: true}
+	}()
+	select {
+	case result := <-completed:
+		messages <- result
+	case <-timer.C():
+		cancel()
+		process.Abort()
+		messages <- turnMessage{done: true, deadline: true}
+	}
+}
+
+func runHarnessTurn(ctx context.Context, process harness.Session, input session.Input, messages chan<- turnMessage) {
 	emit := func(event harness.Event) {
 		copy := event
 		messages <- turnMessage{event: &copy}

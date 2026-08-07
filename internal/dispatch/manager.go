@@ -45,7 +45,7 @@ type Manager struct {
 	driver      harness.Driver
 	turnTimeout time.Duration
 	idleTimeout time.Duration
-	timers      idleTimerFactory
+	timers      timerFactory
 	capacity    *capacityCoordinator
 	workspaces  WorkspaceProvider
 	emit        func(string, Event) error
@@ -128,7 +128,7 @@ func NewManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 }
 
 func NewManagerWithIdleTimeout(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error) (*Manager, error) {
-	return newManager(ctx, p, driver, turnTimeout, idleTimeout, DefaultMaxResidentSessions, DefaultMaxActiveTurns, emit, newIdleTimer, nil)
+	return newManager(ctx, p, driver, turnTimeout, idleTimeout, DefaultMaxResidentSessions, DefaultMaxActiveTurns, emit, newTimer, nil)
 }
 
 func NewManagerWithWorkspace(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error, workspaces WorkspaceProvider) (*Manager, error) {
@@ -143,7 +143,7 @@ func NewManagerWithWorkspaceAndLimitsConfigured(ctx context.Context, p *project.
 	if workspaces == nil {
 		return nil, errors.New("managed writable workspace provider is required")
 	}
-	return newManagerConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newIdleTimer, workspaces, configure)
+	return newManagerConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newTimer, workspaces, configure)
 }
 
 func NewManagerWithLimits(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error) (*Manager, error) {
@@ -151,14 +151,14 @@ func NewManagerWithLimits(ctx context.Context, p *project.Project, driver harnes
 }
 
 func NewManagerWithLimitsConfigured(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, configure func(*Manager) error) (*Manager, error) {
-	return newManagerConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newIdleTimer, nil, configure)
+	return newManagerConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newTimer, nil, configure)
 }
 
-func newManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, timers idleTimerFactory, workspaces WorkspaceProvider) (*Manager, error) {
+func newManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, timers timerFactory, workspaces WorkspaceProvider) (*Manager, error) {
 	return newManagerConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, timers, workspaces, nil)
 }
 
-func newManagerConfigured(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, timers idleTimerFactory, workspaces WorkspaceProvider, configure func(*Manager) error) (*Manager, error) {
+func newManagerConfigured(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, timers timerFactory, workspaces WorkspaceProvider, configure func(*Manager) error) (*Manager, error) {
 	if p == nil || driver == nil {
 		return nil, errors.New("managed sessions require a project and harness driver")
 	}

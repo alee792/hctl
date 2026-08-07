@@ -130,13 +130,17 @@ occurrence explicitly with a stable caller-owned ID:
 ```sh
 hctl schedule trigger ~/agents/reviewer billing/sweep \
   --workspace ~/Code/example --harness codex \
-  --input-id billing-sweep-2026-08-06
+  --input-id billing-sweep-2026-08-06 --turn-timeout 90s
 ```
 
 Each accepted occurrence starts a fresh native-harness session. Retrying the
 same input ID is deduplicated through the durable turn dispatcher. The command reports
 lifecycle status and discards model text; it does not register a cron job,
 install a daemon, replay missed work, or deliver output to a channel.
+The task turn deadline is independent of the command's overall `--timeout`;
+expiry aborts that harness process and retains the occurrence as uncertain so
+it cannot be silently rerun. Both the first result and later duplicates report
+the durable `deadline_exceeded` reason.
 
 ## Current journey
 

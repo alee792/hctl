@@ -75,7 +75,7 @@ func runHook(args []string, input io.Reader, output io.Writer) error {
 }
 
 func runSchedule(args []string, output, stderr io.Writer) error {
-	const usage = "Usage: hctl schedule trigger AGENT NAME [--workspace DIR] --harness <claude|codex> --input-id ID [--command PATH] [--timeout DURATION]\n"
+	const usage = "Usage: hctl schedule trigger AGENT NAME [--workspace DIR] --harness <claude|codex> --input-id ID [--command PATH] [--timeout DURATION] [--turn-timeout DURATION]\n"
 	if len(args) > 0 && isHelp(args[len(args)-1]) {
 		_, err := io.WriteString(output, usage)
 		return err
@@ -90,6 +90,7 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 	inputID := fs.String("input-id", "", "stable id for this occurrence")
 	command := fs.String("command", "", "harness executable override")
 	timeout := fs.Duration("timeout", 2*time.Minute, "bounded trigger process lifetime")
+	turnTimeout := fs.Duration("turn-timeout", 90*time.Second, "bounded task turn lifetime")
 	if err := fs.Parse(args[3:]); err != nil {
 		return err
 	}
@@ -98,6 +99,9 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 	}
 	if *timeout <= 0 || *timeout > 30*time.Minute {
 		return errors.New("--timeout must be greater than zero and at most 30m")
+	}
+	if *turnTimeout <= 0 || *turnTimeout > 30*time.Minute {
+		return errors.New("--turn-timeout must be greater than zero and at most 30m")
 	}
 	if err := dispatch.ValidateInputID(*inputID); err != nil {
 		return err
@@ -118,7 +122,7 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 	if err := driver.Verify(ctx); err != nil {
 		return err
 	}
-	result, triggerErr := schedule.Trigger(ctx, p, driver, args[2], *inputID)
+	result, triggerErr := schedule.TriggerWithTurnTimeout(ctx, p, driver, args[2], *inputID, *turnTimeout)
 	if result.Status != "" {
 		if _, err := fmt.Fprintf(output, "schedule=%q input_id=%q status=%s duplicate=%t", result.Name, result.InputID, result.Status, result.Duplicate); err != nil {
 			return err
@@ -130,6 +134,11 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 		}
 		if result.TurnID != "" {
 			if _, err := fmt.Fprintf(output, " turn_id=%s", result.TurnID); err != nil {
+				return err
+			}
+		}
+		if result.Reason != "" {
+			if _, err := fmt.Fprintf(output, " reason=%s", result.Reason); err != nil {
 				return err
 			}
 		}

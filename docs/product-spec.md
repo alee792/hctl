@@ -68,6 +68,12 @@ my-agent/
       SKILL.md
       references/
         sources.md
+  plugins/
+    review-pack/
+      plugin.json
+      skills/
+        review/
+          SKILL.md
   tools/
     get_weather.ts
     lookup_policy.py
@@ -105,6 +111,33 @@ regular-file resources such as `scripts/`, `references/`, `assets/`, and other
 nested directories. Adding or removing a skill directory updates the compiled
 project without separate registration. Hctl keeps the existing eight-skill
 limit.
+
+The optional `plugins/` directory vendors Agent Plugins v1 dependencies. Each
+visible immediate real directory is one plugin with a required bounded
+`plugin.json` targeting the exact canonical v1.0.0 schema identifier. The
+directory may contain at most 32 entries, and each plugin `skills/` location at
+most 128 entries before the merged eight-skill limit applies. Hctl
+validates that schema locally without fetching it. Manifest violations reject
+only that plugin; unsupported top-level fields, non-object `extensions` values,
+and every unsupported extension namespace are ignored with warnings. Namespace
+values are not validated. Hctl imports Agent Skills only from immediate real
+directories beneath the plugin's fixed `skills/` location. A missing `plugins/`
+directory, a missing plugin `skills/` directory, and empty component locations
+are normal.
+
+Root `skills/` load first. Plugin and component directories load in lexical
+order. The first skill name wins; later collisions are skipped with a warning
+and are not renamed. Invalid plugin skills are skipped independently while
+valid sibling components continue. The merged skill set retains the existing
+eight-skill aggregate limit and resource bounds. Symlinks are never followed.
+Accepted plugin manifests and consumed skill resources participate in the
+source fingerprint and generate through the same native Claude and Codex skill
+paths as root skills.
+
+This first Agent Plugins slice does not read `mcp.json`, download or update
+plugins, resolve marketplaces, convert vendor formats, interpret extensions,
+or map plugin data into other hctl concepts. Native plugin MCP mapping is a
+separate phase; see [ADR 0014](adr/0014-import-vendored-agent-plugin-skills.md).
 
 `name` and `description` are required. Names contain 1-64 lowercase ASCII
 letters, digits, and single hyphens, without a leading or trailing hyphen.

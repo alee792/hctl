@@ -22,6 +22,12 @@ my-agent/
   skills/
     research/
       SKILL.md
+  plugins/
+    review-pack/
+      plugin.json
+      skills/
+        review/
+          SKILL.md
   tools/
     repeat.ts
     add.py
@@ -59,7 +65,12 @@ The directory name becomes the agent name, normalized to lowercase words with
 hyphens. Each skill follows the open Agent Skills layout: a named directory
 containing `SKILL.md` and optional scripts, references, assets, or other
 resources. Adding a skill directory makes it available on the next apply;
-there is no registration file to update. TypeScript, Python, and Go tool
+there is no registration file to update. Standards-shaped dependencies can be
+vendored as Agent Plugins v1 directories under `plugins/`; hctl validates each
+local `plugin.json` and imports skills from its fixed `skills/` location. Root
+skills win name collisions. Invalid plugin components warn and remain isolated.
+This phase does not import `mcp.json`, install or update packages, contact a
+marketplace, or interpret client extensions. TypeScript, Python, and Go tool
 functions under `tools/` are exposed through the same managed MCP server.
 Immediate subagents inherit their parent's generated skills and tools through
 the native harness. A subagent may optionally request portable reasoning effort
@@ -90,7 +101,8 @@ server in either harness. It exposes `github__get-repository`,
 `github__list-issues`, and `github__get-issue`; apply never contacts GitHub.
 Private repositories, credentials, writes, generic OpenAPI loading, and remote
 MCP proxying are not part of this first connection. See the
-[minimal example](examples/minimal), [public GitHub example](examples/github),
+[minimal example](examples/minimal), [plugin example](examples/plugins),
+[public GitHub example](examples/github),
 [Discord source example](examples/discord), and the
 [mixed-language example](spikes/polyglot-tools/fixture).
 

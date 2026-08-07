@@ -29,6 +29,7 @@ import (
 	"hctl/internal/rootfs"
 	"hctl/internal/schedule"
 	"hctl/internal/setup"
+	"hctl/internal/stage"
 	"hctl/internal/tool"
 )
 
@@ -36,6 +37,7 @@ const help = `Usage: hctl <command> [arguments]
 
 Commands:
   apply AGENT --harness <claude|codex>    Prepare tools and native files
+  stage AGENT --harness <claude|codex>    Prepare a runnable filesystem tree
   run AGENT --harness <claude|codex>      Run configured conversational channels
   channel setup discord AGENT             Enroll an existing Discord bot
   channel status discord AGENT            Validate Discord configuration
@@ -53,6 +55,8 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 	switch args[0] {
 	case "apply":
 		return runApply(args[1:], output, stderr, self)
+	case "stage":
+		return runStage(args[1:], output, stderr, self)
 	case "run":
 		return runAgent(args[1:], input, output, stderr, self)
 	case "channel":
@@ -64,7 +68,7 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 	case "hook":
 		return runHook(args[1:], input, output)
 	default:
-		return fmt.Errorf("unknown command %q; expected apply, run, channel, or schedule", args[0])
+		return fmt.Errorf("unknown command %q; expected apply, stage, run, channel, or schedule", args[0])
 	}
 }
 
@@ -382,6 +386,63 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 		}
 	}
 	return nil
+}
+
+func runStage(args []string, output, stderr io.Writer, self string) error {
+	if len(args) == 1 && isHelp(args[0]) {
+		_, err := io.WriteString(output, "Usage: hctl stage AGENT --harness <claude|codex> --output DIR [--command PATH]\n")
+		return err
+	}
+	if len(args) == 0 {
+		return errors.New("usage: hctl stage AGENT --harness <claude|codex> --output DIR")
+	}
+	fs := flag.NewFlagSet("stage", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	harnessName := fs.String("harness", "", "target harness")
+	outputPath := fs.String("output", "", "new staged filesystem directory")
+	command := fs.String("command", "", "harness executable override")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("unexpected stage arguments")
+	}
+	p, err := project.Load(args[0], *harnessName)
+	if err != nil {
+		return err
+	}
+	driver, err := newDriver(*harnessName, *command)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if err := driver.Verify(ctx); err != nil {
+		return err
+	}
+	version, err := stage.HarnessVersion(ctx, driver.Executable())
+	if err != nil {
+		return err
+	}
+	executable, err := resolvedSelf(self)
+	if err != nil {
+		return err
+	}
+	result, err := stage.Create(ctx, stage.Request{Project: p, Output: *outputPath, HCTLExecutable: executable, HarnessExecutable: driver.Executable(), HarnessVersion: version})
+	if err != nil {
+		return err
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if _, err := fmt.Fprintln(stderr, diagnostic.String()); err != nil {
+			return err
+		}
+	}
+	runtimes := strings.Join(result.Manifest.Runtimes, ",")
+	if runtimes == "" {
+		runtimes = "none"
+	}
+	_, err = fmt.Fprintf(output, "staged agent=%s harness=%s fingerprint=%s output=%s runtimes=%s\n", p.Name, driver.Name(), p.SourceFingerprint, result.Output, runtimes)
+	return err
 }
 
 func runAgent(args []string, input io.Reader, output, stderr io.Writer, self string) error {

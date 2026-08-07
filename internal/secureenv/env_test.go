@@ -14,3 +14,20 @@ func TestChildRemovesDiscordToken(t *testing.T) {
 		t.Fatalf("sanitized environment = %q", joined)
 	}
 }
+
+func TestStagingUsesCredentialFreeAllowlist(t *testing.T) {
+	t.Setenv("PATH", "/safe/bin")
+	t.Setenv("OPENAI_API_KEY", "must-not-reach-stage")
+	t.Setenv("ANTHROPIC_API_KEY", "must-not-reach-stage")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "must-not-reach-stage")
+	t.Setenv("HCTL_DISCORD_TOKEN", "must-not-reach-stage")
+	joined := strings.Join(Staging("/isolated/home"), "\n")
+	for _, secret := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AWS_SECRET_ACCESS_KEY", "HCTL_DISCORD_TOKEN", "must-not-reach-stage"} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("staging environment contains %q: %s", secret, joined)
+		}
+	}
+	if !strings.Contains(joined, "PATH=/safe/bin") || !strings.Contains(joined, "HOME=/isolated/home") {
+		t.Fatalf("staging environment lacks execution inputs: %s", joined)
+	}
+}

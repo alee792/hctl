@@ -52,6 +52,10 @@ type hostCall struct {
 }
 
 func Open(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint string, inventory Inventory) (*Runtime, error) {
+	return open(ctx, sourceRoot, workspaceRoot, sourceFingerprint, inventory, nil)
+}
+
+func open(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint string, inventory Inventory, baseEnvironment []string) (*Runtime, error) {
 	runtime := &Runtime{tools: map[string]hostedTool{}}
 	if len(inventory.Sources) == 0 {
 		return runtime, nil
@@ -64,7 +68,7 @@ func Open(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint stri
 		if !hasLanguage(inventory, language) {
 			continue
 		}
-		command, arguments, environment, err := hostCommand(sourceRoot, workspaceRoot, sourceFingerprint, prepared, language)
+		command, arguments, environment, err := hostCommand(sourceRoot, workspaceRoot, sourceFingerprint, prepared, language, baseEnvironment)
 		if err != nil {
 			runtime.Close()
 			return nil, err
@@ -146,7 +150,7 @@ func (runtime *Runtime) Close() {
 	runtime.clients = nil
 }
 
-func hostCommand(sourceRoot, workspaceRoot, sourceFingerprint string, prepared preparedRuntime, language Language) (string, []string, []string, error) {
+func hostCommand(sourceRoot, workspaceRoot, sourceFingerprint string, prepared preparedRuntime, language Language, baseEnvironment []string) (string, []string, []string, error) {
 	cache := cacheRelative(sourceFingerprint)
 	switch language {
 	case TypeScript:
@@ -155,15 +159,19 @@ func hostCommand(sourceRoot, workspaceRoot, sourceFingerprint string, prepared p
 			return "", nil, nil, err
 		}
 		deno, err := preparedExecutable(prepared.Deno, "deno")
-		environment := environmentWith("DENO_DIR", filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/deno-dir")))
+		environment := environmentWith(baseEnvironment, "DENO_DIR", filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/deno-dir")))
 		return deno, []string{"run", "--quiet", "--cached-only", "--frozen", "--config", filepath.Join(sourceRoot, "deno.json"), "--allow-read=" + sourceRoot + "," + workspaceRoot, filepath.Join(workspaceRoot, filepath.FromSlash(host)), sourceRoot}, environment, err
 	case Python:
 		host := cache + "/python.py"
 		if err := verifyCachedSource(workspaceRoot, host, pythonHost); err != nil {
 			return "", nil, nil, err
 		}
+		if prepared.Python != "" {
+			python, err := preparedExecutable(prepared.Python, "python")
+			return python, []string{filepath.Join(workspaceRoot, filepath.FromSlash(host)), sourceRoot}, runtimeEnvironment(baseEnvironment, map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}), err
+		}
 		uv, err := preparedExecutable(prepared.UV, "uv")
-		environment := environmentWith("UV_PROJECT_ENVIRONMENT", filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/python-venv")))
+		environment := runtimeEnvironment(baseEnvironment, map[string]string{"PYTHONDONTWRITEBYTECODE": "1", "UV_PROJECT_ENVIRONMENT": filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/python-venv"))})
 		return uv, []string{"run", "--locked", "--no-sync", "--project", sourceRoot, "python", filepath.Join(workspaceRoot, filepath.FromSlash(host)), sourceRoot}, environment, err
 	case Go:
 		binary := filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/go/host"))
@@ -171,10 +179,17 @@ func hostCommand(sourceRoot, workspaceRoot, sourceFingerprint string, prepared p
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 			return "", nil, nil, errors.New("go tool runtime is missing; run hctl apply")
 		}
-		return binary, nil, secureenv.Child(), nil
+		return binary, nil, runtimeEnvironment(baseEnvironment, nil), nil
 	default:
 		return "", nil, nil, errors.New("unsupported tool language")
 	}
+}
+
+func runtimeEnvironment(base []string, values map[string]string) []string {
+	if base == nil {
+		return secureenv.WithValues(values)
+	}
+	return secureenv.Replace(base, values)
 }
 
 func readPreparedRuntime(workspaceRoot, sourceFingerprint string) (preparedRuntime, error) {

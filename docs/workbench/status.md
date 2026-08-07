@@ -287,11 +287,13 @@ uncertain result with a distinct deadline reason, and does not prevent a later
 occurrence from opening a fresh session. HCTL-015 now adds the foreground UTC
 clock with shared state ownership, bounded concurrency, no backfill, stable
 occurrence identity, overlap skipping, runtime locking, and graceful drain.
-ADR 0027 now settles the image/runtime boundary: hctl may stage canonical
-agent filesystems and publish pinned harness images, while existing build and
-deployment systems own OCI output and operation. The staging command and image
-publication remain follow-up implementation work. Portable sandbox authoring
-is still deferred because the native harnesses do not expose equivalent
+ADR 0027 now settles the image/runtime boundary: `hctl stage` atomically
+prepares canonical agent filesystems, selects only discovered tool execution
+closures, records deterministic file and ownership evidence, and rejects
+build-path or credential-state leakage. Existing build and deployment systems
+still own OCI output and operation. Pinned harness image publication remains
+follow-up work. Portable sandbox authoring is still deferred because the
+native harnesses do not expose equivalent
 sandbox contracts. Do not implement proposal capture, image deployment,
 sandbox source, or broker code merely to exercise future seams.
 

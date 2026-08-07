@@ -1,7 +1,7 @@
 # ADR 0027: Stage agent filesystems for downstream OCI builds
 
 - Status: accepted
-- Implementation: deferred; the staging command and harness images do not exist
+- Implementation: `hctl stage` is implemented; harness images remain deferred
 
 ## Decision
 
@@ -14,7 +14,7 @@ image.
 Publish one hctl image for Codex and one for Claude. Each contains the matching
 hctl release, one pinned native harness, and all supported authored-tool build
 and execution inputs. A user may add and apply an agent in that image and ship
-the resulting larger image directly. A future staging command additionally
+the resulting larger image directly. A staging command additionally
 lets the same image act as a disposable build stage by carrying only the
 selected agent's required execution closure into a clean compatible image.
 
@@ -35,7 +35,10 @@ COPY . /agent
 RUN hctl stage /agent --harness codex --output /out
 
 FROM DOCUMENTED_COMPATIBLE_BASE
-COPY --from=build /out/ /
+COPY --from=build /out/opt/ /opt/
+COPY --from=build --chown=65532:65532 /out/workspace/ /workspace/
+COPY --from=build --chown=65532:65532 /out/home/hctl/ /home/hctl/
+USER 65532:65532
 ENTRYPOINT ["/opt/hctl/bin/agent-entrypoint"]
 ```
 
@@ -43,8 +46,8 @@ The Claude journeys change only the source image and harness argument. The
 two-stage form is recommended when image size, build-tool exposure, or offline
 startup matters; it is not required for correctness. `hctl stage` is the
 intended command name, not an authored manifest or an hctl-owned image builder.
-The command and harness images remain future implementation work until their
-separate acceptance contracts are completed.
+The harness images remain separate implementation work until their acceptance
+contracts are completed.
 
 ### Staged layout
 
@@ -58,6 +61,7 @@ One staged tree contains these fixed runtime locations:
 /opt/hctl/runtimes/...
 /opt/hctl/agents/AGENT_NAME/...
 /workspace/...
+/home/hctl/...
 ```
 
 `AGENT_NAME` is the normalized authored project name. Keeping it in the staged
@@ -80,7 +84,8 @@ its schema version, hctl generator version, selected harness and version,
 agent name and identity, source fingerprint, target OS and architecture, libc
 or equivalent ABI, compatible base identifier, required runtime set, final
 paths, and the hashes, modes, and intended runtime ownership of every other
-staged file. Identical agent source and pinned image inputs must produce
+staged file plus the modes and intended ownership of staged directories.
+Identical agent source and pinned image inputs must produce
 identical staged file contents and metadata. Downstream image metadata,
 timestamps, compression, and image digest remain the downstream builder's
 responsibility.
@@ -108,7 +113,9 @@ use Linux; a separate harness image built for a musl ABI would be required.
 
 The compatible-base contract also names required shared libraries, certificate
 and shell facilities, the non-root runtime UID and GID, and a writable harness
-home. The downstream base may provide additional native utilities, but it must
+home. The staged entrypoint requires UID/GID 65532 and uses `/home/hctl`; the
+workspace and that home must be copied with matching ownership. The downstream
+base may provide additional native utilities, but it must
 not silently run the staged entrypoint as root or omit facilities the pinned
 harness requires.
 

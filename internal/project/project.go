@@ -159,6 +159,7 @@ type Project struct {
 	DiscordChannel    *DiscordChannel
 	Schedules         []Schedule
 	Tools             tool.Inventory
+	Sources           []SourceRecord
 	SourceFingerprint string
 	MaxToolInput      int
 }
@@ -186,6 +187,28 @@ func LoadRelocated(source, harness, workspace string, selected *Project) (*Proje
 	p.AgentID = selected.AgentID
 	setPluginDataPaths(p.PluginMCPServers, selected.AgentID)
 	return p, nil
+}
+
+// WithRuntimeRoots returns the same validated project with the canonical paths
+// it will use at runtime. It does not read either path. Staging uses this after
+// preparing source and workspace files beneath a temporary physical root so
+// generated native configuration never captures that temporary location.
+func WithRuntimeRoots(selected *Project, sourceRoot, workspaceRoot string) (*Project, error) {
+	if selected == nil || !filepath.IsAbs(sourceRoot) || !filepath.IsAbs(workspaceRoot) || filepath.Clean(sourceRoot) != sourceRoot || filepath.Clean(workspaceRoot) != workspaceRoot {
+		return nil, errors.New("runtime project roots must be clean absolute paths")
+	}
+	reference, err := filepath.Rel(workspaceRoot, sourceRoot)
+	if err != nil {
+		return nil, errors.New("cannot describe runtime agent source relative to workspace")
+	}
+	result := *selected
+	result.SourceRoot = sourceRoot
+	result.WorkspaceRoot = workspaceRoot
+	result.SourceReference = filepath.ToSlash(reference)
+	result.AgentID = result.Name + "@" + rootfs.SHA256([]byte(sourceRoot))[:12]
+	result.PluginMCPServers = append([]PluginMCPServer(nil), selected.PluginMCPServers...)
+	setPluginDataPaths(result.PluginMCPServers, result.AgentID)
+	return &result, nil
 }
 
 func load(source, harness, logicalName string, workspace ...string) (*Project, error) {
@@ -327,6 +350,7 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 		DiscordChannel:    discordChannel,
 		Schedules:         schedules,
 		Tools:             tools,
+		Sources:           sources,
 		SourceFingerprint: fingerprint,
 		MaxToolInput:      echoMaxInputBytes,
 	}, nil

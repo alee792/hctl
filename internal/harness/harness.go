@@ -37,6 +37,7 @@ type RequestInputEvent struct {
 type RequestInputAcknowledgement struct {
 	Accepted bool
 	Status   string
+	Result   RequestInputToolResult
 }
 
 // RequestInputToolResult is chosen by a harness continuation strategy after a
@@ -85,9 +86,10 @@ const (
 )
 
 type OpenRequest struct {
-	Root     string
-	ResumeID string
-	Policy   ExecutionPolicy
+	Root                string
+	ResumeID            string
+	Policy              ExecutionPolicy
+	ManagedRequestInput bool
 }
 
 type Driver interface {
@@ -95,6 +97,12 @@ type Driver interface {
 	Executable() string
 	Verify(context.Context) error
 	Open(context.Context, OpenRequest) (Session, error)
+}
+
+// ContinuationTurnDriver starts one later turn in an already persisted native
+// session. Manager owns capacity and lifecycle around this narrow side effect.
+type ContinuationTurnDriver interface {
+	ContinueTurn(context.Context, OpenRequest, string, interaction.ContinuationIntent, func(Event)) interaction.ContinuationResult
 }
 
 type Session interface {

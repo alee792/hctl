@@ -86,12 +86,15 @@ type Manager interface {
 }
 
 type pendingTurn struct {
-	target            any
-	writeContinuation bool
-	outputs           []*bufferedOutput
-	byItem            map[string]*bufferedOutput
-	runes             int
-	truncated         bool
+	target             any
+	writeContinuation  bool
+	originalTurnID     string
+	parkedTurnID       string
+	continuationTurnID string
+	outputs            []*bufferedOutput
+	byItem             map[string]*bufferedOutput
+	runes              int
+	truncated          bool
 }
 
 type bufferedOutput struct {
@@ -269,6 +272,9 @@ func (c *Controller) Close() {
 }
 
 func (c *Controller) handleDispatch(conversation string, event dispatch.Event) {
+	if event.Type == "interaction.parked" && event.Status == string(harness.RequestInputContinuationTurn) {
+		_, _ = fmt.Fprintf(c.audit, "%s interaction parked class=continuation_turn\n", c.auditPrefix)
+	}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -284,7 +290,34 @@ func (c *Controller) handleDispatch(conversation string, event dispatch.Event) {
 		c.mu.Unlock()
 		return
 	}
+	if event.Type == "turn.started" && event.TurnID != "" {
+		if turn.parkedTurnID == "" {
+			turn.originalTurnID = event.TurnID
+		} else if event.TurnID != turn.parkedTurnID {
+			turn.continuationTurnID = event.TurnID
+		}
+		c.mu.Unlock()
+		return
+	}
+	if event.Type == "interaction.parked" && event.Status == string(harness.RequestInputContinuationTurn) {
+		// Any pre-request agent prose belongs to the parked control turn. The
+		// resumed turn supplies the eventual user-visible answer.
+		turn.outputs = nil
+		turn.byItem = nil
+		turn.runes = 0
+		turn.truncated = false
+		turn.parkedTurnID = event.TurnID
+		if turn.parkedTurnID == "" {
+			turn.parkedTurnID = turn.originalTurnID
+		}
+		c.mu.Unlock()
+		return
+	}
 	if event.Type == "agent.output.delta" {
+		if turn.parkedTurnID != "" && (turn.continuationTurnID == "" || event.TurnID != turn.continuationTurnID) {
+			c.mu.Unlock()
+			return
+		}
 		appendBounded(turn, event.ItemID, event.Delta, c.maxOutputRunes)
 		showTyping := visibleReplyDecided(combinedOutput(turn))
 		target := turn.target
@@ -295,6 +328,10 @@ func (c *Controller) handleDispatch(conversation string, event dispatch.Event) {
 		return
 	}
 	if !event.Terminal() {
+		c.mu.Unlock()
+		return
+	}
+	if turn.parkedTurnID != "" && (turn.continuationTurnID == "" || event.TurnID != turn.continuationTurnID) {
 		c.mu.Unlock()
 		return
 	}

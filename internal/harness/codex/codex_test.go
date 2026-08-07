@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"hctl/internal/harness"
+	"hctl/internal/interaction"
 )
 
 func TestAppServerStartTurnAndResume(t *testing.T) {
@@ -127,6 +128,167 @@ done
 	}
 	if _, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.ExecutionPolicy("unsupported")}); err == nil {
 		t.Fatal("unsupported Codex execution policy was accepted")
+	}
+}
+
+func TestDynamicRequestInputUsesRootTurnProvenanceAndBoundedResult(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "codex.log")
+	t.Setenv("FAKE_LOG", logPath)
+	executable := writeExecutable(t, `#!/bin/sh
+while IFS= read -r line; do
+  printf 'WIRE\t%s\n' "$line" >> "$FAKE_LOG"
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"fake"}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"root-thread"},"sandbox":{},"approvalPolicy":""}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"root-turn","status":"inProgress"}}}\n' "$id"
+      printf '{"id":99,"method":"item/tool/call","params":{"threadId":"root-thread","turnId":"root-turn","callId":"call-1","namespace":"channel","tool":"request_input","arguments":{"schema_version":1,"kind":"confirm","prompt":"Proceed?","policy":{"expires_after_seconds":60,"cancellation":"allowed"},"field":{"id":"approved","kind":"confirm","label":"Proceed","required":true}}}}\n'
+      ;;
+    *'"id":99'*) printf '{"method":"turn/completed","params":{"threadId":"root-thread","turn":{"id":"root-turn","status":"completed"}}}\n' ;;
+  esac
+done
+`)
+	driver := New(executable)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, err := driver.Open(ctx, harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyDefault, ManagedRequestInput: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := session.RunTurn(ctx, harness.Input{ID: "message-1", Text: "deploy"}, func(event harness.Event) {
+		if event.RequestInput == nil {
+			return
+		}
+		if !event.RequestInput.ProvenRoot() || event.RequestInput.CorrelationID != "call-1" || event.RequestInput.Request.Prompt != "Proceed?" {
+			t.Errorf("request event = %#v", event.RequestInput)
+		}
+		event.RequestInput.Reply <- harness.RequestInputAcknowledgement{
+			Accepted: true, Status: "accepted",
+			Result: harness.RequestInputToolResult{Disposition: harness.RequestInputContinuationTurn},
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "waiting_for_input" {
+		t.Fatalf("result = %#v", result)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	log := readFile(t, logPath)
+	if !strings.Contains(log, `"experimentalApi":true`) || !strings.Contains(log, `"name":"channel"`) || !strings.Contains(log, `"name":"request_input"`) {
+		t.Fatalf("dynamic tool setup missing:\n%s", log)
+	}
+	if !strings.Contains(log, `"id":99,"result":{"contentItems":[{"text":"continuation_turn","type":"inputText"}],"success":true}`) {
+		t.Fatalf("bounded tool result missing:\n%s", log)
+	}
+}
+
+func TestDynamicRequestInputRejectsUnrelatedThreadBeforeEmission(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "codex.log")
+	t.Setenv("FAKE_LOG", logPath)
+	executable := writeExecutable(t, `#!/bin/sh
+while IFS= read -r line; do
+  printf 'WIRE\t%s\n' "$line" >> "$FAKE_LOG"
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"fake"}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"root-thread"},"sandbox":{},"approvalPolicy":""}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"root-turn","status":"inProgress"}}}\n' "$id"
+      printf '{"id":98,"method":"item/tool/call","params":{"threadId":"child-thread","turnId":"child-turn","callId":"child-call","namespace":"channel","tool":"request_input","arguments":{}}}\n'
+      ;;
+    *'"id":98'*) printf '{"method":"turn/completed","params":{"threadId":"root-thread","turn":{"id":"root-turn","status":"completed"}}}\n' ;;
+  esac
+done
+`)
+	session, err := New(executable).Open(context.Background(), harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyDefault, ManagedRequestInput: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	result, err := session.RunTurn(context.Background(), harness.Input{ID: "message-1", Text: "hello"}, func(event harness.Event) {
+		if event.RequestInput != nil {
+			requests++
+		}
+	})
+	if err != nil || result.Status != "completed" || requests != 0 {
+		t.Fatalf("result=%#v requests=%d err=%v", result, requests, err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if log := readFile(t, logPath); !strings.Contains(log, `"id":98,"result":{"contentItems":[{"text":"interactive input is unavailable in this session","type":"inputText"}],"success":false}`) {
+		t.Fatalf("child call was not rejected: %s", log)
+	}
+}
+
+func TestContinuationResumesSameThreadForStructuredNewTurn(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "codex.log")
+	t.Setenv("FAKE_LOG", logPath)
+	executable := writeExecutable(t, `#!/bin/sh
+while IFS= read -r line; do
+  printf 'WIRE\t%s\n' "$line" >> "$FAKE_LOG"
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"fake"}}\n' "$id" ;;
+    *'"method":"thread/resume"'*) printf '{"id":%s,"result":{"thread":{"id":"root-thread"},"sandbox":{},"approvalPolicy":""}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"answer-turn","status":"inProgress"}}}\n' "$id"
+      printf '{"method":"item/agentMessage/delta","params":{"threadId":"root-thread","turnId":"answer-turn","itemId":"answer","delta":"done"}}\n'
+      printf '{"method":"turn/completed","params":{"threadId":"root-thread","turn":{"id":"answer-turn","status":"completed"}}}\n'
+      ;;
+  esac
+done
+`)
+	driver := New(executable)
+	confirmed := true
+	intent := interaction.ContinuationIntent{
+		InteractionID: "interaction_1234567890", InputID: "message-1", Mode: interaction.ContinuationTurn,
+		Request: interaction.Request{SchemaVersion: interaction.SchemaVersion, Kind: interaction.KindConfirm, Prompt: "Proceed?", Policy: interaction.Policy{ExpiresAfterSeconds: interaction.MinExpirySeconds, Cancellation: interaction.CancellationAllowed}, Field: &interaction.Field{ID: "approved", Kind: interaction.KindConfirm, Label: "Proceed", Required: true}},
+		Answer:  interaction.Answer{SchemaVersion: interaction.SchemaVersion, Action: interaction.ActionSubmit, Fields: []interaction.FieldAnswer{{FieldID: "approved", Confirmed: &confirmed}}},
+	}
+	result := driver.ContinueTurn(context.Background(), harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyDefault}, "root-thread", intent, func(harness.Event) {})
+	if result.Effect != interaction.EffectSucceeded || result.ResultSessionID != "root-thread" {
+		t.Fatalf("result = %#v", result)
+	}
+	log := readFile(t, logPath)
+	if !strings.Contains(log, `"method":"thread/resume"`) || !strings.Contains(log, `"threadId":"root-thread"`) || !strings.Contains(log, `hctl.channel_input_answer`) || !strings.Contains(log, `interaction_id\":\"interaction_1234567890`) {
+		t.Fatalf("continuation wire contract missing:\n%s", log)
+	}
+	if strings.Contains(log, `"method":"turn/steer"`) || strings.Contains(log, `"dynamicTools"`) {
+		t.Fatalf("continuation used a live-turn or re-registration path:\n%s", log)
+	}
+}
+
+func TestContinuationTransportLossIsUncertainAndNeverSteers(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "codex.log")
+	t.Setenv("FAKE_LOG", logPath)
+	executable := writeExecutable(t, `#!/bin/sh
+while IFS= read -r line; do
+  printf 'WIRE\t%s\n' "$line" >> "$FAKE_LOG"
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"fake"}}\n' "$id" ;;
+    *'"method":"thread/resume"'*) printf '{"id":%s,"result":{"thread":{"id":"root-thread"},"sandbox":{},"approvalPolicy":""}}\n' "$id" ;;
+    *'"method":"turn/start"'*) printf '{"id":%s,"result":{"turn":{"id":"answer-turn","status":"inProgress"}}}\n' "$id"; exit 0 ;;
+  esac
+done
+`)
+	confirmed := true
+	intent := interaction.ContinuationIntent{
+		InteractionID: "interaction_1234567890", InputID: "message-1", Mode: interaction.ContinuationTurn,
+		Request: interaction.Request{SchemaVersion: interaction.SchemaVersion, Kind: interaction.KindConfirm, Prompt: "Proceed?", Policy: interaction.Policy{ExpiresAfterSeconds: interaction.MinExpirySeconds, Cancellation: interaction.CancellationAllowed}, Field: &interaction.Field{ID: "approved", Kind: interaction.KindConfirm, Label: "Proceed", Required: true}},
+		Answer:  interaction.Answer{SchemaVersion: interaction.SchemaVersion, Action: interaction.ActionSubmit, Fields: []interaction.FieldAnswer{{FieldID: "approved", Confirmed: &confirmed}}},
+	}
+	result := New(executable).ContinueTurn(context.Background(), harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyDefault}, "root-thread", intent, func(harness.Event) {})
+	if result.Effect != interaction.EffectUncertain || result.OriginOutcome != "uncertain" {
+		t.Fatalf("result = %#v", result)
+	}
+	if log := readFile(t, logPath); strings.Contains(log, `"method":"turn/steer"`) {
+		t.Fatalf("transport loss was retried or steered: %s", log)
 	}
 }
 

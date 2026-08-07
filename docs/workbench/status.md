@@ -75,18 +75,25 @@ as uncertain without automatic replay, validates exactly-once authorized
 answers, retains bounded terminal tombstones, blocks later input in that
 conversation, and makes reset and worktree reconciliation preserve nonterminal
 work. The coordinator distinguishes native deferred-tool continuation from a
-later continuation turn, but neither harness continuation is wired. The strict
+later continuation turn. Codex now implements the latter through a documented
+experimental app-server dynamic namespace tool with exact root thread/turn
+provenance, followed after answer acceptance by `thread/resume` and a new
+`turn/start` carrying a bounded controller-owned answer envelope. The original
+tool call is not suspended, and neither a process nor active-turn grant is held
+while waiting. The strict
 `channel.request_input` MCP schema, typed harness event, and dispatcher-owned
 durable handoff are now implemented behind a disabled-by-default capability
 bridge. The dispatcher recomputes responder fallback, rejects unproven root or
 subagent calls before persistence, and acknowledges only after `requested`
 commits; generated channel instructions are conditional and model-visible
 results and audit stay content-free. Root provenance is an opaque harness-event
-proof rather than a process-wide flag, so shared inherited MCP configuration
-cannot enable the tool. Harness strategies own the bounded result disposition,
-and audit correlation excludes semantic request bytes. Production advertisement remains disabled
-until a harness continuation strategy and Discord responder are wired by
-issues #22 through #24.
+proof rather than a process-wide flag; Codex derives that proof from exact
+app-server thread and turn provenance, so a propagated subagent call fails
+before persistence. Harness strategies own the bounded result disposition, and
+audit correlation excludes semantic request bytes. Codex opts into the
+experimental API only when a handler exists; production advertisement remains
+disabled until the Discord responder is wired by issue #24. Claude's native
+deferred-tool continuation remains separate.
 
 The [credential-free clean-install check](../../spikes/clean-install/README.md)
 creates a disposable exact-tagged `darwin-arm64` release archive, verifies its
@@ -290,9 +297,14 @@ without retaining model-turn or harness capacity. The dispatch state already
 rejects reset while an interaction is nonterminal and treats that work as busy;
 ambiguous continuation also prevents automatic worktree retirement. The
 generic managed request-input schema and dispatcher handoff now exist but are
-deliberately not advertised by the live runtime. The live Discord bot cannot
-render or answer these requests yet, and Claude and Codex do not yet resume
-them; those claims remain deferred to issues #22 through #24.
+deliberately not advertised by the live runtime until a responder is bound.
+Codex has a fake-tested continuation-turn strategy with app-server root
+provenance and manager-owned capacity; the live Discord bot cannot render or
+answer these requests yet. Claude deferred-tool handling and Discord rendering
+remain deferred to issues #22 and #24. Fake app-server child processes provide
+live-style process-exit, same-thread-resume, and final controller-delivery
+evidence; credentialed end-to-end acceptance is issue #25 after the Discord
+responder lands, and is not claimed here.
 
 A [live Discord acceptance pass](discord-live-acceptance.md) with an enrolled
 user-controlled bot exercised independent guild and DM write promotion,

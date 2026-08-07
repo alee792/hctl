@@ -427,3 +427,29 @@ func TestDeliveryFailureIsNotRetried(t *testing.T) {
 		t.Fatalf("outcomes=%#v audit=%q", delivery.outcomes, audit.String())
 	}
 }
+
+func TestContinuationTurnParkingAuditIsContentFree(t *testing.T) {
+	var audit strings.Builder
+	delivery := &fakeTransport{}
+	c, err := NewWithManager(context.Background(), newFakeManager(), delivery, 100, &audit, "Test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
+	submit(t, c, "surface", "guild", "message-secret", "target")
+	c.handleDispatch("guild", dispatch.Event{Type: "turn.started", InputID: "message-secret", TurnID: "old-turn"})
+	c.handleDispatch("guild", dispatch.Event{Type: "agent.output.delta", InputID: "message-secret", TurnID: "old-turn", ItemID: "before", Delta: "I need to ask."})
+	c.handleDispatch("guild", dispatch.Event{Type: "interaction.parked", Status: "continuation_turn", InputID: "message-secret", TurnID: "old-turn", Delta: "semantic secret"})
+	c.handleDispatch("guild", dispatch.Event{Type: "agent.output.delta", InputID: "message-secret", TurnID: "old-turn", ItemID: "late-old", Delta: "Old control output."})
+	c.handleDispatch("guild", dispatch.Event{Type: "turn.started", InputID: "message-secret", TurnID: "new-turn"})
+	c.handleDispatch("guild", dispatch.Event{Type: "agent.output.delta", InputID: "message-secret", TurnID: "old-turn", ItemID: "later-old", Delta: "Still old."})
+	c.handleDispatch("guild", dispatch.Event{Type: "agent.output.delta", InputID: "message-secret", TurnID: "new-turn", ItemID: "after", Delta: "Final answer."})
+	c.handleDispatch("guild", dispatch.Event{Type: "turn.completed", InputID: "message-secret", TurnID: "new-turn"})
+	got := audit.String()
+	if got != "Test interaction parked class=continuation_turn\n" || strings.Contains(got, "message-secret") || strings.Contains(got, "semantic secret") {
+		t.Fatalf("audit = %q", got)
+	}
+	if len(delivery.outcomes) != 1 || strings.Join(delivery.outcomes[0].Parts, "") != "Final answer." {
+		t.Fatalf("outcomes = %#v", delivery.outcomes)
+	}
+}

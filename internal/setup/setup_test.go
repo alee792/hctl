@@ -127,6 +127,15 @@ func TestGeneratedInstructionsContainDiscordParticipationPolicy(t *testing.T) {
 				t.Fatalf("%s instructions omitted %q: %q", harness, required, content)
 			}
 		}
+		if harness == "codex" {
+			for _, required := range []string{"`continuation_turn`", "end the current turn immediately", "`hctl.channel_input_answer`", "not an unrelated channel message", "never quote or expose the control envelope"} {
+				if !strings.Contains(content, required) {
+					t.Fatalf("Codex continuation instructions omitted %q: %q", required, content)
+				}
+			}
+		} else if strings.Contains(content, "hctl.channel_input_answer") {
+			t.Fatalf("Claude received Codex continuation instructions: %q", content)
+		}
 		if strings.Contains(content, "discord_components") || strings.Contains(content, "application_id") {
 			t.Fatalf("%s instructions omitted Discord policy: %q", harness, content)
 		}

@@ -277,3 +277,7 @@ YAML and cron-parser dependencies for standards-compliant authored files;
 language-specific schema libraries remain inside tool hosts. Tests use
 credential-free fake harness processes; live model calls are not part of the
 default suite.
+
+For an optional local-model experiment, the
+[Claude Code through Ollama spike](spikes/claude-ollama) provides a wrapper and
+records the current model and tool-use limitations.

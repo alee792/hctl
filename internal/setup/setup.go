@@ -86,16 +86,26 @@ type applyRecord struct {
 }
 
 func Apply(p *project.Project, executable string) (Result, error) {
-	return apply(p, executable, false)
+	return apply(p, executable, false, p.WorkspaceRoot)
+}
+
+// ApplyAt writes setup files beneath workspaceRoot while embedding the
+// canonical runtime roots carried by p. It is reserved for filesystem staging;
+// ordinary apply writes directly to p.WorkspaceRoot.
+func ApplyAt(p *project.Project, executable, workspaceRoot string) (Result, error) {
+	return apply(p, executable, false, workspaceRoot)
 }
 
 func ApplyWritableChannel(p *project.Project, executable string) (Result, error) {
-	return apply(p, executable, true)
+	return apply(p, executable, true, p.WorkspaceRoot)
 }
 
-func apply(p *project.Project, executable string, channelWritable bool) (Result, error) {
+func apply(p *project.Project, executable string, channelWritable bool, workspaceRoot string) (Result, error) {
 	if !filepath.IsAbs(executable) {
 		return Result{}, errors.New("managed MCP executable path must be absolute")
+	}
+	if _, err := rootfs.CanonicalDir(workspaceRoot); err != nil {
+		return Result{}, errors.New("setup output workspace must be an existing real directory")
 	}
 	generated, err := filesForPolicy(p, executable, channelWritable)
 	if err != nil {
@@ -103,7 +113,7 @@ func apply(p *project.Project, executable string, channelWritable bool) (Result,
 	}
 	files := generated.Files
 	recordPath := applyRecordPath(p.Harness)
-	prior, exists, legacy, err := loadApplyRecord(p.WorkspaceRoot, p.Harness)
+	prior, exists, legacy, err := loadApplyRecord(workspaceRoot, p.Harness)
 	if err != nil {
 		return Result{}, err
 	}
@@ -118,7 +128,7 @@ func apply(p *project.Project, executable string, channelWritable bool) (Result,
 				return Result{}, errors.New("apply record contains an invalid path")
 			}
 			priorFiles[owned.Path] = owned
-			actual, mode, present, err := generatedState(p.WorkspaceRoot, owned.Path)
+			actual, mode, present, err := generatedState(workspaceRoot, owned.Path)
 			if err != nil {
 				return Result{}, err
 			}
@@ -134,7 +144,7 @@ func apply(p *project.Project, executable string, channelWritable bool) (Result,
 		if !allowedPath(p.Harness, path) {
 			return Result{}, errors.New("generated harness path is not allowed")
 		}
-		_, _, present, err := generatedState(p.WorkspaceRoot, path)
+		_, _, present, err := generatedState(workspaceRoot, path)
 		if err != nil {
 			return Result{}, err
 		}
@@ -143,7 +153,7 @@ func apply(p *project.Project, executable string, channelWritable bool) (Result,
 		}
 	}
 	for _, path := range pluginDataDirectories(p) {
-		if err := rootfs.EnsurePrivateDir(p.WorkspaceRoot, path); err != nil {
+		if err := rootfs.EnsurePrivateDir(workspaceRoot, path); err != nil {
 			return Result{}, fmt.Errorf("cannot prepare plugin data directory %s: %w", path, err)
 		}
 	}
@@ -152,14 +162,14 @@ func apply(p *project.Project, executable string, channelWritable bool) (Result,
 	owned := make([]ownedFile, 0, len(paths))
 	for _, path := range paths {
 		file := files[path]
-		if err := rootfs.WriteAtomic(p.WorkspaceRoot, path, file.Content, file.Mode); err != nil {
+		if err := rootfs.WriteAtomic(workspaceRoot, path, file.Content, file.Mode); err != nil {
 			return Result{}, err
 		}
 		owned = append(owned, ownedFile{Path: path, SHA256: rootfs.SHA256(file.Content), Mode: uint32(file.Mode.Perm())})
 	}
 	for path := range priorFiles {
 		if _, retained := files[path]; !retained {
-			if err := rootfs.RemoveRegular(p.WorkspaceRoot, path); err != nil {
+			if err := rootfs.RemoveRegular(workspaceRoot, path); err != nil {
 				return Result{}, err
 			}
 		}
@@ -169,26 +179,26 @@ func apply(p *project.Project, executable string, channelWritable bool) (Result,
 	if err != nil {
 		return Result{}, errors.New("cannot encode apply record")
 	}
-	if err := rootfs.WriteAtomic(p.WorkspaceRoot, recordPath, append(metaBytes, '\n'), 0o644); err != nil {
+	if err := rootfs.WriteAtomic(workspaceRoot, recordPath, append(metaBytes, '\n'), 0o644); err != nil {
 		return Result{}, err
 	}
 	if legacy {
-		if err := rootfs.RemoveRegular(p.WorkspaceRoot, legacyRecordPath(p.Harness)); err != nil {
+		if err := rootfs.RemoveRegular(workspaceRoot, legacyRecordPath(p.Harness)); err != nil {
 			return Result{}, err
 		}
 	}
-	if err := verify(p, channelWritable); err != nil {
+	if err := verifyAt(p, channelWritable, workspaceRoot); err != nil {
 		return Result{}, err
 	}
 	return Result{Files: append(paths, recordPath), Diagnostics: generated.Diagnostics}, nil
 }
 
 func Verify(p *project.Project) error {
-	return verify(p, false)
+	return verifyAt(p, false, p.WorkspaceRoot)
 }
 
 func VerifyWritableChannel(p *project.Project) error {
-	return verify(p, true)
+	return verifyAt(p, true, p.WorkspaceRoot)
 }
 
 // WritableChannelFiles returns the exact generated files whose current bytes
@@ -256,8 +266,8 @@ func writableChannelRetirementFiles(p *project.Project) ([]string, error) {
 	return paths, nil
 }
 
-func verify(p *project.Project, channelWritable bool) error {
-	meta, exists, err := readApplyRecord(p.WorkspaceRoot, applyRecordPath(p.Harness))
+func verifyAt(p *project.Project, channelWritable bool, workspaceRoot string) error {
+	meta, exists, err := readApplyRecord(workspaceRoot, applyRecordPath(p.Harness))
 	if err != nil {
 		return err
 	}
@@ -273,13 +283,13 @@ func verify(p *project.Project, channelWritable bool) error {
 			return errors.New("apply record contains an invalid path")
 		}
 		seen[owned.Path] = true
-		actual, mode, present, err := generatedState(p.WorkspaceRoot, owned.Path)
+		actual, mode, present, err := generatedState(workspaceRoot, owned.Path)
 		if err != nil || !present || actual != owned.SHA256 || uint32(mode.Perm()) != owned.Mode {
 			return fmt.Errorf("%s generated file %s is missing or changed; run hctl apply first", p.Harness, owned.Path)
 		}
 	}
 	for _, path := range pluginDataDirectories(p) {
-		if err := rootfs.RequirePrivateDir(p.WorkspaceRoot, path); err != nil {
+		if err := rootfs.RequirePrivateDir(workspaceRoot, path); err != nil {
 			return fmt.Errorf("%s plugin data directory is missing or changed; run hctl apply first", p.Harness)
 		}
 	}

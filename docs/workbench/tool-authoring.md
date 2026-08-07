@@ -190,7 +190,7 @@ depending on the native harness process to inherit the author's shell `PATH`.
 
 Generated build glue, compiled Go hosts, and extracted host support files belong
 in an hctl cache, not among authored project files. They must be safe to delete
-and reproduce. The future `hctl stage` boundary from ADR 0027 may re-prepare and
+and reproduce. The `hctl stage` boundary from ADR 0027 re-prepares and
 collect a selected execution closure at canonical final paths; `apply` should
 not stage by accident.
 
@@ -230,8 +230,8 @@ subprocess. This is a reliability boundary for trusted project code, not an OS
 sandbox or malicious-code-containment claim.
 
 `apply` necessarily prepares the local tool runtime because the generated
-harness setup must be immediately usable. A future `hctl stage` command may
-produce the bounded runnable filesystem selected by ADR 0027 from the same
+harness setup must be immediately usable. `hctl stage` produces the bounded
+runnable filesystem selected by ADR 0027 from the same
 conventions and adapters.
 
 hctl keeps generated ownership, fingerprint state, and disposable tool-host
@@ -251,9 +251,8 @@ authored tool inventory.
 5. HCTL-001 resolved local first installation without a `package` command.
    ADR 0027 now resolves the OCI distribution need with selective staging from
    a pinned harness image. Raw `.hctl/cache/` contents remain local disposable
-   output rather than generally relocatable artifacts; implementation must
-   re-prepare them at canonical final paths and carry only the required runtime
-   closure.
+   output rather than generally relocatable artifacts; `hctl stage` re-prepares
+   them at canonical final paths and carries only the required runtime closure.
 
 ## First spike result
 

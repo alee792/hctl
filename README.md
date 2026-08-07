@@ -175,6 +175,57 @@ harness. Codex loads the generated project configuration after the user trusts
 the repository on first launch. The turn dispatcher exists for headless sessions and
 future input adapters.
 
+## Optional staged filesystem
+
+`hctl stage` prepares one complete runnable filesystem tree for an existing
+image builder. The output directory must not already exist:
+
+```sh
+hctl stage ./my-agent --harness codex --output /out
+```
+
+Staging validates the harness and agent, prepares and inspects locked authored
+tools, then publishes `/out` atomically. The tree uses canonical runtime paths
+under `/opt/hctl`, `/workspace`, and `/home/hctl`; generated configuration never
+refers to the build directory. `opt/hctl/artifact.json` records the harness and
+agent identity, target OS/architecture/ABI, selected runtimes, final paths, and
+the hash, mode, and intended owner of every other file.
+
+The command carries only the execution closure selected by the agent: Deno for
+TypeScript, Python and uv for Python, and the compiled host rather than the Go
+toolchain for Go. A tool-free agent carries none of those runtimes. Build caches,
+native harness login state, provider credentials, channel tokens, conversations,
+and deployment configuration are excluded. Staging targets the current machine;
+it does not cross-compile or make a glibc payload compatible with Alpine.
+
+The intended optional two-stage pattern is:
+
+```dockerfile
+FROM HCTL_CODEX_IMAGE AS build
+COPY . /agent
+RUN hctl stage /agent --harness codex --output /out
+
+FROM DOCUMENTED_COMPATIBLE_BASE
+COPY --from=build /out/opt/ /opt/
+COPY --from=build --chown=65532:65532 /out/workspace/ /workspace/
+COPY --from=build --chown=65532:65532 /out/home/hctl/ /home/hctl/
+USER 65532:65532
+ENTRYPOINT ["/opt/hctl/bin/agent-entrypoint"]
+```
+
+The final base must match the artifact ABI and provide the documented harness
+libraries, certificates, `/bin/sh`, `id`, and UID/GID 65532. The entrypoint
+fails instead of silently running as another identity. Keep `/workspace` and
+`/home/hctl` writable and durable when channel or harness state must survive a
+restart; do not mount an empty volume over the prepared workspace. The Codex
+and Claude hctl images and their exact compatible-base contracts are separate
+release work. Until those exist, `--command PATH` is useful only for a
+self-contained harness executable; a harness installed under
+`/opt/hctl/harness` is copied with that full runtime tree. Authored Python
+staging likewise requires the relocatable interpreter supplied at
+`/opt/hctl/runtimes/python`; hctl refuses to present an arbitrary system Python
+installation as a portable closure.
+
 An agent with `channels/discord.md` can run as a conversational Discord Gateway
 bot without a public listener or tunnel. Enroll an existing bot once, then run
 the agent:

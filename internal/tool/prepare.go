@@ -36,11 +36,22 @@ const (
 )
 
 type preparedRuntime struct {
-	Deno string `json:"deno,omitempty"`
-	UV   string `json:"uv,omitempty"`
+	Deno   string `json:"deno,omitempty"`
+	UV     string `json:"uv,omitempty"`
+	Python string `json:"python,omitempty"`
 }
 
 func Prepare(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint string, inventory Inventory) error {
+	return prepare(ctx, sourceRoot, workspaceRoot, sourceFingerprint, inventory, nil)
+}
+
+// PrepareStaged validates and prepares tools with a credential-free child
+// environment rooted at buildHome.
+func PrepareStaged(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint string, inventory Inventory, buildHome string) error {
+	return prepare(ctx, sourceRoot, workspaceRoot, sourceFingerprint, inventory, secureenv.Staging(buildHome))
+}
+
+func prepare(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint string, inventory Inventory, baseEnvironment []string) error {
 	if len(inventory.Sources) == 0 {
 		return nil
 	}
@@ -62,7 +73,7 @@ func Prepare(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint s
 				args = append(args, filepath.Join(sourceRoot, filepath.FromSlash(file.Path)))
 			}
 		}
-		environment := environmentWith("DENO_DIR", filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/deno-dir")))
+		environment := environmentWith(baseEnvironment, "DENO_DIR", filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/deno-dir")))
 		if err := runNativeEnvironment(ctx, workspaceRoot, "Deno tool check", environment, deno, args...); err != nil {
 			return err
 		}
@@ -77,13 +88,13 @@ func Prepare(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint s
 			return err
 		}
 		prepared.UV = uv
-		environment := environmentWith("UV_PROJECT_ENVIRONMENT", filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/python-venv")))
+		environment := environmentWith(baseEnvironment, "UV_PROJECT_ENVIRONMENT", filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/python-venv")))
 		if err := runNativeEnvironment(ctx, workspaceRoot, "Python tool sync", environment, uv, "sync", "--locked", "--project", sourceRoot); err != nil {
 			return err
 		}
 	}
 	if hasLanguage(inventory, Go) {
-		if _, err := prepareGo(ctx, sourceRoot, workspaceRoot, sourceFingerprint, inventory); err != nil {
+		if _, err := prepareGo(ctx, sourceRoot, workspaceRoot, sourceFingerprint, inventory, baseEnvironment); err != nil {
 			return err
 		}
 	}
@@ -94,7 +105,7 @@ func Prepare(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint s
 	if err := rootfs.WriteAtomic(workspaceRoot, cache+"/executables.json", append(receipt, '\n'), 0o600); err != nil {
 		return err
 	}
-	runtime, err := Open(ctx, sourceRoot, workspaceRoot, sourceFingerprint, inventory)
+	runtime, err := open(ctx, sourceRoot, workspaceRoot, sourceFingerprint, inventory, baseEnvironment)
 	if err != nil {
 		return err
 	}
@@ -102,7 +113,7 @@ func Prepare(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint s
 	return nil
 }
 
-func prepareGo(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint string, inventory Inventory) (string, error) {
+func prepareGo(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint string, inventory Inventory, baseEnvironment []string) (string, error) {
 	cache := cacheRelative(sourceFingerprint) + "/go"
 	binary := filepath.Join(workspaceRoot, filepath.FromSlash(cache+"/host"))
 	if info, err := os.Lstat(binary); err == nil {
@@ -118,7 +129,7 @@ func prepareGo(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint
 	if err != nil {
 		return "", err
 	}
-	moduleBytes, err := runNativeOutput(ctx, sourceRoot, "Go module inspection", goExecutable, "list", "-m", "-f={{.Path}}")
+	moduleBytes, err := runNativeOutput(ctx, sourceRoot, "Go module inspection", baseEnvironment, goExecutable, "list", "-m", "-f={{.Path}}")
 	if err != nil {
 		return "", err
 	}
@@ -140,20 +151,24 @@ func prepareGo(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint
 	sort.Strings(imports)
 	mainSource := strings.ReplaceAll(string(goHostTemplate), "{{IMPORTS}}", strings.Join(imports, "\n"))
 	mainSource = strings.ReplaceAll(mainSource, "{{TOOLS}}", strings.Join(registrations, "\n"))
-	goMod := fmt.Sprintf("module hctl.local/tool-host\n\ngo 1.24.0\n\nrequire (\n\tgithub.com/invopop/jsonschema %s\n\tgithub.com/santhosh-tekuri/jsonschema/v6 %s\n\t%s %s\n)\n\nreplace %s => %s\n", goSchemaVersion, goValidateVersion, module, localModuleVersion(module), module, strconv.Quote(sourceRoot))
+	cacheDirectory := filepath.Join(workspaceRoot, filepath.FromSlash(cache))
+	relativeSource, err := filepath.Rel(cacheDirectory, sourceRoot)
+	if err != nil || filepath.IsAbs(relativeSource) {
+		return "", errors.New("cannot describe Go tool source from build cache")
+	}
+	goMod := fmt.Sprintf("module hctl.local/tool-host\n\ngo 1.24.0\n\nrequire (\n\tgithub.com/invopop/jsonschema %s\n\tgithub.com/santhosh-tekuri/jsonschema/v6 %s\n\t%s %s\n)\n\nreplace %s => %s\n", goSchemaVersion, goValidateVersion, module, localModuleVersion(module), module, strconv.Quote(filepath.ToSlash(relativeSource)))
 	if err := rootfs.WriteAtomic(workspaceRoot, cache+"/main.go", []byte(mainSource), 0o644); err != nil {
 		return "", err
 	}
 	if err := rootfs.WriteAtomic(workspaceRoot, cache+"/go.mod", []byte(goMod), 0o644); err != nil {
 		return "", err
 	}
-	cacheDirectory := filepath.Join(workspaceRoot, filepath.FromSlash(cache))
 	if info, err := os.Lstat(filepath.Join(cacheDirectory, "go.sum")); err == nil && !info.Mode().IsRegular() {
 		return "", errors.New("cached Go tool go.sum must be a regular file")
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", errors.New("cannot inspect cached Go tool go.sum")
 	}
-	if err := runNative(ctx, cacheDirectory, "Go tool dependency sync", goExecutable, "mod", "tidy"); err != nil {
+	if err := runNative(ctx, cacheDirectory, "Go tool dependency sync", baseEnvironment, goExecutable, "mod", "tidy"); err != nil {
 		return "", err
 	}
 	temporary, err := os.CreateTemp(cacheDirectory, ".host-*")
@@ -165,7 +180,7 @@ func prepareGo(ctx context.Context, sourceRoot, workspaceRoot, sourceFingerprint
 		return "", errors.New("cannot stage Go tool host")
 	}
 	defer func() { _ = os.Remove(temporaryPath) }()
-	if err := runNative(ctx, cacheDirectory, "Go tool build", goExecutable, "build", "-mod=readonly", "-o", temporaryPath, "."); err != nil {
+	if err := runNative(ctx, cacheDirectory, "Go tool build", baseEnvironment, goExecutable, "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-ldflags=-buildid=", "-o", temporaryPath, "."); err != nil {
 		return "", err
 	}
 	if err := os.Chmod(temporaryPath, 0o755); err != nil {
@@ -210,8 +225,8 @@ func executable(name string) (string, error) {
 	return resolved, nil
 }
 
-func runNative(ctx context.Context, directory, label, executable string, arguments ...string) error {
-	_, err := runNativeOutput(ctx, directory, label, executable, arguments...)
+func runNative(ctx context.Context, directory, label string, environment []string, executable string, arguments ...string) error {
+	_, err := runNativeOutput(ctx, directory, label, environment, executable, arguments...)
 	return err
 }
 
@@ -231,14 +246,20 @@ func runNativeEnvironment(ctx context.Context, directory, label string, environm
 	return nil
 }
 
-func environmentWith(key, value string) []string {
-	return secureenv.With(key, value)
+func environmentWith(base []string, key, value string) []string {
+	if base == nil {
+		return secureenv.With(key, value)
+	}
+	return secureenv.Replace(base, map[string]string{key: value})
 }
 
-func runNativeOutput(ctx context.Context, directory, label, executable string, arguments ...string) ([]byte, error) {
+func runNativeOutput(ctx context.Context, directory, label string, environment []string, executable string, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, executable, arguments...)
 	command.Dir = directory
-	command.Env = secureenv.Child()
+	command.Env = environment
+	if environment == nil {
+		command.Env = secureenv.Child()
+	}
 	output := &boundedBuffer{remaining: 64 << 10}
 	command.Stdout = output
 	command.Stderr = output

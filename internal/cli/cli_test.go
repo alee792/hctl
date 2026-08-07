@@ -32,6 +32,37 @@ func TestHeadlessCommandIsNamedRun(t *testing.T) {
 	}
 }
 
+func TestStageCreatesRunnableToolFreeFilesystem(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "sample-agent")
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	bin := t.TempDir()
+	harness := filepath.Join(bin, "codex")
+	self := filepath.Join(bin, "hctl")
+	writeCLIFile(t, harness, "#!/bin/sh\necho 'codex-cli 0.144.1'\n", 0o755)
+	writeCLIFile(t, self, "#!/bin/sh\nexit 0\n", 0o755)
+	outputPath := filepath.Join(t.TempDir(), "artifact")
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"stage", source, "--harness", "codex", "--command", harness, "--output", outputPath}, strings.NewReader(""), &output, &stderr, self); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "staged agent=sample-agent") || !strings.Contains(got, "runtimes=none") {
+		t.Fatalf("stage output = %q", got)
+	}
+	for _, path := range []string{
+		"opt/hctl/artifact.json",
+		"opt/hctl/bin/hctl",
+		"opt/hctl/bin/agent-entrypoint",
+		"opt/hctl/harness/bin/codex",
+		"opt/hctl/agents/sample-agent/instructions.md",
+		"workspace/.codex/config.toml",
+		"workspace/.hctl/apply/codex.json",
+	} {
+		if _, err := os.Stat(filepath.Join(outputPath, filepath.FromSlash(path))); err != nil {
+			t.Fatalf("staged %s: %v", path, err)
+		}
+	}
+}
+
 func TestClaudeDeferredHookCommandFailsClosedWithExitZeroResult(t *testing.T) {
 	for _, input := range []string{"not-json", `{}`, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"toolu_x","tool_input":{}}`} {
 		var output, stderr bytes.Buffer

@@ -766,7 +766,7 @@ matching workspace apply record, selected agent identity, and source
 fingerprint before loading the cached hosts. Authors write typed functions and
 do not implement MCP protocol code.
 
-## Deferred direction: staged agent filesystems
+## Staged agent filesystems
 
 Publish one Codex hctl harness image and one Claude hctl harness image. Each
 contains the matching hctl release, one pinned native harness, and all supported
@@ -774,7 +774,7 @@ authored-tool build and execution inputs. Users may copy in an agent, run
 `apply`, and ship that larger derived image directly. That is a supported
 journey, not an accidental intermediate image.
 
-For users who want a smaller image, a future `hctl stage` command prepares one
+For users who want a smaller image, `hctl stage` prepares one
 complete runnable filesystem tree at canonical final paths. An ordinary
 two-stage OCI build copies that tree onto the harness image's documented
 compatible base. Hctl owns preparation and verification of the filesystem; it
@@ -787,26 +787,46 @@ COPY . /agent
 RUN hctl stage /agent --harness codex --output /out
 
 FROM DOCUMENTED_COMPATIBLE_BASE
-COPY --from=build /out/ /
+COPY --from=build /out/opt/ /opt/
+COPY --from=build --chown=65532:65532 /out/workspace/ /workspace/
+COPY --from=build --chown=65532:65532 /out/home/hctl/ /home/hctl/
+USER 65532:65532
 ENTRYPOINT ["/opt/hctl/bin/agent-entrypoint"]
 ```
 
 The staged tree contains hctl, the selected harness, immutable agent source,
-generated workspace setup and apply record, an entrypoint, and an artifact
-manifest. It carries only the union of execution requirements discovered from
-the agent's tools: Deno for TypeScript, Python and uv for Python, and compiled
-Go hosts plus required shared libraries for Go. Tool-free agents carry none of
-those runtimes. Build-only compilers, unused runtimes, module and download
-caches, and temporary inspection output are excluded.
+generated workspace setup and apply record, an empty writable harness home,
+an entrypoint, and an artifact manifest. It carries only the union of execution
+requirements discovered from the agent's tools: Deno for TypeScript, Python
+and uv for Python, and compiled Go hosts plus required shared libraries for Go.
+Tool-free agents carry none of those runtimes. Build-only compilers, unused
+runtimes, module and download caches, and temporary inspection output are
+excluded.
 
 The artifact manifest records the generator and harness versions, agent and
 source identity, target OS, architecture and ABI, compatible base, required
 runtimes, canonical paths, and hashes, modes, and intended ownership for staged
 files. Generated configuration and executable receipts name final paths rather
-than build-stage paths. The compatible-base contract fixes required native
-facilities, non-root identity, writable runtime paths, and ABI; a glibc payload
+than build-stage paths. It also records directory modes and intended ownership.
+The compatible-base contract fixes required native facilities, UID/GID 65532,
+writable `/workspace` and `/home/hctl`, and ABI; a glibc payload
 is not portable to Alpine without a corresponding musl-compatible harness
 image.
+
+Staging requires a new output directory outside the selected source and
+workspace. It re-reads every fingerprinted source, rejects symlinks and
+collisions, prepares and protocol-inspects tools in a temporary sibling, strips
+build-only Deno, Python, and Go state, verifies that preparation did not mutate
+authored source, and publishes with one rename only after the manifest is
+complete. Repeating the operation with identical source and pinned inputs
+produces the same file contents and manifest. The entrypoint verifies the exact
+runtime identity, harness setup, and source fingerprint before a turn and
+refuses to run as an identity other than UID/GID 65532.
+
+The Python interpreter must already be installed at the canonical
+`/opt/hctl/runtimes/python` prefix by the pinned harness image. Staging rejects
+an arbitrary system interpreter instead of copying a binary whose loader,
+standard library, or virtual environment still binds it to its old prefix.
 
 Credentials, native harness login state, user trust decisions, channel runtime
 profiles, dispatch state, sessions, logs, registry credentials, signing

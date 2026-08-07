@@ -34,7 +34,7 @@ func TestHostCommandUsesPreparedExecutableWithoutPATH(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", "")
-	command, _, _, err := hostCommand(source, workspace, fingerprint, preparedRuntime{Deno: deno}, TypeScript)
+	command, _, _, err := hostCommand(source, workspace, fingerprint, preparedRuntime{Deno: deno}, TypeScript, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

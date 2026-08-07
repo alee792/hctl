@@ -33,10 +33,10 @@ import (
 
 	"hctl/internal/rootfs"
 	"hctl/internal/tool"
+	"hctl/internal/version"
 )
 
 const (
-	GeneratorVersion      = "hctl/0.9.0-dev"
 	maxSourceBytes        = 128 << 10
 	maxSkills             = 8
 	maxPlugins            = 32
@@ -55,6 +55,8 @@ const (
 	maxSubagents          = 8
 	echoMaxInputBytes     = 1024
 )
+
+var GeneratorVersion = "hctl/" + version.Value
 
 var (
 	portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)

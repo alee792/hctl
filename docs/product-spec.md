@@ -26,6 +26,10 @@ dependency environments remain disposable workspace-local caches. Another
 machine installs its needed native runtimes and reruns `apply`; it does not
 reuse a copied `.hctl/cache/` directory.
 
+That remains the local installation contract. ADR 0027 separately defines a
+canonical staged filesystem for downstream OCI builds; it does not make raw
+workspace caches relocatable or introduce a general `hctl package` command.
+
 ## User and job
 
 The primary user is an agent author who understands basic files and directories
@@ -762,6 +766,55 @@ matching workspace apply record, selected agent identity, and source
 fingerprint before loading the cached hosts. Authors write typed functions and
 do not implement MCP protocol code.
 
+## Deferred direction: staged agent filesystems
+
+Publish one Codex hctl harness image and one Claude hctl harness image. Each
+contains the matching hctl release, one pinned native harness, and all supported
+authored-tool build and execution inputs. Users may copy in an agent, run
+`apply`, and ship that larger derived image directly. That is a supported
+journey, not an accidental intermediate image.
+
+For users who want a smaller image, a future `hctl stage` command prepares one
+complete runnable filesystem tree at canonical final paths. An ordinary
+two-stage OCI build copies that tree onto the harness image's documented
+compatible base. Hctl owns preparation and verification of the filesystem; it
+does not construct OCI manifests or layers, contact registries, publish, sign,
+deploy, or operate images.
+
+```dockerfile
+FROM ghcr.io/alee792/hctl/codex:VERSION AS build
+COPY . /agent
+RUN hctl stage /agent --harness codex --output /out
+
+FROM DOCUMENTED_COMPATIBLE_BASE
+COPY --from=build /out/ /
+ENTRYPOINT ["/opt/hctl/bin/agent-entrypoint"]
+```
+
+The staged tree contains hctl, the selected harness, immutable agent source,
+generated workspace setup and apply record, an entrypoint, and an artifact
+manifest. It carries only the union of execution requirements discovered from
+the agent's tools: Deno for TypeScript, Python and uv for Python, and compiled
+Go hosts plus required shared libraries for Go. Tool-free agents carry none of
+those runtimes. Build-only compilers, unused runtimes, module and download
+caches, and temporary inspection output are excluded.
+
+The artifact manifest records the generator and harness versions, agent and
+source identity, target OS, architecture and ABI, compatible base, required
+runtimes, canonical paths, and hashes, modes, and intended ownership for staged
+files. Generated configuration and executable receipts name final paths rather
+than build-stage paths. The compatible-base contract fixes required native
+facilities, non-root identity, writable runtime paths, and ABI; a glibc payload
+is not portable to Alpine without a corresponding musl-compatible harness
+image.
+
+Credentials, native harness login state, user trust decisions, channel runtime
+profiles, dispatch state, sessions, logs, registry credentials, signing
+material, and deployment configuration remain outside the staged tree. The
+selected harness continues to own model calls, native tools, approvals, and
+sandbox behavior. Publishing a harness image also requires current permission
+to redistribute that harness; ADR 0027 grants no such permission.
+
 ## Deferred direction: proposals
 
 Scripts created ad hoc by the agent remain ordinary harness-native workspace
@@ -897,7 +950,8 @@ The MVP is complete when credential-free tests prove:
 - Claude Agent SDK or hosted OpenAI agent runtimes
 - Background or distributed schedule clocks, workflows, independently
   configured nested subagents, or deployment orchestration
-- Building or deploying packaged agent images
+- Building OCI manifests or layers, publishing or signing images, deployment
+  orchestration, or hosted image operation
 - Governance claims over native harness tools
 - Hosted secret managers and model-visible secret-bearing managed operations
 - Automatic or unreviewed promotion of agent-authored improvements

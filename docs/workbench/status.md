@@ -243,9 +243,10 @@ These are later product promises, not MVP implementation work:
 - Slack, generic webhooks, OAuth, public-listener management, proactive vendor
   delivery, scheduling, deployment integrations, and a hosted SDK remain
   outside the current MVP.
-- A later deployment path may compose a harness, an agent project, and hctl in
-  an image. This is a packaging and operations layer over the same portable
-  source contract, not a reason to couple source to its storage repository.
+- ADR 0027 defines the later deployment seam: a Codex- or Claude-specific hctl
+  harness image may be used directly, or may selectively stage one agent's
+  runnable filesystem for an existing OCI builder. Hctl does not own image
+  construction, publication, signing, deployment, or operation.
 - A future post-run summary may include the parent outcome and child activity
   when a harness exposes stable runtime IDs. It should reference native harness
   logs rather than duplicate transcripts, and remain optional observability
@@ -260,7 +261,9 @@ structural source APIs, graceful per-call cancellation and host restart,
 concurrent calls, richer local imports, and cache cleanup. HCTL-001 selected
 and HCTL-002 implemented a versioned `darwin-arm64` release archive for first
 installation; it deliberately leaves a relocatable package command out until a
-concrete need demonstrates one.
+concrete need demonstrates one. ADR 0027 answers the concrete OCI distribution
+need with a bounded staged-filesystem contract, while retaining no general
+package command and no portability claim for raw workspace caches.
 
 Product naming, the concrete secretless-broker backend, and proposal review UX
 are also intentionally unresolved.
@@ -284,11 +287,13 @@ uncertain result with a distinct deadline reason, and does not prevent a later
 occurrence from opening a fresh session. HCTL-015 now adds the foreground UTC
 clock with shared state ownership, bounded concurrency, no backfill, stable
 occurrence identity, overlap skipping, runtime locking, and graceful drain.
-Portable sandbox and image/runtime authoring are deferred: the native harnesses
-do not expose equivalent sandbox contracts, native lockfiles already cover
-authored-tool runtimes, and hctl does not own deployment. Do not implement
-proposal capture, image deployment, sandbox source, or broker code merely to
-exercise future seams.
+ADR 0027 now settles the image/runtime boundary: hctl may stage canonical
+agent filesystems and publish pinned harness images, while existing build and
+deployment systems own OCI output and operation. The staging command and image
+publication remain follow-up implementation work. Portable sandbox authoring
+is still deferred because the native harnesses do not expose equivalent
+sandbox contracts. Do not implement proposal capture, image deployment,
+sandbox source, or broker code merely to exercise future seams.
 
 The channel runtime now owns explicit independent managed session lifecycles
 for its configured Discord guild and DM surfaces. Idle lifecycles release their

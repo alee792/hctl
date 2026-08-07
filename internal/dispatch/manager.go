@@ -734,7 +734,11 @@ func (m *Manager) run(worker *managedConversation) {
 			}
 			m.mu.Unlock()
 			return m.emit(worker.conversation, event)
-		}, false, m.turnTimeout, m.idleTimeout, m.timers, policy, m.store, m.capacity, worker.hibernate, worker.wake)
+		}, runOptions{
+			turnTimeout: m.turnTimeout, idleTimeout: m.idleTimeout, timers: m.timers,
+			policy: policy, store: m.store, capacity: m.capacity,
+			forceHibernate: worker.hibernate, wake: worker.wake,
+		})
 	}
 	m.capacity.unregister(worker.conversation)
 	m.mu.Lock()

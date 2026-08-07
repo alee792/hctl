@@ -122,7 +122,12 @@ func TestGeneratedInstructionsContainDiscordParticipationPolicy(t *testing.T) {
 			path = "AGENTS.md"
 		}
 		content := string(generated.Files[path].Content)
-		if !strings.Contains(content, "Participate only in review work.") || !strings.Contains(content, "HCTL_NO_REPLY") || !strings.Contains(content, "HCTL_REQUEST_WRITE_ACCESS") || !strings.Contains(content, "enforced read-only") {
+		for _, required := range []string{"Participate only in review work.", "HCTL_NO_REPLY", "HCTL_REQUEST_WRITE_ACCESS", "enforced read-only", "`channel.request_input` tool is advertised", "proceed without asking", "never fabricate interaction or callback identifiers", "vendor payloads"} {
+			if !strings.Contains(content, required) {
+				t.Fatalf("%s instructions omitted %q: %q", harness, required, content)
+			}
+		}
+		if strings.Contains(content, "discord_components") || strings.Contains(content, "application_id") {
 			t.Fatalf("%s instructions omitted Discord policy: %q", harness, content)
 		}
 	}

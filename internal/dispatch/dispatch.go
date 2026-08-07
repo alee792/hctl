@@ -127,7 +127,7 @@ func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0, 0, nil, harness.PolicyDefault, store, nil, nil, nil)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, runOptions{policy: harness.PolicyDefault, store: store})
 }
 
 // RunSubmissionsWithTurnTimeout drives a long-lived channel conversation while
@@ -143,7 +143,7 @@ func RunSubmissionsWithTurnTimeout(ctx context.Context, p *project.Project, driv
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout, 0, nil, harness.PolicyDefault, store, nil, nil, nil)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, runOptions{turnTimeout: timeout, policy: harness.PolicyDefault, store: store})
 }
 
 // RunTask drives bounded task input while opening a fresh native harness
@@ -160,13 +160,29 @@ func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, con
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0, 0, nil, harness.PolicyDefault, store, nil, nil, nil)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, runOptions{freshSessions: true, policy: harness.PolicyDefault, store: store})
 }
 
-func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout, idleTimeout time.Duration, timers idleTimerFactory, policy harness.ExecutionPolicy, store *conversationStore, capacity *capacityCoordinator, forceHibernate, wake <-chan struct{}) error {
+type runOptions struct {
+	freshSessions  bool
+	turnTimeout    time.Duration
+	idleTimeout    time.Duration
+	timers         idleTimerFactory
+	policy         harness.ExecutionPolicy
+	store          *conversationStore
+	capacity       *capacityCoordinator
+	forceHibernate <-chan struct{}
+	wake           <-chan struct{}
+	requestInputs  RequestInputHandler
+}
+
+func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, options runOptions) error {
 	if err := validateDispatch(conversationID, emit); err != nil {
 		return err
 	}
+	freshSessions, turnTimeout, idleTimeout := options.freshSessions, options.turnTimeout, options.idleTimeout
+	timers, policy, store := options.timers, options.policy, options.store
+	capacity, forceHibernate, wake, requestInputs := options.capacity, options.forceHibernate, options.wake, options.requestInputs
 	ref := conversationRef{agentID: p.AgentID, harness: driver.Name(), id: conversationID, fingerprint: p.SourceFingerprint}
 	sink := &eventSink{emitEvent: emit, next: 1, harness: driver.Name(), conversation: conversationID}
 	uncertain, recoveredSessionID, err := store.recover(ref)
@@ -415,6 +431,12 @@ dispatchLoop:
 				return errors.New("received a harness event without an active input")
 			}
 			if message.event != nil {
+				if message.event.RequestInput != nil {
+					// The coordinator commit occurs on this serialized loop before
+					// the harness-side bridge receives its acknowledgement.
+					_ = handleRequestInput(ctx, requestInputs, conversationID, active.ID, message.event.RequestInput)
+					continue
+				}
 				if message.event.SessionID != "" {
 					if err := store.setSessionID(ref, message.event.SessionID); err != nil {
 						return err

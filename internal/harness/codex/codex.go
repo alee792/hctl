@@ -354,15 +354,16 @@ func (s *session) handleDynamicTool(ctx context.Context, message rpcEnvelope, tu
 		Tool      string          `json:"tool"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
-	valid := s.managedRequestInput && json.Unmarshal(message.Params, &params) == nil && params.ThreadID == s.sessionID && params.TurnID == turnID && params.CallID != "" && params.Namespace == requestInputNamespace && params.Tool == requestInputTool
-	var request interaction.Request
-	if valid {
-		var err error
-		request, err = interaction.DecodeRequest(params.Arguments)
-		valid = err == nil
-	}
-	if !valid {
+	available := s.managedRequestInput && json.Unmarshal(message.Params, &params) == nil && params.ThreadID == s.sessionID && params.TurnID == turnID && params.CallID != "" && params.Namespace == requestInputNamespace && params.Tool == requestInputTool
+	if !available {
 		return s.client.respondDynamicTool(message.ID, false, "interactive input is unavailable in this session")
+	}
+	request, err := interaction.DecodeRequest(params.Arguments)
+	if err != nil {
+		// The model needs to know that it can retry the managed tool with a
+		// corrected semantic request. Do not collapse contract failures into
+		// provenance or session unavailability, and do not echo invalid input.
+		return s.client.respondDynamicTool(message.ID, false, "interactive input request is invalid")
 	}
 	reply := make(chan harness.RequestInputAcknowledgement, 1)
 	emit(harness.Event{RequestInput: harness.NewRootRequestInputEvent(params.CallID, request, reply)})

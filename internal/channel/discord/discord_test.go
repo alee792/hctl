@@ -540,6 +540,102 @@ func TestDiscordFallbackStopsAfterAmbiguousPartialDelivery(t *testing.T) {
 	}
 }
 
+func TestDiscordRestartRendersPersistedRequestExactlyOnce(t *testing.T) {
+	root := discordAcceptanceProject(t)
+	p, err := project.Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := channelconfig.Profile{ApplicationID: "111", BotUserID: "222", AllowedUserID: "333", AllowedGuildID: "444", AllowedChannelID: "555"}
+	conversation := conversationID(profile.ApplicationID, profile.AllowedChannelID)
+	ownerRuntime := &Runtime{config: Config{Runtime: profile}}
+	state, err := session.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable, err := state.GetOrCreate(p.AgentID, "codex", conversation, p.SourceFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable.SessionID = "thread-1"
+	durable.Queue = []session.Input{{ID: "message-1", Text: "origin", Status: "parked"}}
+	durable.Interaction = &interaction.Lifecycle{
+		ID: "interaction_0123456789abcdef0123456789abcdef", InputID: "message-1", Owner: ownerRuntime.Owner("555"),
+		Request: discordConfirmRequest(), Resolution: interaction.Resolution{Mode: interaction.RenderNative},
+		ExpiresAt: time.Now().UTC().Truncate(time.Second).Add(time.Hour), Continuation: interaction.ContinuationTurn,
+		Phase: interaction.PhaseRequested, Delivery: interaction.DeliveryPending,
+	}
+	if err := session.Save(root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	start := func() (*Runtime, chan *discordgo.MessageSend) {
+		runtime, err := New(p, &recoveryContinuationDriver{}, Config{
+			Executable: "/usr/bin/true", TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResident: 1, MaxActive: 1, Runtime: profile,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := runtime.startController(); err != nil {
+			t.Fatal(err)
+		}
+		delivered := make(chan *discordgo.MessageSend, 2)
+		runtime.deliver = func(_ string, message *discordgo.MessageSend) error { delivered <- message; return nil }
+		runtime.recoverSurface("555")
+		return runtime, delivered
+	}
+
+	first, firstDeliveries := start()
+	select {
+	case message := <-firstDeliveries:
+		if message.Content != "Deploy?" || message.Reference == nil || message.Reference.MessageID != "message-1" || len(message.Components) == 0 || message.AllowedMentions == nil || len(message.AllowedMentions.Parse) != 0 {
+			t.Fatalf("recovered render = %#v", message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("persisted request was not rendered after restart")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		persisted, loadErr := session.Load(root)
+		var current *session.Conversation
+		if loadErr == nil {
+			current = acceptanceConversation(persisted, conversation)
+		}
+		if loadErr == nil && current != nil && current.Interaction != nil && current.Interaction.Phase == interaction.PhaseRendered && current.Interaction.Delivery == interaction.DeliveryDelivered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("render completion was not persisted: %#v, %v", current, loadErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	first.Close()
+	persisted, err := session.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterFirst := acceptanceConversation(persisted, conversation)
+	if afterFirst == nil || afterFirst.Interaction == nil || afterFirst.Interaction.Phase != interaction.PhaseRendered || afterFirst.Interaction.Delivery != interaction.DeliveryDelivered {
+		t.Fatalf("rendered lifecycle = %#v", afterFirst)
+	}
+
+	second, secondDeliveries := start()
+	defer second.Close()
+	select {
+	case duplicate := <-secondDeliveries:
+		t.Fatalf("rendered interaction was duplicated after restart: %#v", duplicate)
+	case <-time.After(150 * time.Millisecond):
+	}
+	afterSecondState, err := session.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterSecond := acceptanceConversation(afterSecondState, conversation)
+	if afterSecond == nil || afterSecond.Interaction == nil || afterSecond.Interaction.Phase != interaction.PhaseRendered || afterSecond.Interaction.Delivery != interaction.DeliveryDelivered {
+		t.Fatalf("second recovery changed lifecycle = %#v", afterSecond)
+	}
+}
+
 func TestDiscordRestartReattachesGuildTargetBeforeRecoveredContinuation(t *testing.T) {
 	root := discordAcceptanceProject(t)
 	p, err := project.Load(root, "codex")
@@ -747,6 +843,45 @@ func TestDiscordFallbackReplyBypassesOrdinaryFIFO(t *testing.T) {
 	runtime.handleMessage(nil, &stale)
 	if len(fake.inputs) != 0 || len(fake.attempts) != 1 {
 		t.Fatalf("stale fallback was not ignored safely: inputs=%d attempts=%d", len(fake.inputs), len(fake.attempts))
+	}
+}
+
+func TestDiscordInvalidFallbackReplyGetsBoundedCorrectionAndRemainsPending(t *testing.T) {
+	fake := newFakeChannelController()
+	runtime := testRuntime(fake)
+	request := discordConfirmRequest()
+	fake.pending = discordPending(runtime, request, interaction.RenderTextFallback)
+	fake.pending.Resolution.FallbackText = request.FallbackText
+	fake.hasPending = true
+	var correction *discordgo.MessageSend
+	runtime.deliver = func(_ string, message *discordgo.MessageSend) error { correction = message; return nil }
+	incoming := &discordgo.MessageCreate{Message: &discordgo.Message{
+		ID: "invalid-answer", Content: "maybe", ChannelID: "555", GuildID: "444", Author: &discordgo.User{ID: "333"},
+		ReferencedMessage: &discordgo.Message{Author: &discordgo.User{ID: "222", Bot: true}, Content: "Please confirm.\n\n[hctl request " + interactionHandle(fake.pending.InteractionID) + "]"},
+	}}
+	runtime.handleMessage(nil, incoming)
+	if len(fake.inputs) != 0 || len(fake.attempts) != 0 || !fake.hasPending {
+		t.Fatalf("invalid fallback entered dispatcher inputs=%d attempts=%d pending=%v", len(fake.inputs), len(fake.attempts), fake.hasPending)
+	}
+	if correction == nil || correction.Content != "That answer doesn't match the requested format. Reply again using the shown format." || correction.Reference == nil || correction.Reference.MessageID != "invalid-answer" || correction.AllowedMentions == nil || len(correction.AllowedMentions.Parse) != 0 {
+		t.Fatalf("fallback correction = %#v", correction)
+	}
+}
+
+func TestDiscordCancellationAcknowledgementIsExplicit(t *testing.T) {
+	fake := newFakeChannelController()
+	fake.acceptDisposition = interaction.AnswerCancelled
+	runtime := testRuntime(fake)
+	fake.pending = discordPending(runtime, discordConfirmRequest(), interaction.RenderNative)
+	fake.hasPending = true
+	var acknowledgement string
+	runtime.respondNative = func(_ *discordgo.Interaction, response *discordgo.InteractionResponse) error {
+		acknowledgement = response.Data.Content
+		return nil
+	}
+	runtime.handleInteraction(nil, componentInteraction(customID(fake.pending.InteractionID, "x"), discordgo.ButtonComponent))
+	if acknowledgement != "Request cancelled." || len(fake.attempts) != 1 || fake.attempts[0].Answer.Action != interaction.ActionCancel || slices.Contains(fake.order, "continue") {
+		t.Fatalf("cancel acknowledgement=%q attempts=%#v order=%v", acknowledgement, fake.attempts, fake.order)
 	}
 }
 

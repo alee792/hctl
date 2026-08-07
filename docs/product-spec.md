@@ -366,7 +366,9 @@ lines, and exact allowed cancellation. A freeform choice is exactly
 `1,2;other=TEXT`. The freeform value counts as one selection, including an
 explicit empty `other=` when the field permits zero-length text. A fallback
 reply must correlate to the current bot request and enters answer acceptance
-rather than ordinary input.
+rather than ordinary input. Invalid correlated fallback replies remain pending
+and receive one bounded, mention-disabled format correction. A successful
+native cancellation receives an explicit cancellation acknowledgement.
 
 The renderer command is deliberately narrower than the controller's pending
 interaction snapshot. Expiry, continuation mode, and lifecycle phase support
@@ -414,8 +416,11 @@ cancellation, or expiry but before in-memory notification.
 Waiting is parking rather than blocking: no live model turn, tool callback,
 channel request, resident harness process, or active-turn grant remains held.
 The pending request blocks later queued inputs for its conversation while other
-conversations continue through shared capacity. Reset rejects a nonterminal
-request, worktree reconciliation treats it as busy, and resume uncertainty also
+conversations continue through shared capacity. A later ordinary message on
+that surface is not silently discarded or added behind the parked origin: it
+receives one bounded, mention-disabled busy response referencing that message.
+Reset rejects a nonterminal request, worktree reconciliation treats it as busy,
+and resume uncertainty also
 prevents automatic worktree retirement. Status and audit expose only
 `waiting_for_input` plus existing bounded aggregate queue and capacity state,
 never prompts, answers, identifiers, continuation keys, paths, configuration,

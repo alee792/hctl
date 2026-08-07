@@ -80,7 +80,11 @@ experimental app-server dynamic namespace tool with exact root thread/turn
 provenance, followed after answer acceptance by `thread/resume` and a new
 `turn/start` carrying a bounded controller-owned answer envelope. The original
 tool call is not suspended, and neither a process nor active-turn grant is held
-while waiting. Claude implements the former through an exact root-only
+while waiting. Its model-facing schema is discriminated by semantic request
+kind and requires the same kind-specific constraints enforced by runtime
+validation; malformed semantic calls receive a safe retryable `invalid` result
+distinct from session or root-provenance unavailability. Claude implements the
+former through an exact root-only
 `PreToolUse` matcher, a short-lived owner-only broker, and the same generic
 restart/capacity scheduler; known session loss fails deterministically and
 ambiguous execution is not retried. Exact single-use defer receipts prove the
@@ -97,8 +101,17 @@ app-server thread and turn provenance, so a propagated subagent call fails
 before persistence. Harness strategies own the bounded result disposition, and
 audit correlation excludes semantic request bytes. Harnesses opt into their
 native strategy only when a handler exists. The live Discord runtime now binds
-that handler to its renderer and deterministic text fallback codec;
-credentialed acceptance remains issue #25 and is not claimed here.
+that handler to its renderer and deterministic text fallback codec.
+Credential-free stitched acceptance drives fake Discord I/O through the real
+controller, dispatcher, and Claude/Codex process adapters: both harness
+processes exit while parked with zero resident or active capacity, then an
+authorized native callback resumes the exact Claude deferred call or a new
+turn in the same Codex thread and produces one final referenced response. That
+pass exposed and fixed a canonical JSON ordering defect in Claude's hook-to-MCP
+replay. Fixture-driven tests also prove equivalent normalized native and text
+fallback answers, including deterministic date/time and mixed-form degradation.
+Credentialed interactive acceptance is recorded separately and is never
+inferred from these fake processes.
 
 The [credential-free clean-install check](../../spikes/clean-install/README.md)
 creates a disposable exact-tagged `darwin-arm64` release archive, verifies its

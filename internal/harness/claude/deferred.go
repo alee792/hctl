@@ -86,6 +86,18 @@ func BuildDeferredUpdatedInput(request interaction.Request, answer interaction.A
 	if err != nil || len(updated) > interaction.MaxRequestBytes+interaction.MaxAnswerBytes+4096 {
 		return nil, "", errors.New("claude deferred updated input exceeds its bound")
 	}
+	// The hook protocol carries updatedInput as a JSON value, so Claude will
+	// serialize it again before invoking MCP. Canonicalize every nested object
+	// now to make the broker's strict comparison stable across that exact
+	// hook-to-tool round trip.
+	var canonical any
+	if json.Unmarshal(updated, &canonical) != nil {
+		return nil, "", errors.New("cannot canonicalize Claude deferred input")
+	}
+	updated, err = json.Marshal(canonical)
+	if err != nil || len(updated) > interaction.MaxRequestBytes+interaction.MaxAnswerBytes+4096 {
+		return nil, "", errors.New("claude deferred updated input exceeds its bound")
+	}
 	return updated, digest, nil
 }
 
@@ -106,11 +118,11 @@ func decodeDeferredToolResult(arguments []byte, resume deferredResumeEnvelope) (
 	if resume.ToolName != ManagedRequestInputTool || !validToolUseID(resume.ToolUseID) {
 		return zero, errors.New("claude deferred resume state is invalid")
 	}
-	actual, err := compactJSON(arguments)
+	actual, err := canonicalStrictJSON(arguments)
 	if err != nil {
 		return zero, errors.New("claude deferred result input is invalid")
 	}
-	expected, err := compactJSON(resume.UpdatedInput)
+	expected, err := canonicalStrictJSON(resume.UpdatedInput)
 	if err != nil || !bytes.Equal(actual, expected) {
 		return zero, errors.New("claude deferred result did not match the allowed tool call")
 	}
@@ -149,12 +161,72 @@ func decodeDeferredToolResult(arguments []byte, resume deferredResumeEnvelope) (
 	return normalized, nil
 }
 
-func compactJSON(value []byte) ([]byte, error) {
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, value); err != nil {
+func canonicalStrictJSON(value []byte) ([]byte, error) {
+	if len(value) == 0 || len(value) > interaction.MaxRequestBytes+interaction.MaxAnswerBytes+4096 || !utf8.Valid(value) {
+		return nil, errors.New("JSON value is outside its bound")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	decoder.UseNumber()
+	var walk func(int) error
+	walk = func(depth int) error {
+		if depth > 64 {
+			return errors.New("JSON nesting exceeds its bound")
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delimiter, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delimiter {
+		case '{':
+			seen := map[string]struct{}{}
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return errors.New("JSON object key is invalid")
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return errors.New("JSON object key is duplicated")
+				}
+				seen[key] = struct{}{}
+				if err := walk(depth + 1); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		case '[':
+			for decoder.More() {
+				if err := walk(depth + 1); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		default:
+			return errors.New("JSON delimiter is invalid")
+		}
+	}
+	if err := walk(0); err != nil {
 		return nil, err
 	}
-	return compact.Bytes(), nil
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("multiple JSON values are not allowed")
+	}
+	var decoded any
+	canonicalDecoder := json.NewDecoder(bytes.NewReader(value))
+	canonicalDecoder.UseNumber()
+	if err := canonicalDecoder.Decode(&decoded); err != nil {
+		return nil, err
+	}
+	return json.Marshal(decoded)
 }
 
 // RunDeferredHook implements the narrowly matched PreToolUse command hook.

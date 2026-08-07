@@ -293,7 +293,9 @@ func (r *Runtime) handleMessage(_ *discordgo.Session, incoming *discordgo.Messag
 	conversation := conversationID(r.config.Runtime.ApplicationID, incoming.ChannelID)
 	if pending, ok, _ := r.controller.PendingInteraction(incoming.ChannelID, conversation); ok {
 		r.rememberTarget(pending.InputID, replyTarget{channelID: incoming.ChannelID, messageID: pending.InputID})
-		_, _ = r.controller.RenderInteraction(incoming.ChannelID, conversation)
+		_ = r.Deliver(controller.Outcome{
+			InputID: incoming.ID, Target: replyTarget{channelID: incoming.ChannelID, messageID: incoming.ID}, Failure: controller.FailureAdmission,
+		})
 		return
 	}
 	surfaceKind := "guild"

@@ -264,6 +264,10 @@ func (r *Runtime) handleFallbackReply(incoming *discordgo.MessageCreate) bool {
 	}
 	answer, err := interaction.ParseTextAnswer(pending.Request, incoming.Content)
 	if err != nil {
+		_ = r.deliver(incoming.ChannelID, &discordgo.MessageSend{
+			Content: "That answer doesn't match the requested format. Reply again using the shown format.", AllowedMentions: disabledMentions(),
+			Reference: &discordgo.MessageReference{MessageID: incoming.ID, ChannelID: incoming.ChannelID, FailIfNotExists: boolPointer(false)},
+		})
 		return true
 	}
 	disposition, err := r.controller.AcceptInteraction(incoming.ChannelID, conversation, interaction.AnswerAttempt{InteractionID: pending.InteractionID, Answer: answer})
@@ -320,7 +324,11 @@ func (r *Runtime) handleComponent(incoming *discordgo.InteractionCreate) {
 		r.acknowledge(incoming.Interaction, "This request is no longer available.")
 		return
 	}
-	r.acknowledge(incoming.Interaction, "Answer received.")
+	acknowledgement := "Answer received."
+	if disposition == interaction.AnswerCancelled {
+		acknowledgement = "Request cancelled."
+	}
+	r.acknowledge(incoming.Interaction, acknowledgement)
 	if resumesInteraction(disposition) {
 		_ = r.controller.ContinueInteraction(context.conversation)
 	}

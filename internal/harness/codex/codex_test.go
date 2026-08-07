@@ -225,6 +225,49 @@ done
 	}
 }
 
+func TestDynamicRequestInputClassifiesInvalidSemanticRequest(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "codex.log")
+	t.Setenv("FAKE_LOG", logPath)
+	executable := writeExecutable(t, `#!/bin/sh
+while IFS= read -r line; do
+  printf 'WIRE\t%s\n' "$line" >> "$FAKE_LOG"
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"fake"}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"root-thread"},"sandbox":{},"approvalPolicy":""}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"root-turn","status":"inProgress"}}}\n' "$id"
+      printf '{"id":97,"method":"item/tool/call","params":{"threadId":"root-thread","turnId":"root-turn","callId":"choice-call","namespace":"channel","tool":"request_input","arguments":{"schema_version":1,"kind":"choose_one","prompt":"Choose an environment","policy":{"expires_after_seconds":60,"cancellation":"allowed"},"field":{"id":"environment","kind":"choose_one","label":"Environment","required":true}}}}\n'
+      ;;
+    *'"id":97'*) printf '{"method":"turn/completed","params":{"threadId":"root-thread","turn":{"id":"root-turn","status":"completed"}}}\n' ;;
+  esac
+done
+`)
+	session, err := New(executable).Open(context.Background(), harness.OpenRequest{Root: t.TempDir(), Policy: harness.PolicyDefault, ManagedRequestInput: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	result, err := session.RunTurn(context.Background(), harness.Input{ID: "message-1", Text: "pick a target"}, func(event harness.Event) {
+		if event.RequestInput != nil {
+			requests++
+		}
+	})
+	if err != nil || result.Status != "completed" || requests != 0 {
+		t.Fatalf("result=%#v requests=%d err=%v", result, requests, err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	log := readFile(t, logPath)
+	if !strings.Contains(log, `"id":97,"result":{"contentItems":[{"text":"interactive input request is invalid","type":"inputText"}],"success":false}`) {
+		t.Fatalf("invalid request did not receive the safe retryable class: %s", log)
+	}
+	if strings.Contains(log, `"id":97,"result":{"contentItems":[{"text":"interactive input is unavailable in this session"`) {
+		t.Fatalf("invalid request was misclassified as unavailable: %s", log)
+	}
+}
+
 func TestContinuationResumesSameThreadForStructuredNewTurn(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "codex.log")
 	t.Setenv("FAKE_LOG", logPath)

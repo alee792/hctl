@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"hctl/internal/harness"
+	"hctl/internal/interaction"
 	"hctl/internal/project"
 	"hctl/internal/worktree"
 )
@@ -52,16 +53,19 @@ type Manager struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 
-	mu          sync.Mutex
-	workers     map[string]*managedConversation
-	elevating   map[string]bool
-	closed      bool
-	err         error
-	done        chan struct{}
-	doneOnce    sync.Once
-	stopped     chan struct{}
-	closeOnce   sync.Once
-	diagnostics []string
+	mu           sync.Mutex
+	workers      map[string]*managedConversation
+	elevating    map[string]bool
+	continuing   map[string]Lifecycle
+	resumeQueued map[string]bool
+	closed       bool
+	err          error
+	done         chan struct{}
+	doneOnce     sync.Once
+	stopped      chan struct{}
+	closeOnce    sync.Once
+	continueWG   sync.WaitGroup
+	diagnostics  []string
 }
 
 type WorkspaceProvider interface {
@@ -145,14 +149,36 @@ func newManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 	manager := &Manager{
 		project: p, driver: driver, turnTimeout: turnTimeout, idleTimeout: idleTimeout, timers: timers, capacity: capacity, workspaces: workspaces, emit: emit,
 		store: store, ctx: managerCtx, cancel: cancel,
-		workers: map[string]*managedConversation{}, elevating: map[string]bool{}, done: make(chan struct{}), stopped: make(chan struct{}),
+		workers: map[string]*managedConversation{}, elevating: map[string]bool{}, continuing: map[string]Lifecycle{}, resumeQueued: map[string]bool{}, done: make(chan struct{}), stopped: make(chan struct{}),
 	}
 	if err := manager.reconcileWorkspaces(managerCtx); err != nil {
 		cancel()
 		return nil, err
 	}
+	for _, conversation := range store.interactionConversations(manager.reference("")) {
+		coordinator, coordinatorErr := interaction.NewCoordinator(store.interactionStore(manager.reference(conversation)), noInteractionRenderer{}, noInteractionContinuation{}, time.Now)
+		if coordinatorErr != nil {
+			manager.Close()
+			return nil, coordinatorErr
+		}
+		if recoverErr := coordinator.Recover(); recoverErr != nil {
+			manager.Close()
+			return nil, recoverErr
+		}
+	}
 	for _, conversation := range store.runnable(manager.reference("")) {
 		if err := manager.startDurableWorker(conversation); err != nil {
+			manager.Close()
+			return nil, err
+		}
+	}
+	resumable, err := store.recoverInteractionContinuations(manager.reference(""))
+	if err != nil {
+		manager.Close()
+		return nil, err
+	}
+	for _, conversation := range resumable {
+		if err := manager.scheduleInteractionResume(conversation); err != nil {
 			manager.Close()
 			return nil, err
 		}
@@ -389,6 +415,10 @@ func (m *Manager) Submit(ctx context.Context, conversation string, submission Su
 
 func (m *Manager) Status(conversation string) ConversationStatus {
 	m.mu.Lock()
+	if continuing := m.continuing[conversation]; continuing != "" {
+		m.mu.Unlock()
+		return ConversationStatus{State: continuing, Pending: 1}
+	}
 	worker := m.workers[conversation]
 	if worker == nil {
 		snapshot, err := m.store.snapshot(m.reference(conversation))
@@ -420,8 +450,192 @@ func (m *Manager) Status(conversation string) ConversationStatus {
 	return statusFromSnapshot(snapshot, admissions, resident)
 }
 
+// InteractionContinuation binds the only supported continuation side effect
+// to Manager's capacity coordinator and this durable conversation.
+func (m *Manager) InteractionContinuation(conversation string) (interaction.Continuation, error) {
+	if err := ValidateConversation(conversation); err != nil {
+		return nil, err
+	}
+	if _, ok := m.driver.(harness.ContinuationTurnDriver); !ok {
+		return nil, errors.New("selected harness does not support continuation turns")
+	}
+	return &managerContinuation{manager: m, conversation: conversation}, nil
+}
+
+// NewInteractionCoordinator binds rendering, durable state, wake recovery, and
+// the manager-owned continuation strategy for one conversation. Channel
+// adapters never receive the store or schedule continuation work themselves.
+func (m *Manager) NewInteractionCoordinator(conversation string, renderer interaction.Renderer, now func() time.Time) (*interaction.Coordinator, error) {
+	continuation, err := m.InteractionContinuation(conversation)
+	if err != nil {
+		return nil, err
+	}
+	store := &resumeSchedulingStore{Store: m.store.interactionStore(m.reference(conversation)), schedule: func() error { return m.scheduleInteractionResume(conversation) }}
+	return interaction.NewCoordinator(store, renderer, continuation, now)
+}
+
+type resumeSchedulingStore struct {
+	interaction.Store
+	schedule func() error
+}
+
+func (s *resumeSchedulingStore) Update(id string, mutate func(*interaction.Lifecycle) error) error {
+	if err := s.Store.Update(id, mutate); err != nil {
+		return err
+	}
+	state, err := s.Load()
+	if err != nil || state.Pending == nil || state.Pending.Phase != interaction.PhaseAnswered || state.Pending.Resume != interaction.ResumePending || state.Pending.Answer == nil || state.Pending.Answer.Action == interaction.ActionCancel {
+		return err
+	}
+	return s.schedule()
+}
+
+func (m *Manager) scheduleInteractionResume(conversation string) error {
+	if err := ValidateConversation(conversation); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrManagerClosed
+	}
+	if m.resumeQueued[conversation] {
+		m.mu.Unlock()
+		return nil
+	}
+	m.resumeQueued[conversation] = true
+	m.continueWG.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			delete(m.resumeQueued, conversation)
+			m.mu.Unlock()
+			m.continueWG.Done()
+		}()
+		continuation, err := m.InteractionContinuation(conversation)
+		if err != nil {
+			return
+		}
+		coordinator, err := interaction.NewCoordinator(m.store.interactionStore(m.reference(conversation)), noInteractionRenderer{}, continuation, time.Now)
+		if err != nil {
+			return
+		}
+		_ = coordinator.Resume(m.ctx)
+	}()
+	return nil
+}
+
+type noInteractionRenderer struct{}
+
+func (noInteractionRenderer) Render(context.Context, interaction.RenderIntent) interaction.EffectOutcome {
+	return interaction.EffectFailed
+}
+
+type noInteractionContinuation struct{}
+
+func (noInteractionContinuation) Resume(context.Context, interaction.ContinuationIntent) interaction.ContinuationResult {
+	return interaction.ContinuationResult{Effect: interaction.EffectFailed}
+}
+
+type managerContinuation struct {
+	manager      *Manager
+	conversation string
+}
+
+func (c *managerContinuation) Resume(ctx context.Context, intent interaction.ContinuationIntent) interaction.ContinuationResult {
+	m := c.manager
+	if intent.Mode != interaction.ContinuationTurn {
+		return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+	}
+	if err := m.startDurableWorker(c.conversation); err != nil {
+		return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+	}
+	snapshot, err := m.store.snapshot(m.reference(c.conversation))
+	if err != nil || !snapshot.waitingForInput || snapshot.sessionID == "" || snapshot.firstID != intent.InputID {
+		return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+	}
+	p := m.project
+	policy := harness.PolicyReadOnly
+	if snapshot.workspace != "" {
+		if m.workspaces == nil {
+			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+		}
+		p, err = m.workspaces.Resolve(ctx, c.conversation, worktree.Assignment{Root: snapshot.workspace, Branch: snapshot.branch})
+		if err != nil {
+			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+		}
+		policy = harness.PolicyWorkspaceWrite
+	}
+	m.mu.Lock()
+	if m.closed || m.continuing[c.conversation] != "" {
+		m.mu.Unlock()
+		return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+	}
+	m.continuing[c.conversation] = LifecycleQueued
+	m.continueWG.Add(1)
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.continuing, c.conversation)
+		m.mu.Unlock()
+		m.continueWG.Done()
+	}()
+	turnCtx, cancel := context.WithTimeout(ctx, m.turnTimeout)
+	stopManagerCancel := context.AfterFunc(m.ctx, cancel)
+	defer cancel()
+	defer stopManagerCancel()
+	if err := m.capacity.acquireTurn(turnCtx, c.conversation, true); err != nil {
+		return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+	}
+	m.mu.Lock()
+	m.continuing[c.conversation] = LifecycleActive
+	worker := m.workers[c.conversation]
+	if worker != nil {
+		worker.resident = true
+	}
+	m.mu.Unlock()
+	defer func() {
+		m.capacity.releaseTurn(c.conversation, false)
+		m.capacity.releaseResident(c.conversation)
+		m.mu.Lock()
+		if worker != nil {
+			worker.resident = false
+		}
+		m.mu.Unlock()
+	}()
+	driver := m.driver.(harness.ContinuationTurnDriver)
+	emitErr := error(nil)
+	result := driver.ContinueTurn(turnCtx, harness.OpenRequest{Root: p.WorkspaceRoot, Policy: policy}, snapshot.sessionID, intent, func(event harness.Event) {
+		if emitErr == nil {
+			emitErr = m.emit(c.conversation, fromHarness(event, intent.InputID))
+		}
+	})
+	if emitErr != nil {
+		return interaction.ContinuationResult{Effect: interaction.EffectUncertain, OriginOutcome: "uncertain", ResultSessionID: result.ResultSessionID, ResultTurnID: result.ResultTurnID}
+	}
+	return result
+}
+
+func (c *managerContinuation) Committed(intent interaction.ContinuationIntent, result interaction.ContinuationResult) error {
+	if result.Effect != interaction.EffectSucceeded || result.ResultTurnID == "" {
+		return errors.New("continuation commit result is invalid")
+	}
+	if err := c.manager.emit(c.conversation, Event{SchemaVersion: 1, Type: "turn.completed", Harness: c.manager.driver.Name(), Conversation: c.conversation, InputID: intent.InputID, SessionID: result.ResultSessionID, TurnID: result.ResultTurnID, Status: string(interaction.ContinuationTurn)}); err != nil {
+		return err
+	}
+	return c.manager.wakeInteraction(c.conversation)
+}
+
 func (m *Manager) Capacity() CapacityStatus {
 	queued := m.store.queued(m.reference(""))
+	m.mu.Lock()
+	for _, state := range m.continuing {
+		if state == LifecycleQueued {
+			queued++
+		}
+	}
+	m.mu.Unlock()
 	return m.capacity.snapshot(queued)
 }
 
@@ -699,6 +913,7 @@ func (m *Manager) Close() {
 		for _, worker := range workers {
 			<-worker.done
 		}
+		m.continueWG.Wait()
 		m.doneOnce.Do(func() { close(m.done) })
 		close(m.stopped)
 	})

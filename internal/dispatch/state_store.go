@@ -135,6 +135,47 @@ func (s *conversationStore) runnable(ref conversationRef) []string {
 	return conversations
 }
 
+func (s *conversationStore) interactionConversations(ref conversationRef) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var conversations []string
+	for _, conversation := range s.state.Conversations {
+		if conversation.AgentID == ref.agentID && conversation.Harness == ref.harness && conversation.SourceFingerprint == ref.fingerprint && conversation.Interaction != nil {
+			conversations = append(conversations, conversation.ID)
+		}
+	}
+	sort.Strings(conversations)
+	return conversations
+}
+
+// recoverInteractionContinuations distinguishes answered work that is safe to
+// claim once from a continuation whose external effect may already have begun.
+// The latter becomes uncertain and is never scheduled automatically.
+func (s *conversationStore) recoverInteractionContinuations(ref conversationRef) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var resumable []string
+	err := s.persistMutationIfChanged(func() (bool, error) {
+		changed := false
+		for _, conversation := range s.state.Conversations {
+			if conversation.AgentID != ref.agentID || conversation.Harness != ref.harness || conversation.SourceFingerprint != ref.fingerprint || conversation.Interaction == nil {
+				continue
+			}
+			pending := conversation.Interaction
+			switch {
+			case pending.Phase == interaction.PhaseAnswered && pending.Resume == interaction.ResumePending:
+				resumable = append(resumable, conversation.ID)
+			case pending.Phase == interaction.PhaseResuming && pending.Resume == interaction.ResumeIntended:
+				pending.Resume = interaction.ResumeUncertain
+				changed = true
+			}
+		}
+		sort.Strings(resumable)
+		return changed, nil
+	})
+	return resumable, err
+}
+
 func (s *conversationStore) workspaceRecords(ref conversationRef) ([]workspaceRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

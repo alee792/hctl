@@ -1779,6 +1779,220 @@ type managedEvent struct {
 	event        Event
 }
 
+func TestManagerOwnsCodexContinuationCapacityAndCommitsBeforeTerminalEvent(t *testing.T) {
+	p := testProject(t)
+	driver := newContinuationManagerDriver()
+	events := make(chan Event, 32)
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+		events <- event
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	ref := manager.reference("discord-guild")
+	if _, _, err := manager.store.accept(ref, "message-1", "origin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.store.startNext(ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.store.setSessionID(ref, "thread-1"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 7, 3, 0, 0, 0, time.UTC)
+	coordinator, err := manager.NewInteractionCoordinator("discord-guild", dispatchRendererFunc(func(context.Context, interaction.RenderIntent) interaction.EffectOutcome {
+		return interaction.EffectSucceeded
+	}), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := storeTestLifecycle("c")
+	pending.InputID = "message-1"
+	pending.ExpiresAt = now.Add(time.Hour)
+	if err := coordinator.Request(interaction.OpenRequest{
+		InteractionID: pending.ID, InputID: pending.InputID, Owner: pending.Owner,
+		Request: pending.Request, Resolution: pending.Resolution, Continuation: interaction.ContinuationTurn,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Render(context.Background(), pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := true
+	if _, err := coordinator.AcceptAnswer(interaction.AnswerAttempt{InteractionID: pending.ID, Owner: pending.Owner, Answer: interaction.Answer{SchemaVersion: interaction.SchemaVersion, Action: interaction.ActionSubmit, Fields: []interaction.FieldAnswer{{FieldID: "approved", Confirmed: &confirmed}}}}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitContinuation(t)
+	if status := manager.Status("discord-guild"); status.State != LifecycleActive {
+		t.Fatalf("status = %#v", status)
+	}
+	if capacity := manager.Capacity(); capacity.Active != 1 || capacity.Resident != 1 {
+		t.Fatalf("capacity = %#v", capacity)
+	}
+	if err := coordinator.Resume(context.Background()); !errors.Is(err, interaction.ErrInteractionMissing) {
+		t.Fatalf("duplicate continuation = %v", err)
+	}
+	driver.releaseContinuation()
+	terminal := waitDispatchEvent(t, events, "turn.completed")
+	state, err := manager.store.loadInteraction(ref)
+	if err != nil || state.Pending != nil || len(state.Tombstones) != 1 || state.Tombstones[0].Phase != interaction.PhaseCompleted {
+		t.Fatalf("state = %#v, %v", state, err)
+	}
+	if terminal.Status != "continuation_turn" || terminal.SessionID != "thread-1" || terminal.TurnID != "answer-turn" {
+		t.Fatalf("terminal = %#v", terminal)
+	}
+	if capacity := manager.Capacity(); capacity.Active != 0 || capacity.Resident != 0 {
+		t.Fatalf("released capacity = %#v", capacity)
+	}
+}
+
+func TestManagerRestartClaimsDurableAnsweredContinuationOnce(t *testing.T) {
+	p := testProject(t)
+	ref := conversationRef{agentID: p.AgentID, harness: "codex", id: "discord-guild", fingerprint: p.SourceFingerprint}
+	store, pending := prepareDurableAnsweredInteraction(t, p, ref)
+	_ = store
+	driver := newContinuationManagerDriver()
+	events := make(chan Event, 16)
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+		events <- event
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	driver.waitContinuation(t)
+	continuation, err := manager.InteractionContinuation("discord-guild")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := interaction.NewCoordinator(manager.store.interactionStore(ref), dispatchRendererFunc(func(context.Context, interaction.RenderIntent) interaction.EffectOutcome {
+		return interaction.EffectFailed
+	}), continuation, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Resume(context.Background()); !errors.Is(err, interaction.ErrInteractionMissing) {
+		t.Fatalf("concurrent duplicate resume = %v", err)
+	}
+	driver.releaseContinuation()
+	_ = waitDispatchEvent(t, events, "turn.completed")
+	state, err := manager.store.loadInteraction(ref)
+	if err != nil || state.Pending != nil || len(state.Tombstones) != 1 || state.Tombstones[0].InteractionDigest != interaction.Digest(pending.ID) {
+		t.Fatalf("state = %#v, %v", state, err)
+	}
+	select {
+	case <-driver.started:
+		t.Fatal("durable continuation was started twice")
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+func TestManagerRestartMarksClaimedContinuationUncertainWithoutRetry(t *testing.T) {
+	p := testProject(t)
+	ref := conversationRef{agentID: p.AgentID, harness: "codex", id: "discord-guild", fingerprint: p.SourceFingerprint}
+	store, pending := prepareDurableAnsweredInteraction(t, p, ref)
+	if err := store.updateInteraction(ref, pending.ID, func(current *interaction.Lifecycle) error {
+		current.Phase = interaction.PhaseResuming
+		current.Resume = interaction.ResumeIntended
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	driver := newContinuationManagerDriver()
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(string, Event) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	select {
+	case <-driver.started:
+		t.Fatal("ambiguous continuation was retried")
+	case <-time.After(25 * time.Millisecond):
+	}
+	state, err := manager.store.loadInteraction(ref)
+	if err != nil || state.Pending == nil || state.Pending.Phase != interaction.PhaseResuming || state.Pending.Resume != interaction.ResumeUncertain {
+		t.Fatalf("state = %#v, %v", state, err)
+	}
+}
+
+func prepareDurableAnsweredInteraction(t *testing.T, p *project.Project, ref conversationRef) (*conversationStore, *interaction.Lifecycle) {
+	t.Helper()
+	store, err := openConversationStore(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.accept(ref, "message-1", "origin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.startNext(ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.setSessionID(ref, "thread-1"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 7, 3, 0, 0, 0, time.UTC)
+	pending := storeTestLifecycle("r")
+	pending.InputID = "message-1"
+	pending.ExpiresAt = now.Add(time.Hour)
+	coordinator, err := interaction.NewCoordinator(store.interactionStore(ref), dispatchRendererFunc(func(context.Context, interaction.RenderIntent) interaction.EffectOutcome {
+		return interaction.EffectSucceeded
+	}), dispatchContinuationFunc(func(context.Context, interaction.ContinuationIntent) interaction.ContinuationResult {
+		return interaction.ContinuationResult{Effect: interaction.EffectFailed}
+	}), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Request(interaction.OpenRequest{InteractionID: pending.ID, InputID: pending.InputID, Owner: pending.Owner, Request: pending.Request, Resolution: pending.Resolution, Continuation: interaction.ContinuationTurn}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Render(context.Background(), pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := true
+	if _, err := coordinator.AcceptAnswer(interaction.AnswerAttempt{InteractionID: pending.ID, Owner: pending.Owner, Answer: interaction.Answer{SchemaVersion: interaction.SchemaVersion, Action: interaction.ActionSubmit, Fields: []interaction.FieldAnswer{{FieldID: "approved", Confirmed: &confirmed}}}}); err != nil {
+		t.Fatal(err)
+	}
+	return store, pending
+}
+
+type continuationManagerDriver struct {
+	*managerDriver
+	started chan struct{}
+	release chan struct{}
+}
+
+func newContinuationManagerDriver() *continuationManagerDriver {
+	return &continuationManagerDriver{managerDriver: newNamedManagerDriver("codex"), started: make(chan struct{}, 1), release: make(chan struct{})}
+}
+
+func (d *continuationManagerDriver) ContinueTurn(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	if request.Policy != harness.PolicyReadOnly || sessionID != "thread-1" || intent.InputID != "message-1" {
+		return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+	}
+	d.started <- struct{}{}
+	select {
+	case <-d.release:
+	case <-ctx.Done():
+		return interaction.ContinuationResult{Effect: interaction.EffectUncertain, OriginOutcome: "uncertain"}
+	}
+	emit(harness.Event{Type: "agent.output.delta", SessionID: sessionID, TurnID: "answer-turn", ItemID: "answer", Delta: "done"})
+	return interaction.ContinuationResult{Effect: interaction.EffectSucceeded, OriginOutcome: "completed", ResultSessionID: sessionID, ResultTurnID: "answer-turn"}
+}
+
+func (d *continuationManagerDriver) waitContinuation(t *testing.T) {
+	t.Helper()
+	select {
+	case <-d.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for continuation")
+	}
+}
+
+func (d *continuationManagerDriver) releaseContinuation() { close(d.release) }
+
 func waitDispatchEvent(t *testing.T, events <-chan Event, eventType string) Event {
 	t.Helper()
 	timer := time.NewTimer(2 * time.Second)

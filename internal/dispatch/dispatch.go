@@ -276,7 +276,7 @@ dispatchLoop:
 					}
 					snapshot.sessionID = ""
 				}
-				process, err = driver.Open(ctx, harness.OpenRequest{Root: p.WorkspaceRoot, ResumeID: snapshot.sessionID, Policy: policy})
+				process, err = driver.Open(ctx, harness.OpenRequest{Root: p.WorkspaceRoot, ResumeID: snapshot.sessionID, Policy: policy, ManagedRequestInput: requestInputs != nil})
 				if err != nil {
 					sink.emit(Event{Type: "driver.process_failed", InputID: snapshot.firstID, SessionID: snapshot.sessionID, Status: "startup_failure"})
 					return err

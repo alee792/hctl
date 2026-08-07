@@ -44,6 +44,8 @@ type Renderer interface {
 }
 
 type ContinuationIntent struct {
+	InteractionID   string
+	InputID         string
 	Mode            ContinuationMode
 	ContinuationKey string
 	Request         Request
@@ -54,10 +56,15 @@ type ContinuationResult struct {
 	Effect          EffectOutcome
 	OriginOutcome   string
 	ResultSessionID string
+	ResultTurnID    string
 }
 
 type Continuation interface {
 	Resume(context.Context, ContinuationIntent) ContinuationResult
+}
+
+type committedContinuation interface {
+	Committed(ContinuationIntent, ContinuationResult) error
 }
 
 type OpenRequest struct {
@@ -266,7 +273,7 @@ func (c *Coordinator) Resume(ctx context.Context) error {
 		if pending.Phase != PhaseAnswered || pending.Resume != ResumePending || pending.Answer == nil || pending.Answer.Action == ActionCancel {
 			return ErrInteractionMissing
 		}
-		intent = ContinuationIntent{Mode: pending.Continuation, ContinuationKey: pending.ContinuationKey, Request: pending.Request, Answer: *pending.Answer}
+		intent = ContinuationIntent{InteractionID: pending.ID, InputID: pending.InputID, Mode: pending.Continuation, ContinuationKey: pending.ContinuationKey, Request: pending.Request, Answer: *pending.Answer}
 		pending.Phase = PhaseResuming
 		pending.Resume = ResumeIntended
 		return nil
@@ -280,10 +287,16 @@ func (c *Coordinator) Resume(ctx context.Context) error {
 		if result.OriginOutcome == "" {
 			result.OriginOutcome = "completed"
 		}
-		return c.store.Finish(FinishRequest{
+		if err := c.store.Finish(FinishRequest{
 			InteractionID: interactionID, Phase: PhaseCompleted, OriginOutcome: result.OriginOutcome,
 			ResultSessionID: result.ResultSessionID, FinishedAt: c.nowUTC(),
-		})
+		}); err != nil {
+			return err
+		}
+		if committed, ok := c.continuation.(committedContinuation); ok {
+			return committed.Committed(intent, result)
+		}
+		return nil
 	case EffectFailed:
 		if err := c.store.Update(interactionID, func(pending *Lifecycle) error {
 			if pending.Phase != PhaseResuming || pending.Resume != ResumeIntended {

@@ -78,8 +78,12 @@ func handleRequestInput(ctx context.Context, handler RequestInputHandler, conver
 		}
 	}
 	if event.Reply != nil {
+		result := harness.RequestInputToolResult{}
+		if accepted {
+			result.Disposition = harness.RequestInputContinuationTurn
+		}
 		select {
-		case event.Reply <- harness.RequestInputAcknowledgement{Accepted: accepted, Status: status}:
+		case event.Reply <- harness.RequestInputAcknowledgement{Accepted: accepted, Status: status, Result: result}:
 		case <-ctx.Done():
 			return ctx.Err()
 		}

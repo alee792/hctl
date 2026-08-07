@@ -426,11 +426,21 @@ The two durable continuation modes are intentionally different. A
 **native deferred-tool continuation** later resumes the same logical tool call
 using a harness-native continuation identity. A **continuation turn** later
 opens another turn in the same native session with the normalized answer and
-request context. Neither is a blocking request. This lifecycle and coordinator
-do not themselves expose interactive input through the live runtime. The
-generic managed-tool and durable handoff infrastructure exists but remains
-disabled in production until a Claude or Codex continuation strategy and the
-Discord renderer are wired by GitHub issues #22 through #24.
+request context. Neither is a blocking request.
+
+Codex implements `continuation_turn` through app-server's documented
+experimental dynamic-tool and thread APIs. Only a channel-managed root with a
+dispatcher handler and compatible responder registers the `channel` namespace
+and `request_input` function. The adapter requires exact active root thread and
+turn provenance before the dispatcher sees the semantic request. After the
+durable park it returns only `continuation_turn`, lets the bounded turn end,
+closes app-server, and retains no process or active-turn grant while waiting.
+After answer acceptance it resumes the stored thread and starts a new turn with
+a bounded controller-owned `hctl.channel_input_answer` JSON envelope containing
+the exact request correlation and normalized answer. This is not
+`turn/steer`, a live native input waiter, MCP elicitation, or same-tool-call
+resume. Resume ambiguity follows the durable no-retry rule. Production
+advertisement remains disabled until the Discord responder is wired.
 
 New and resumed channel-managed sessions run read-only in the shared workspace:
 Claude uses native plan permission mode, Codex uses a read-only sandbox with

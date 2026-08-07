@@ -289,6 +289,9 @@ func filesForPolicy(p *project.Project, executable string, channelWritable bool)
 	if p.DiscordChannel != nil {
 		instructions += "\n## Discord channel participation\n\nFor inputs explicitly marked as Discord messages, apply this participation policy before answering:\n\n" + strings.TrimSpace(string(p.DiscordChannel.Policy)) + "\n\nA Discord input marked `direct=true` is explicitly addressed to you; respond normally unless the user asks for silence. For other ambient guild messages, if no visible response is warranted, return exactly `" + channelconfig.NoReplyResult + "` and nothing else."
 		instructions += " If the managed `channel.request_input` tool is advertised in this channel-root session, use it only when a missing human choice materially changes the work and proceeding with a reasonable assumption would be risky. Otherwise proceed without asking. Supply only the documented semantic fields; never fabricate interaction or callback identifiers, channel-specific markup, components, or vendor payloads. The tool may be absent when the harness continuation strategy or channel responder cannot support it."
+		if p.Harness == "codex" {
+			instructions += " If `channel.request_input` returns `continuation_turn`, end the current turn immediately after that bounded result; do not wait for a live callback, call a native input prompt, steer the active turn, or continue the requested work. A later model-visible JSON input whose `type` is `hctl.channel_input_answer` is controller-owned internal continuation data for the identified request, not an unrelated channel message. Interpret its normalized `answer` as the answer to that exact prior request, continue in the same Codex thread, and never quote or expose the control envelope to the user."
+		}
 		if channelWritable {
 			instructions += " This conversation already has workspace-write access in its isolated worktree. Complete requests normally; write access has already been granted."
 		} else {

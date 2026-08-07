@@ -12,10 +12,16 @@ import (
 	"time"
 
 	"hctl/internal/harness"
+	"hctl/internal/interaction"
 	"hctl/internal/secureenv"
 )
 
 type Driver struct{ executable string }
+
+const (
+	requestInputNamespace = "channel"
+	requestInputTool      = "request_input"
+)
 
 func New(executable string) *Driver { return &Driver{executable: executable} }
 
@@ -46,7 +52,11 @@ func (d *Driver) Open(ctx context.Context, request harness.OpenRequest) (harness
 		return nil, err
 	}
 	client := &client{encoder: json.NewEncoder(process.Input()), process: process}
-	result, _, err := client.request(1, "initialize", map[string]any{"clientInfo": map[string]any{"name": "hctl", "title": "hctl run", "version": "0.1.0-dev"}})
+	initialize := map[string]any{"clientInfo": map[string]any{"name": "hctl", "title": "hctl run", "version": "0.1.0-dev"}}
+	if request.ManagedRequestInput {
+		initialize["capabilities"] = map[string]any{"experimentalApi": true}
+	}
+	result, _, err := client.request(1, "initialize", initialize)
 	if err != nil || len(result) == 0 {
 		process.Abort()
 		return nil, errors.New("codex initialize handshake failed")
@@ -58,6 +68,9 @@ func (d *Driver) Open(ctx context.Context, request harness.OpenRequest) (harness
 	method := "thread/start"
 	params := map[string]any{"cwd": request.Root}
 	applyPolicy(params, request.Policy)
+	if request.ManagedRequestInput {
+		params["dynamicTools"] = managedRequestInputTools()
+	}
 	if request.ResumeID != "" {
 		method = "thread/resume"
 		params = map[string]any{"threadId": request.ResumeID, "cwd": request.Root}
@@ -89,7 +102,19 @@ func (d *Driver) Open(ctx context.Context, request harness.OpenRequest) (harness
 		process.Abort()
 		return nil, err
 	}
-	return &session{process: process, client: client, sessionID: response.Thread.ID, resumed: request.ResumeID != "", requestID: 3}, nil
+	return &session{process: process, client: client, sessionID: response.Thread.ID, resumed: request.ResumeID != "", requestID: 3, managedRequestInput: request.ManagedRequestInput}, nil
+}
+
+func managedRequestInputTools() []any {
+	return []any{map[string]any{
+		"type": "namespace", "name": requestInputNamespace,
+		"description": "Managed channel interaction tools.",
+		"tools": []any{map[string]any{
+			"type": "function", "name": requestInputTool,
+			"description": "Pause this channel conversation and request bounded structured input from the authorized user.",
+			"inputSchema": interaction.RequestJSONSchema(),
+		}},
+	}}
 }
 
 func applyPolicy(params map[string]any, policy harness.ExecutionPolicy) {
@@ -114,11 +139,13 @@ func validateEffectivePolicy(policy harness.ExecutionPolicy, sandboxType, approv
 }
 
 type session struct {
-	process   *harness.Process
-	client    *client
-	sessionID string
-	resumed   bool
-	requestID int
+	process             *harness.Process
+	client              *client
+	sessionID           string
+	resumed             bool
+	requestID           int
+	managedRequestInput bool
+	waitingForInput     bool
 }
 
 func (s *session) InitialEvents() []harness.Event {
@@ -155,14 +182,24 @@ func (s *session) RunTurn(ctx context.Context, input harness.Input, emit func(ha
 	emit(harness.Event{Type: "turn.started", SessionID: s.sessionID, TurnID: turnID})
 	terminal := ""
 	for _, message := range buffered {
-		terminal = handleEvent(message, s.sessionID, turnID, emit, terminal)
+		terminal, err = s.handleEvent(ctx, message, turnID, emit, terminal)
+		if err != nil {
+			return harness.TurnResult{}, err
+		}
 	}
 	for terminal == "" {
 		message, err := s.client.next()
 		if err != nil {
 			return harness.TurnResult{}, err
 		}
-		terminal = handleEvent(message, s.sessionID, turnID, emit, terminal)
+		terminal, err = s.handleEvent(ctx, message, turnID, emit, terminal)
+		if err != nil {
+			return harness.TurnResult{}, err
+		}
+	}
+	if s.waitingForInput {
+		terminal = "waiting_for_input"
+		s.waitingForInput = false
 	}
 	return harness.TurnResult{SessionID: s.sessionID, TurnID: turnID, Status: terminal}, nil
 }
@@ -245,7 +282,7 @@ func (c *client) next() (rpcEnvelope, error) {
 }
 
 func (c *client) decline(message rpcEnvelope) {
-	if len(message.ID) == 0 {
+	if len(message.ID) == 0 || message.Method == "item/tool/call" {
 		return
 	}
 	_ = c.encoder.Encode(struct {
@@ -262,10 +299,13 @@ func decodeRPC(line []byte) (rpcEnvelope, error) {
 	return message, nil
 }
 
-func handleEvent(message rpcEnvelope, sessionID, turnID string, emit func(harness.Event), terminal string) string {
+func (s *session) handleEvent(ctx context.Context, message rpcEnvelope, turnID string, emit func(harness.Event), terminal string) (string, error) {
 	if len(message.ID) != 0 {
-		emit(harness.Event{Type: "human_input.required", SessionID: sessionID, TurnID: turnID, Status: "declined_by_dispatcher"})
-		return terminal
+		if message.Method == "item/tool/call" {
+			return terminal, s.handleDynamicTool(ctx, message, turnID, emit)
+		}
+		emit(harness.Event{Type: "human_input.required", SessionID: s.sessionID, TurnID: turnID, Status: "declined_by_dispatcher"})
+		return terminal, nil
 	}
 	switch message.Method {
 	case "item/agentMessage/delta":
@@ -275,7 +315,7 @@ func handleEvent(message rpcEnvelope, sessionID, turnID string, emit func(harnes
 			ItemID string `json:"itemId"`
 		}
 		if json.Unmarshal(message.Params, &params) == nil && params.Delta != "" && (params.TurnID == "" || params.TurnID == turnID) {
-			emit(harness.Event{Type: "agent.output.delta", SessionID: sessionID, TurnID: turnID, ItemID: params.ItemID, Delta: params.Delta})
+			emit(harness.Event{Type: "agent.output.delta", SessionID: s.sessionID, TurnID: turnID, ItemID: params.ItemID, Delta: params.Delta})
 		}
 	case "turn/completed":
 		var params struct {
@@ -286,21 +326,71 @@ func handleEvent(message rpcEnvelope, sessionID, turnID string, emit func(harnes
 			} `json:"turn"`
 		}
 		if json.Unmarshal(message.Params, &params) != nil {
-			return "uncertain"
+			return "uncertain", nil
 		}
-		if (params.ThreadID != "" && params.ThreadID != sessionID) || (params.Turn.ID != "" && params.Turn.ID != turnID) {
-			return terminal
+		if (params.ThreadID != "" && params.ThreadID != s.sessionID) || (params.Turn.ID != "" && params.Turn.ID != turnID) {
+			return terminal, nil
 		}
 		switch params.Turn.Status {
 		case "completed":
-			return "completed"
+			return "completed", nil
 		case "failed":
-			return "failed"
+			return "failed", nil
 		case "interrupted":
-			return "cancelled"
+			return "cancelled", nil
 		default:
-			return "uncertain"
+			return "uncertain", nil
 		}
 	}
-	return terminal
+	return terminal, nil
+}
+
+func (s *session) handleDynamicTool(ctx context.Context, message rpcEnvelope, turnID string, emit func(harness.Event)) error {
+	var params struct {
+		ThreadID  string          `json:"threadId"`
+		TurnID    string          `json:"turnId"`
+		CallID    string          `json:"callId"`
+		Namespace string          `json:"namespace"`
+		Tool      string          `json:"tool"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	valid := s.managedRequestInput && json.Unmarshal(message.Params, &params) == nil && params.ThreadID == s.sessionID && params.TurnID == turnID && params.CallID != "" && params.Namespace == requestInputNamespace && params.Tool == requestInputTool
+	var request interaction.Request
+	if valid {
+		var err error
+		request, err = interaction.DecodeRequest(params.Arguments)
+		valid = err == nil
+	}
+	if !valid {
+		return s.client.respondDynamicTool(message.ID, false, "interactive input is unavailable in this session")
+	}
+	reply := make(chan harness.RequestInputAcknowledgement, 1)
+	emit(harness.Event{RequestInput: harness.NewRootRequestInputEvent(params.CallID, request, reply)})
+	select {
+	case acknowledgement := <-reply:
+		if !acknowledgement.Accepted || acknowledgement.Result.Disposition != harness.RequestInputContinuationTurn {
+			return s.client.respondDynamicTool(message.ID, false, "interactive input request was rejected")
+		}
+		if err := s.client.respondDynamicTool(message.ID, true, string(acknowledgement.Result.Disposition)); err != nil {
+			return err
+		}
+		emit(harness.Event{Type: "interaction.parked", SessionID: s.sessionID, TurnID: turnID, Status: string(acknowledgement.Result.Disposition)})
+		s.waitingForInput = true
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *client) respondDynamicTool(id json.RawMessage, success bool, text string) error {
+	if len(id) == 0 {
+		return errors.New("codex dynamic tool request omitted its response id")
+	}
+	return c.encoder.Encode(struct {
+		ID     json.RawMessage `json:"id"`
+		Result any             `json:"result"`
+	}{ID: id, Result: map[string]any{
+		"success":      success,
+		"contentItems": []any{map[string]any{"type": "inputText", "text": text}},
+	}})
 }

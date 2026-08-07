@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"hctl/internal/interaction"
 	"hctl/internal/rootfs"
 )
 
@@ -29,18 +30,21 @@ type State struct {
 }
 
 type Conversation struct {
-	ID                        string            `json:"id"`
-	AgentID                   string            `json:"agent_id,omitempty"`
-	Harness                   string            `json:"harness"`
-	SourceFingerprint         string            `json:"source_fingerprint,omitempty"`
-	LegacyManifestFingerprint string            `json:"manifest_fingerprint,omitempty"`
-	SessionID                 string            `json:"session_id,omitempty"`
-	WorkspaceRoot             string            `json:"workspace_root,omitempty"`
-	WorktreeBranch            string            `json:"worktree_branch,omitempty"`
-	WorktreeRetiring          bool              `json:"worktree_retiring,omitempty"`
-	Queue                     []Input           `json:"queue"`
-	Outcomes                  map[string]string `json:"outcomes"`
-	OutcomeOrder              []string          `json:"outcome_order"`
+	ID                        string                  `json:"id"`
+	AgentID                   string                  `json:"agent_id,omitempty"`
+	Harness                   string                  `json:"harness"`
+	SourceFingerprint         string                  `json:"source_fingerprint,omitempty"`
+	LegacyManifestFingerprint string                  `json:"manifest_fingerprint,omitempty"`
+	SessionID                 string                  `json:"session_id,omitempty"`
+	WorkspaceRoot             string                  `json:"workspace_root,omitempty"`
+	WorktreeBranch            string                  `json:"worktree_branch,omitempty"`
+	WorktreeRetiring          bool                    `json:"worktree_retiring,omitempty"`
+	Queue                     []Input                 `json:"queue"`
+	Outcomes                  map[string]string       `json:"outcomes"`
+	OutcomeOrder              []string                `json:"outcome_order"`
+	Interaction               *interaction.Lifecycle  `json:"interaction,omitempty"`
+	InteractionTombstones     []interaction.Tombstone `json:"interaction_tombstones,omitempty"`
+	InteractionWakePending    bool                    `json:"interaction_wake_pending,omitempty"`
 }
 
 type Input struct {
@@ -48,6 +52,12 @@ type Input struct {
 	Text   string `json:"text"`
 	Status string `json:"status"`
 }
+
+const (
+	inputQueued = "queued"
+	inputActive = "active"
+	inputParked = "parked"
+)
 
 func Load(root string) (*State, error) {
 	data, mode, exists, err := rootfs.ReadOptional(root, statePath, maxStateBytes)
@@ -60,7 +70,7 @@ func Load(root string) (*State, error) {
 			return nil, errors.New("dispatch state must be a small regular file")
 		}
 		if !exists {
-			return &State{SchemaVersion: 2, Conversations: map[string]*Conversation{}}, nil
+			return &State{SchemaVersion: 3, Conversations: map[string]*Conversation{}}, nil
 		}
 		state, err := decode(data, mode)
 		if err != nil {
@@ -84,10 +94,13 @@ func decode(data []byte, mode os.FileMode) (*State, error) {
 	if mode.Perm()&0o077 != 0 {
 		return nil, errors.New("dispatch state permissions are too broad; require owner-only access")
 	}
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return nil, errors.New("dispatch state is invalid")
+	}
 	var state State
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&state); err != nil || (state.SchemaVersion != 1 && state.SchemaVersion != 2) || state.Conversations == nil {
+	if err := decoder.Decode(&state); err != nil || (state.SchemaVersion != 1 && state.SchemaVersion != 2 && state.SchemaVersion != 3) || state.Conversations == nil {
 		return nil, errors.New("dispatch state is invalid")
 	}
 	var extra any
@@ -109,8 +122,14 @@ func decode(data []byte, mode os.FileMode) (*State, error) {
 		if state.SchemaVersion == 1 && conversation.AgentID == "" {
 			expectedKey = conversation.Harness + ":" + conversation.ID
 		}
-		if key != expectedKey || (state.SchemaVersion == 2 && conversation.AgentID == "") || (conversation.Harness != "claude" && conversation.Harness != "codex") || len(conversation.Queue) > maxQueue || len(conversation.OutcomeOrder) > maxRecentOutcome {
+		if key != expectedKey || (state.SchemaVersion >= 2 && conversation.AgentID == "") || (conversation.Harness != "claude" && conversation.Harness != "codex") || len(conversation.Queue) > maxQueue || len(conversation.OutcomeOrder) > maxRecentOutcome || len(conversation.InteractionTombstones) > interaction.MaxTerminalTombstones {
 			return nil, errors.New("dispatch conversation state is invalid")
+		}
+		if state.SchemaVersion < 3 && (conversation.Interaction != nil || len(conversation.InteractionTombstones) != 0) {
+			return nil, errors.New("dispatch interaction state requires schema version 3")
+		}
+		if err := (interaction.DurableState{Pending: conversation.Interaction, Tombstones: conversation.InteractionTombstones}).Validate(); err != nil {
+			return nil, errors.New("dispatch interaction state is invalid")
 		}
 		if conversation.SourceFingerprint == "" {
 			return nil, errors.New("dispatch conversation source fingerprint is missing")
@@ -122,11 +141,22 @@ func decode(data []byte, mode os.FileMode) (*State, error) {
 			conversation.Outcomes = map[string]string{}
 		}
 		seen := map[string]bool{}
-		for _, input := range conversation.Queue {
-			if input.ID == "" || input.Text == "" || (input.Status != "queued" && input.Status != "active") || seen[input.ID] {
+		for index, input := range conversation.Queue {
+			validStatus := input.Status == inputQueued || input.Status == inputActive || state.SchemaVersion == 3 && input.Status == inputParked
+			if input.ID == "" || input.Text == "" || !validStatus || seen[input.ID] || input.Status == inputParked && index != 0 {
 				return nil, errors.New("dispatch queue state is invalid")
 			}
 			seen[input.ID] = true
+		}
+		if conversation.Interaction != nil {
+			if len(conversation.Queue) == 0 || conversation.Queue[0].Status != inputParked || conversation.Queue[0].ID != conversation.Interaction.InputID {
+				return nil, errors.New("dispatch interaction origin is invalid")
+			}
+		} else if len(conversation.Queue) > 0 && conversation.Queue[0].Status == inputParked {
+			return nil, errors.New("dispatch parked input is missing its interaction")
+		}
+		if conversation.InteractionWakePending && (conversation.Interaction != nil || len(conversation.Queue) == 0 || conversation.Queue[0].Status != inputQueued) {
+			return nil, errors.New("dispatch interaction wake state is invalid")
 		}
 		for _, id := range conversation.OutcomeOrder {
 			if id == "" || seen[id] || conversation.Outcomes[id] == "" {
@@ -141,8 +171,61 @@ func decode(data []byte, mode os.FileMode) (*State, error) {
 	return &state, nil
 }
 
+func rejectDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var walk func() error
+	walk = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delimiter, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delimiter {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return errors.New("JSON object key is invalid")
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return errors.New("JSON object key is duplicated")
+				}
+				seen[key] = struct{}{}
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+		case '[':
+			for decoder.More() {
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+		default:
+			return errors.New("JSON delimiter is invalid")
+		}
+		_, err = decoder.Token()
+		return err
+	}
+	if err := walk(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("JSON contains multiple values")
+	}
+	return nil
+}
+
 func Save(root string, state *State) error {
-	state.SchemaVersion = 2
+	state.SchemaVersion = 3
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return errors.New("cannot encode dispatch state")
@@ -194,6 +277,7 @@ func (c *Conversation) ResetLifecycle() {
 	c.Queue = nil
 	c.Outcomes = map[string]string{}
 	c.OutcomeOrder = nil
+	c.InteractionWakePending = false
 }
 
 func conversationKey(agentID, harness, id, fingerprint string) string {
@@ -212,24 +296,45 @@ func (c *Conversation) Accept(id, text string) (string, bool, error) {
 	if len(c.Queue) >= maxQueue {
 		return "", false, errors.New("queue_full")
 	}
-	c.Queue = append(c.Queue, Input{ID: id, Text: text, Status: "queued"})
-	return "queued", false, nil
+	c.Queue = append(c.Queue, Input{ID: id, Text: text, Status: inputQueued})
+	return inputQueued, false, nil
 }
 
 func (c *Conversation) StartNext() (Input, error) {
 	if len(c.Queue) == 0 {
 		return Input{}, errors.New("queue is empty")
 	}
-	if c.Queue[0].Status != "queued" {
+	if c.Queue[0].Status != inputQueued {
 		return Input{}, errors.New("next input is not queued")
 	}
-	c.Queue[0].Status = "active"
+	c.Queue[0].Status = inputActive
 	return c.Queue[0], nil
 }
 
 func (c *Conversation) Complete(id, outcome string) error {
-	if len(c.Queue) == 0 || c.Queue[0].ID != id || c.Queue[0].Status != "active" {
+	if len(c.Queue) == 0 || c.Queue[0].ID != id || c.Queue[0].Status != inputActive {
 		return fmt.Errorf("active input %s does not match durable queue", id)
+	}
+	c.Queue = c.Queue[1:]
+	c.remember(id, outcome)
+	return nil
+}
+
+// Park marks the active queue head as durably waiting for an external answer.
+// The caller must persist the matching interaction in the same transaction.
+func (c *Conversation) Park(id string) error {
+	if len(c.Queue) == 0 || c.Queue[0].ID != id || c.Queue[0].Status != inputActive {
+		return errors.New("active input does not match durable queue")
+	}
+	c.Queue[0].Status = inputParked
+	return nil
+}
+
+// CompleteParked removes a parked queue head after its interaction reaches a
+// terminal state. The caller must clear the interaction in the same transaction.
+func (c *Conversation) CompleteParked(id, outcome string) error {
+	if len(c.Queue) == 0 || c.Queue[0].ID != id || c.Queue[0].Status != inputParked {
+		return errors.New("parked input does not match durable queue")
 	}
 	c.Queue = c.Queue[1:]
 	c.remember(id, outcome)
@@ -240,7 +345,7 @@ func (c *Conversation) RecoverUncertain() []string {
 	var uncertain []string
 	kept := c.Queue[:0]
 	for _, input := range c.Queue {
-		if input.Status == "active" {
+		if input.Status == inputActive {
 			uncertain = append(uncertain, input.ID)
 			c.remember(input.ID, "uncertain")
 			continue

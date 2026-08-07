@@ -127,7 +127,7 @@ func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0, 0, nil, harness.PolicyDefault, store, nil, nil)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, 0, 0, nil, harness.PolicyDefault, store, nil, nil, nil)
 }
 
 // RunSubmissionsWithTurnTimeout drives a long-lived channel conversation while
@@ -143,7 +143,7 @@ func RunSubmissionsWithTurnTimeout(ctx context.Context, p *project.Project, driv
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout, 0, nil, harness.PolicyDefault, store, nil, nil)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, false, timeout, 0, nil, harness.PolicyDefault, store, nil, nil, nil)
 }
 
 // RunTask drives bounded task input while opening a fresh native harness
@@ -160,10 +160,10 @@ func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, con
 	if err != nil {
 		return err
 	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0, 0, nil, harness.PolicyDefault, store, nil, nil)
+	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, true, 0, 0, nil, harness.PolicyDefault, store, nil, nil, nil)
 }
 
-func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout, idleTimeout time.Duration, timers idleTimerFactory, policy harness.ExecutionPolicy, store *conversationStore, capacity *capacityCoordinator, forceHibernate <-chan struct{}) error {
+func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, freshSessions bool, turnTimeout, idleTimeout time.Duration, timers idleTimerFactory, policy harness.ExecutionPolicy, store *conversationStore, capacity *capacityCoordinator, forceHibernate, wake <-chan struct{}) error {
 	if err := validateDispatch(conversationID, emit); err != nil {
 		return err
 	}
@@ -220,7 +220,7 @@ dispatchLoop:
 		if err != nil {
 			return err
 		}
-		if active == nil && snapshot.queueLen > 0 {
+		if active == nil && snapshot.queueLen > 0 && !snapshot.waitingForInput {
 			if idle != nil {
 				idle.Stop()
 				idle = nil
@@ -367,6 +367,10 @@ dispatchLoop:
 				residentHeld = false
 			}
 			sink.emit(Event{Type: "driver.process_hibernated", SessionID: snapshot.sessionID, Status: hibernationStatus})
+		case <-wake:
+			// Recheck durable interaction state. Notifications are coalescing;
+			// restart recovery remains authoritative if one is missed.
+			continue dispatchLoop
 		case result, ok := <-submissions:
 			if !ok {
 				inputOpen = false
@@ -398,6 +402,11 @@ dispatchLoop:
 				sink.emit(Event{Type: "input.duplicate", InputID: result.InputID, Bytes: result.bytes, Status: status})
 				continue
 			}
+			if status == string(LifecycleWaiting) {
+				replySubmission(ctx, result, SubmissionResult{Status: status})
+				sink.emit(Event{Type: "input.rejected", Status: status})
+				continue
+			}
 			replySubmission(ctx, result, SubmissionResult{Status: status})
 			sink.emit(Event{Type: "input.accepted", InputID: result.InputID, Bytes: result.bytes})
 			sink.emit(Event{Type: "turn.queued", InputID: result.InputID})
@@ -421,6 +430,43 @@ dispatchLoop:
 				snapshot, _ := store.snapshot(ref)
 				sink.emit(Event{Type: "driver.process_failed", InputID: active.ID, SessionID: snapshot.sessionID, Status: "process_failure"})
 				return message.err
+			}
+			if message.result.Status == string(LifecycleWaiting) {
+				parked, snapshotErr := store.snapshot(ref)
+				if snapshotErr != nil {
+					return snapshotErr
+				}
+				if !parked.waitingForInput || parked.firstID != active.ID {
+					return errors.New("harness requested input without durable interaction state")
+				}
+				if message.result.SessionID != "" {
+					if err := store.setSessionID(ref, message.result.SessionID); err != nil {
+						return err
+					}
+				}
+				if process != nil {
+					closeTimers := timers
+					if closeTimers == nil {
+						closeTimers = newIdleTimer
+					}
+					if err := closeHarness(process, harnessCloseTimeout, closeTimers); err != nil {
+						return err
+					}
+					process = nil
+				}
+				active = nil
+				if capacity != nil && turnHeld {
+					capacity.releaseTurn(conversationID, false)
+					turnHeld = false
+				}
+				if capacity != nil && residentHeld {
+					capacity.releaseResident(conversationID)
+					residentHeld = false
+				}
+				// Waiting is a public lifecycle state, but the harness session is an
+				// implementation detail. Do not expose its identifier while parking.
+				sink.emit(Event{Type: "driver.process_hibernated", Status: string(LifecycleWaiting)})
+				continue dispatchLoop
 			}
 			terminalSessionID, err := store.complete(ref, active.ID, message.result.Status, message.result.SessionID, freshSessions)
 			if err != nil {

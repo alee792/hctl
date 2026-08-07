@@ -353,6 +353,56 @@ vendor payloads, layout nesting, URLs, executable code, credential references,
 or A2UI surface schema. A future renderer may adapt this semantic contract
 without changing what the model is allowed to request.
 
+Each dispatch conversation may persist at most one nonterminal interactive
+request in the same owner-only conversation record as its triggering input,
+queue, native session mapping, and worktree assignment. The shared conversation
+store remains the sole writer; renderers, harness continuations, MCP children,
+and vendor adapters cannot save independent snapshots. The externally meaningful
+lifecycle is `requested`, `rendered`, `answered`, `resuming`, then `completed`,
+with explicit `cancelled` and `expired` terminal outcomes and bounded terminal
+tombstones for duplicate classification.
+
+Rendering and continuation each use a commit-before-side-effect intent. The
+renderer atomically claims delivery so concurrent attempts cannot both send; a
+crash before that claim remains safe for a first attempt. A crash or ambiguous
+result after delivery intent becomes delivery-uncertain and is not automatically
+redelivered; a subsequently valid answer may prove delivery. A crash or
+ambiguous result after resume intent becomes resume-uncertain and is not
+automatically resumed. Explicit recovery may adjudicate it as completed or
+failed without invoking the harness again. Answers are normalized and committed
+exactly once
+before acknowledgement or continuation. Identical duplicates are idempotent;
+conflicting, late, expired, cancelled, unauthorized, and cross-surface answers
+are rejected. Acceptance requires the store-bound agent and conversation,
+authorized principal and surface owner, interaction ID, original request, and
+current pending record to agree; a callback or interaction ID alone is not
+authority.
+
+A terminal interaction commit also records whether a queued successor must be
+woken. The next durable input consumes that wake intent when it becomes active;
+runtime startup drains any intent left by a crash after completion,
+cancellation, or expiry but before in-memory notification.
+
+Waiting is parking rather than blocking: no live model turn, tool callback,
+channel request, resident harness process, or active-turn grant remains held.
+The pending request blocks later queued inputs for its conversation while other
+conversations continue through shared capacity. Reset rejects a nonterminal
+request, worktree reconciliation treats it as busy, and resume uncertainty also
+prevents automatic worktree retirement. Status and audit expose only
+`waiting_for_input` plus existing bounded aggregate queue and capacity state,
+never prompts, answers, identifiers, continuation keys, paths, configuration,
+or credentials.
+
+The two durable continuation modes are intentionally different. A
+**native deferred-tool continuation** later resumes the same logical tool call
+using a harness-native continuation identity. A **continuation turn** later
+opens another turn in the same native session with the normalized answer and
+request context. Neither is a blocking request. This lifecycle and coordinator
+do not themselves expose interactive input through the live runtime: the
+managed `channel.request_input` tool, Claude deferred-tool adapter, Codex
+continuation-turn adapter, and Discord renderer remain GitHub issues #21 through
+#24 respectively.
+
 New and resumed channel-managed sessions run read-only in the shared workspace:
 Claude uses native plan permission mode, Codex uses a read-only sandbox with
 approvals disabled, and the managed MCP boundary does not start or expose
@@ -701,6 +751,10 @@ The MVP is complete when credential-free tests prove:
 19. Startup reconciliation preserves every worktree that is busy, uncertain,
     dirty, unmerged, or unverifiable and retires only exact clean merged
     assignments through restart-safe, idempotent cleanup.
+20. A transport-neutral interactive request survives restart in its owning
+    dispatch conversation, accepts one authorized normalized answer exactly
+    once, parks without consuming harness or active-turn capacity, and preserves
+    ambiguous delivery or continuation as uncertain without automatic replay.
 
 ## Explicit non-goals
 

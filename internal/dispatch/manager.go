@@ -15,6 +15,7 @@ import (
 var (
 	ErrManagerClosed    = errors.New("managed sessions are closed")
 	ErrConversationBusy = errors.New("conversation is busy")
+	ErrWaitingForInput  = errors.New("waiting for input")
 )
 
 const DefaultIdleTimeout = 15 * time.Minute
@@ -26,6 +27,7 @@ const (
 	LifecycleIdle       Lifecycle = "idle"
 	LifecycleQueued     Lifecycle = "queued"
 	LifecycleActive     Lifecycle = "active"
+	LifecycleWaiting    Lifecycle = "waiting_for_input"
 	LifecycleHibernated Lifecycle = "hibernated"
 )
 
@@ -82,6 +84,7 @@ type managedConversation struct {
 	closing      bool
 	resident     bool
 	hibernate    chan struct{}
+	wake         chan struct{}
 	err          error
 }
 
@@ -147,6 +150,12 @@ func newManager(ctx context.Context, p *project.Project, driver harness.Driver, 
 	if err := manager.reconcileWorkspaces(managerCtx); err != nil {
 		cancel()
 		return nil, err
+	}
+	for _, conversation := range store.runnable(manager.reference("")) {
+		if err := manager.startDurableWorker(conversation); err != nil {
+			manager.Close()
+			return nil, err
+		}
 	}
 	return manager, nil
 }
@@ -416,6 +425,31 @@ func (m *Manager) Capacity() CapacityStatus {
 	return m.capacity.snapshot(queued)
 }
 
+// wakeInteraction coalesces a durable lifecycle notification for one worker.
+// If restart left no resident worker, it reconstructs one from dispatcher
+// state. Callers notify only after the corresponding store commit succeeds.
+func (m *Manager) wakeInteraction(conversation string) error {
+	if err := ValidateConversation(conversation); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	worker := m.workers[conversation]
+	if worker != nil && !worker.closing {
+		select {
+		case worker.wake <- struct{}{}:
+		default:
+		}
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
+	snapshot, err := m.store.snapshot(m.reference(conversation))
+	if err != nil || snapshot.queueLen == 0 || snapshot.waitingForInput {
+		return err
+	}
+	return m.startDurableWorker(conversation)
+}
+
 func (m *Manager) Diagnostics() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -491,7 +525,9 @@ func (m *Manager) reconcileWorkspaces(ctx context.Context) error {
 func statusFromSnapshot(snapshot conversationSnapshot, admissions int, resident bool) ConversationStatus {
 	pending := max(snapshot.queueLen, admissions)
 	status := ConversationStatus{State: LifecycleIdle, Pending: pending}
-	if snapshot.active {
+	if snapshot.waitingForInput {
+		status.State = LifecycleWaiting
+	} else if snapshot.active {
 		status.State = LifecycleActive
 	} else if pending > 0 {
 		status.State = LifecycleQueued
@@ -698,7 +734,7 @@ func (m *Manager) run(worker *managedConversation) {
 			}
 			m.mu.Unlock()
 			return m.emit(worker.conversation, event)
-		}, false, m.turnTimeout, m.idleTimeout, m.timers, policy, m.store, m.capacity, worker.hibernate)
+		}, false, m.turnTimeout, m.idleTimeout, m.timers, policy, m.store, m.capacity, worker.hibernate, worker.wake)
 	}
 	m.capacity.unregister(worker.conversation)
 	m.mu.Lock()
@@ -738,7 +774,7 @@ func (m *Manager) newWorkerLocked(conversation string) (*managedConversation, er
 	if err := m.capacity.register(conversation, hibernate); err != nil {
 		return nil, err
 	}
-	return &managedConversation{conversation: conversation, submissions: make(chan Submission, 32), done: make(chan struct{}), hibernate: hibernate}, nil
+	return &managedConversation{conversation: conversation, submissions: make(chan Submission, 32), done: make(chan struct{}), hibernate: hibernate, wake: make(chan struct{}, 1)}, nil
 }
 
 func (m *Manager) finishAdmission(worker *managedConversation) error {

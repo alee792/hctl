@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"hctl/internal/harness"
+	"hctl/internal/interaction"
 	"hctl/internal/project"
 	"hctl/internal/session"
 	"hctl/internal/worktree"
@@ -90,6 +91,232 @@ func TestManagerOwnsIndependentConversationLifecycles(t *testing.T) {
 		if conversation == nil || conversation.Outcomes[input.id] != "completed" {
 			t.Fatalf("durable conversation %s = %#v", input.conversation, conversation)
 		}
+	}
+}
+
+func TestManagerParkingReleasesCapacityAndPreservesSuccessor(t *testing.T) {
+	p := testProject(t)
+	driver := newNamedManagerDriver("codex")
+	waitingEvents := make(chan Event, 4)
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+		if event.Status == "waiting_for_input" {
+			waitingEvents <- event
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	for _, id := range []string{"message-1", "message-2"} {
+		if result, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: id, Text: id}); err != nil || result.Status != "queued" {
+			t.Fatalf("submit %s = %+v, %v", id, result, err)
+		}
+	}
+	driver.waitStarted(t, "message-1")
+
+	now := time.Date(2026, 8, 7, 3, 0, 0, 0, time.UTC)
+	coordinator, err := interaction.NewCoordinator(
+		manager.store.interactionStoreWithWake(manager.reference("discord-guild"), func() error { return manager.wakeInteraction("discord-guild") }),
+		dispatchRendererFunc(func(context.Context, interaction.RenderIntent) interaction.EffectOutcome {
+			return interaction.EffectSucceeded
+		}),
+		dispatchContinuationFunc(func(context.Context, interaction.ContinuationIntent) interaction.ContinuationResult {
+			return interaction.ContinuationResult{Effect: interaction.EffectSucceeded, OriginOutcome: "completed"}
+		}),
+		func() time.Time { return now },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := interaction.Request{
+		SchemaVersion: interaction.SchemaVersion, Kind: interaction.KindConfirm, Prompt: "Proceed?",
+		Policy: interaction.Policy{ExpiresAfterSeconds: interaction.MinExpirySeconds, Cancellation: interaction.CancellationAllowed},
+		Field:  &interaction.Field{ID: "approved", Kind: interaction.KindConfirm, Label: "Proceed", Required: true},
+	}
+	open := interaction.OpenRequest{
+		InteractionID: "interaction_1234567890", InputID: "message-1",
+		Owner:   interaction.Owner{SurfaceKey: strings.Repeat("a", 64), PrincipalKey: strings.Repeat("b", 64)},
+		Request: request, Resolution: interaction.Resolution{Mode: interaction.RenderNative}, Continuation: interaction.ContinuationTurn,
+	}
+	if err := coordinator.Request(open); err != nil {
+		t.Fatal(err)
+	}
+	driver.setStatus("message-1", "waiting_for_input")
+	driver.release("message-1")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		capacity := manager.Capacity()
+		if capacity.Active == 0 && capacity.Resident == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("parked capacity = %+v", capacity)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if status := manager.Status("discord-guild"); status.State != LifecycleWaiting {
+		t.Fatalf("parked status = %+v", status)
+	}
+	if result, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-3", Text: "ordinary"}); err != nil || result.Status != "waiting_for_input" {
+		t.Fatalf("ordinary waiting submission = %+v, %v", result, err)
+	}
+	select {
+	case event := <-waitingEvents:
+		if event.Type != "input.rejected" || event.Status != "waiting_for_input" || event.InputID != "" || event.Bytes != 0 {
+			t.Fatalf("waiting event = %+v", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("missing waiting rejection event")
+	}
+	select {
+	case event := <-waitingEvents:
+		t.Fatalf("waiting input emitted an extra event: %+v", event)
+	default:
+	}
+	if err := coordinator.Render(context.Background(), open.InteractionID); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := true
+	answer := interaction.Answer{SchemaVersion: interaction.SchemaVersion, Action: interaction.ActionSubmit, Fields: []interaction.FieldAnswer{{FieldID: "approved", Confirmed: &confirmed}}}
+	if _, err := coordinator.AcceptAnswer(interaction.AnswerAttempt{InteractionID: open.InteractionID, Owner: open.Owner, Answer: answer}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "message-2")
+	driver.release("message-2")
+}
+
+func TestManagerColdRestartDrainsSuccessorAfterTerminalInteraction(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		phase   interaction.Phase
+		outcome string
+		prepare func(*interaction.Lifecycle) error
+	}{
+		{name: "completed", phase: interaction.PhaseCompleted, outcome: "completed", prepare: prepareResumingInteraction},
+		{name: "cancelled", phase: interaction.PhaseCancelled, outcome: "failed", prepare: func(pending *interaction.Lifecycle) error {
+			pending.Delivery = interaction.DeliveryIntended
+			return nil
+		}},
+		{name: "expired", phase: interaction.PhaseExpired, outcome: "expired", prepare: func(*interaction.Lifecycle) error { return nil }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := testProject(t)
+			driver := newNamedManagerDriver("codex")
+			store, err := openConversationStore(p.WorkspaceRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := conversationRef{agentID: p.AgentID, harness: driver.Name(), id: "discord-guild", fingerprint: p.SourceFingerprint}
+			pending := storeTestLifecycle(test.name)
+			if _, _, err := store.accept(ref, pending.InputID, "origin"); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := store.accept(ref, "message-successor", "successor"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.startNext(ref); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.openInteraction(ref, pending); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.updateInteraction(ref, pending.ID, test.prepare); err != nil {
+				t.Fatal(err)
+			}
+			finishedAt := time.Date(2026, 8, 7, 3, 0, 0, 0, time.UTC)
+			if err := store.finishInteraction(ref, interaction.FinishRequest{InteractionID: pending.ID, Phase: test.phase, OriginOutcome: test.outcome, FinishedAt: finishedAt}); err != nil {
+				t.Fatal(err)
+			}
+			manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(string, Event) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(manager.Close)
+			driver.waitStarted(t, "message-successor")
+			driver.release("message-successor")
+		})
+	}
+}
+
+func TestManagerColdRestartAndShutdownPreserveWaitingLifecycle(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		prepare func(*interaction.Lifecycle) error
+	}{
+		{name: "requested", prepare: func(*interaction.Lifecycle) error { return nil }},
+		{name: "rendered", prepare: func(pending *interaction.Lifecycle) error {
+			pending.Phase = interaction.PhaseRendered
+			pending.Delivery = interaction.DeliveryDelivered
+			return nil
+		}},
+		{name: "answered", prepare: func(pending *interaction.Lifecycle) error {
+			if err := prepareResumingInteraction(pending); err != nil {
+				return err
+			}
+			pending.Phase = interaction.PhaseAnswered
+			pending.Resume = interaction.ResumePending
+			return nil
+		}},
+		{name: "resume-uncertain", prepare: func(pending *interaction.Lifecycle) error {
+			if err := prepareResumingInteraction(pending); err != nil {
+				return err
+			}
+			pending.Resume = interaction.ResumeUncertain
+			return nil
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := testProject(t)
+			driver := newNamedManagerDriver("codex")
+			store, err := openConversationStore(p.WorkspaceRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := conversationRef{agentID: p.AgentID, harness: driver.Name(), id: "discord-guild", fingerprint: p.SourceFingerprint}
+			pending := storeTestLifecycle(test.name)
+			if _, _, err := store.accept(ref, pending.InputID, "origin"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.startNext(ref); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.openInteraction(ref, pending); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.updateInteraction(ref, pending.ID, test.prepare); err != nil {
+				t.Fatal(err)
+			}
+			expected, err := store.loadInteraction(ref)
+			if err != nil || expected.Pending == nil {
+				t.Fatalf("expected state = %#v, %v", expected.Pending, err)
+			}
+			manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(string, Event) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status := manager.Status("discord-guild"); status.State != LifecycleWaiting {
+				t.Fatalf("status = %+v", status)
+			}
+			if capacity := manager.Capacity(); capacity.Active != 0 || capacity.Resident != 0 {
+				t.Fatalf("capacity = %+v", capacity)
+			}
+			if driver.openCount() != 0 {
+				t.Fatalf("opened processes = %d", driver.openCount())
+			}
+			manager.Close()
+			reloaded, err := openConversationStore(p.WorkspaceRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := reloaded.loadInteraction(ref)
+			if err != nil || state.Pending == nil || state.Pending.Phase != expected.Pending.Phase || state.Pending.Resume != expected.Pending.Resume {
+				t.Fatalf("preserved state = %#v, %v", state.Pending, err)
+			}
+		})
 	}
 }
 
@@ -1418,7 +1645,7 @@ func TestManagedRunBoundsBlockedCloseAfterAdmissionsStop(t *testing.T) {
 		done <- runSubmissions(context.Background(), p, driver, "discord-guild", submissions, func(event Event) error {
 			events <- event
 			return nil
-		}, false, time.Minute, time.Hour, clock.NewTimer, harness.PolicyReadOnly, store, nil, nil)
+		}, false, time.Minute, time.Hour, clock.NewTimer, harness.PolicyReadOnly, store, nil, nil, nil)
 	}()
 	reply := make(chan SubmissionResult, 1)
 	submissions <- Submission{InputID: "message-1", Text: "first", Reply: reply}
@@ -1616,6 +1843,7 @@ type managerDriver struct {
 	inputRoots    map[string]string
 	inputSessions map[string]string
 	failures      map[string]error
+	statuses      map[string]string
 	openErr       error
 	closeErr      error
 	closeWait     chan struct{}
@@ -1630,7 +1858,7 @@ func newManagerDriver() *managerDriver {
 }
 
 func newNamedManagerDriver(name string) *managerDriver {
-	return &managerDriver{name: name, started: make(chan string, 16), releases: map[string]chan struct{}{}, inputRoots: map[string]string{}, inputSessions: map[string]string{}, failures: map[string]error{}}
+	return &managerDriver{name: name, started: make(chan string, 16), releases: map[string]chan struct{}{}, inputRoots: map[string]string{}, inputSessions: map[string]string{}, failures: map[string]error{}, statuses: map[string]string{}}
 }
 
 func (d *managerDriver) Name() string                 { return d.name }
@@ -1682,6 +1910,12 @@ func (d *managerDriver) release(id string) {
 	release := d.releases[id]
 	d.mu.Unlock()
 	close(release)
+}
+
+func (d *managerDriver) setStatus(id, status string) {
+	d.mu.Lock()
+	d.statuses[id] = status
+	d.mu.Unlock()
 }
 
 func (d *managerDriver) openCount() int {
@@ -1896,6 +2130,7 @@ func (s *managerSession) RunTurn(ctx context.Context, input harness.Input, emit 
 	s.driver.inputRoots[input.ID] = s.root
 	s.driver.inputSessions[input.ID] = s.sessionID
 	failure := s.driver.failures[input.ID]
+	status := s.driver.statuses[input.ID]
 	s.driver.mu.Unlock()
 	emit(harness.Event{Type: "turn.started", SessionID: s.sessionID, TurnID: input.ID})
 	s.driver.started <- input.ID
@@ -1908,7 +2143,10 @@ func (s *managerSession) RunTurn(ctx context.Context, input harness.Input, emit 
 		return harness.TurnResult{}, failure
 	}
 	emit(harness.Event{Type: "agent.output.delta", SessionID: s.sessionID, TurnID: input.ID, Delta: "ok"})
-	return harness.TurnResult{SessionID: s.sessionID, TurnID: input.ID, Status: "completed"}, nil
+	if status == "" {
+		status = "completed"
+	}
+	return harness.TurnResult{SessionID: s.sessionID, TurnID: input.ID, Status: status}, nil
 }
 
 func (s *managerSession) Close() error {
@@ -1991,8 +2229,31 @@ func (t *fakeIdleTimer) Fire() {
 }
 
 func TestManagerStatusValuesStayBounded(t *testing.T) {
-	values := []Lifecycle{LifecycleInactive, LifecycleIdle, LifecycleQueued, LifecycleActive, LifecycleHibernated}
-	if !reflect.DeepEqual(values, []Lifecycle{"inactive", "idle", "queued", "active", "hibernated"}) {
+	values := []Lifecycle{LifecycleInactive, LifecycleIdle, LifecycleQueued, LifecycleActive, LifecycleWaiting, LifecycleHibernated}
+	if !reflect.DeepEqual(values, []Lifecycle{"inactive", "idle", "queued", "active", "waiting_for_input", "hibernated"}) {
 		t.Fatalf("lifecycle values = %v", values)
+	}
+}
+
+func TestManagerStatusRedactsPendingInteraction(t *testing.T) {
+	p := testProject(t)
+	manager, err := NewManager(context.Background(), p, newManagerDriver(), time.Minute, func(string, Event) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	ref := manager.reference("discord-guild")
+	pending := storeTestLifecycle("status")
+	pending.InputID = "message-status"
+	openStoreTestInteraction(t, manager.store, ref, pending)
+	status := manager.Status("discord-guild")
+	if status.State != LifecycleWaiting {
+		t.Fatalf("status = %+v", status)
+	}
+	encoded := fmt.Sprintf("%+v", status)
+	for _, secret := range []string{"Proceed?", "interaction_", "message-status", "aaaa"} {
+		if strings.Contains(encoded, secret) {
+			t.Fatalf("status leaked interaction state: %s", encoded)
+		}
 	}
 }

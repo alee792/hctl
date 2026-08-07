@@ -68,8 +68,16 @@ reviews layer beside the existing hctl-specific review skills.
 The transport-neutral interactive request contract is implemented as a strict
 in-process module with conformance fixtures for confirmations, choices, text,
 date/time input, forms, normalized answers, and deterministic text fallback.
-It is not yet exposed as a managed model tool or connected to durable input
-lifecycle state or a Discord renderer; those remain separate follow-up slices.
+Its interaction coordinator now stores one pending request in the owning
+dispatch conversation through the existing serialized state owner. It commits
+delivery and resume intent before external effects, preserves ambiguous effects
+as uncertain without automatic replay, validates exactly-once authorized
+answers, retains bounded terminal tombstones, blocks later input in that
+conversation, and makes reset and worktree reconciliation preserve nonterminal
+work. The coordinator distinguishes native deferred-tool continuation from a
+later continuation turn, but neither harness continuation is wired. It is not
+yet exposed as a managed model tool or connected to a Discord renderer; GitHub
+issues #21 through #24 own those live tool, harness, and channel adapter slices.
 
 The [credential-free clean-install check](../../spikes/clean-install/README.md)
 creates a disposable exact-tagged `darwin-arm64` release archive, verifies its
@@ -265,6 +273,15 @@ already merged into the base are retired. A durable retirement marker makes
 partial cleanup retryable without broad or forced deletion, and local
 diagnostics explain preservation or recovery while Discord status stays
 redacted.
+
+The durable interactive-input foundation extends that same conversation record
+and sole-writer state path rather than introducing a second state file. The
+accepted runtime integration exposes only `waiting_for_input` and must park
+without retaining model-turn or harness capacity. The dispatch state already
+rejects reset while an interaction is nonterminal and treats that work as busy;
+ambiguous continuation also prevents automatic worktree retirement. The live
+Discord bot cannot render or answer these requests yet, and Claude and Codex do
+not yet resume them; those claims remain deferred to issues #21 through #24.
 
 A [live Discord acceptance pass](discord-live-acceptance.md) with an enrolled
 user-controlled bot exercised independent guild and DM write promotion,

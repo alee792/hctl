@@ -282,6 +282,37 @@ rotation happens only between turns and preserves every queued input. Duplicate
 delivery consumes neither a new queue entry nor capacity. `/status` includes
 only aggregate active, resident, limit, and queued counts.
 
+Channel-native human input uses a **transport-neutral interactive request**,
+not unrestricted generative UI. The versioned semantic union contains exactly
+`confirm`, `choose_one`, `choose_many`, `text`, `date_time`, and a modest
+`form`. Every request has a bounded prompt, an optional bounded text fallback,
+a relative expiry of 60 seconds through seven days, and an explicit allowed or
+forbidden cancellation policy. Its fields and choices use stable semantic IDs;
+choice labels, descriptions, values, selection cardinality, freeform input,
+text lengths, and date/time representation are explicit and bounded. A form
+has at most eight fields, each choice has at most 25 options, the whole request
+has at most 64 options and 32 KiB of encoded JSON, and answers have at most
+16 KiB of encoded JSON. Prompts are at most 2 KiB, fallbacks 4 KiB, labels 100
+bytes, descriptions 300 bytes, option values 256 bytes, and text answers 4,000
+Unicode code points. Semantic IDs contain 1-64 lowercase ASCII letters,
+digits, underscores, or hyphens, begin with a letter, and are unique within
+their request scope. Date input is canonical `YYYY-MM-DD`, time input is
+24-hour `HH:MM`, and combined date/time input is RFC 3339 with an explicit
+offset and is normalized to UTC.
+
+Answers refer only to the request's stable field and option IDs. Trusted hctl
+code independently validates them, orders fields and choices by the original
+request, normalizes text line endings and date/time representations, and
+rejects missing, duplicate, unknown, out-of-range, or inapplicable values.
+Adapters advertise supported request kinds and concrete limits before a
+lifecycle waits for input. An unsupported request deterministically uses its
+specified text fallback or fails clearly when no fallback exists. Hctl assigns
+interaction and callback IDs, ownership, authorization, expiry timestamps, and
+continuation metadata; none are model-authored fields. The contract has no raw
+vendor payloads, layout nesting, URLs, executable code, credential references,
+or A2UI surface schema. A future renderer may adapt this semantic contract
+without changing what the model is allowed to request.
+
 New and resumed channel-managed sessions run read-only in the shared workspace:
 Claude uses native plan permission mode, Codex uses a read-only sandbox with
 approvals disabled, and the managed MCP boundary does not start or expose

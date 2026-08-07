@@ -64,6 +64,12 @@ The maintainer agent includes Matt Pocock's MIT-licensed `code-review` skill
 as a pinned, attributed portable import. Its independent Standards and Spec
 reviews layer beside the existing hctl-specific review skills.
 
+The transport-neutral interactive request contract is implemented as a strict
+in-process module with conformance fixtures for confirmations, choices, text,
+date/time input, forms, normalized answers, and deterministic text fallback.
+It is not yet exposed as a managed model tool or connected to durable input
+lifecycle state or a Discord renderer; those remain separate follow-up slices.
+
 The [credential-free clean-install check](../../spikes/clean-install/README.md)
 creates a disposable exact-tagged `darwin-arm64` release archive, verifies its
 checksum, extracts it into an isolated install prefix, copies a minimal agent

@@ -1,0 +1,1 @@
+{"schema_version":1,"kind":"text","prompt":"What should the release note say?","fallback_text":"Reply with release-note text between 5 and 200 characters.","policy":{"expires_after_seconds":7200,"cancellation":"allowed"},"field":{"id":"release_note","kind":"text","label":"Release note","description":"Shown to users","required":true,"min_length":5,"max_length":200}}

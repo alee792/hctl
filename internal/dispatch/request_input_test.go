@@ -82,8 +82,9 @@ func TestFakeHarnessEventParksThroughDurableCoordinatorBeforeAcknowledgement(t *
 	submissions <- Submission{InputID: "message-1", Text: "deploy"}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	events := make(chan Event, 32)
 	go func() {
-		done <- runSubmissions(ctx, p, driver, "discord-guild", submissions, func(Event) error { return nil }, runOptions{
+		done <- runSubmissions(ctx, p, driver, "discord-guild", submissions, func(event Event) error { events <- event; return nil }, runOptions{
 			turnTimeout: time.Minute, idleTimeout: time.Hour, timers: newIdleTimer,
 			policy: harness.PolicyReadOnly, store: store, requestInputs: handler,
 		})
@@ -93,6 +94,25 @@ func TestFakeHarnessEventParksThroughDurableCoordinatorBeforeAcknowledgement(t *
 	second := <-driver.replies
 	if !first.Accepted || first.Status != "accepted" || second.Accepted || second.Status != "rejected" {
 		t.Fatalf("harness acknowledgements = %#v, %#v", first, second)
+	}
+	seenHibernated := false
+	for !seenHibernated {
+		select {
+		case event := <-events:
+			if event.Type == "driver.process_hibernated" {
+				seenHibernated = true
+			}
+		case <-time.After(time.Second):
+			t.Fatal("dispatcher did not hibernate before render notification")
+		}
+	}
+	select {
+	case event := <-events:
+		if event.Type != "interaction.parked" || event.Status != string(harness.RequestInputContinuationTurn) || event.InputID != "message-1" {
+			t.Fatalf("parked event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher did not emit render notification after hibernation")
 	}
 	snapshot, err := store.snapshot(ref)
 	if err != nil || !snapshot.waitingForInput || snapshot.firstID != "message-1" {

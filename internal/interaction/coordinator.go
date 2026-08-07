@@ -39,6 +39,20 @@ type RenderIntent struct {
 	Resolution    Resolution
 }
 
+// PendingInteraction is the controller-facing durable snapshot used for
+// recovery and callback authorization. Lifecycle metadata never crosses the
+// narrower Renderer boundary.
+type PendingInteraction struct {
+	InteractionID string
+	InputID       string
+	Owner         Owner
+	Request       Request
+	Resolution    Resolution
+	ExpiresAt     time.Time
+	Continuation  ContinuationMode
+	Phase         Phase
+}
+
 type Renderer interface {
 	Render(context.Context, RenderIntent) EffectOutcome
 }
@@ -103,6 +117,17 @@ type Coordinator struct {
 	renderer     Renderer
 	continuation Continuation
 	now          func() time.Time
+}
+
+// Pending returns a detached semantic snapshot for an authorized adapter to
+// validate and decode a callback against current durable state.
+func (c *Coordinator) Pending() (PendingInteraction, bool, error) {
+	state, err := c.store.Load()
+	if err != nil || state.Pending == nil {
+		return PendingInteraction{}, false, err
+	}
+	pending := state.Pending
+	return PendingInteraction{InteractionID: pending.ID, InputID: pending.InputID, Owner: pending.Owner, Request: pending.Request, Resolution: pending.Resolution, ExpiresAt: pending.ExpiresAt, Continuation: pending.Continuation, Phase: pending.Phase}, true, nil
 }
 
 func NewCoordinator(store Store, renderer Renderer, continuation Continuation, now func() time.Time) (*Coordinator, error) {

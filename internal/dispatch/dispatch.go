@@ -200,6 +200,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	var process harness.Session
 	turnHeld := false
 	residentHeld := false
+	parkedDisposition := harness.RequestInputDisposition("")
 	var idle idleTimer
 	var idleC <-chan time.Time
 	turns := make(chan turnMessage, 64)
@@ -434,7 +435,12 @@ dispatchLoop:
 				if message.event.RequestInput != nil {
 					// The coordinator commit occurs on this serialized loop before
 					// the harness-side bridge receives its acknowledgement.
-					_ = handleRequestInput(ctx, requestInputs, conversationID, active.ID, message.event.RequestInput)
+					if handleRequestInput(ctx, requestInputs, conversationID, active.ID, message.event.RequestInput) == nil {
+						parkedDisposition = harness.RequestInputContinuationTurn
+						if message.event.RequestInput.ContinuationKey != "" {
+							parkedDisposition = harness.RequestInputDeferred
+						}
+					}
 					continue
 				}
 				if message.event.SessionID != "" {
@@ -488,6 +494,8 @@ dispatchLoop:
 				// Waiting is a public lifecycle state, but the harness session is an
 				// implementation detail. Do not expose its identifier while parking.
 				sink.emit(Event{Type: "driver.process_hibernated", Status: string(LifecycleWaiting)})
+				sink.emit(Event{Type: "interaction.parked", InputID: parked.firstID, TurnID: message.result.TurnID, Status: string(parkedDisposition)})
+				parkedDisposition = ""
 				continue dispatchLoop
 			}
 			terminalSessionID, err := store.complete(ref, active.ID, message.result.Status, message.result.SessionID, freshSessions)

@@ -21,6 +21,7 @@ import (
 	"hctl/internal/channelconfig"
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
+	"hctl/internal/interaction"
 	"hctl/internal/project"
 )
 
@@ -52,6 +53,10 @@ type channelController interface {
 	Submit(context.Context, controller.Inbound) (dispatch.SubmissionResult, error)
 	Status(string) controller.Status
 	Reset(string, string) error
+	PendingInteraction(string, string) (interaction.PendingInteraction, bool, error)
+	AcceptInteraction(string, string, interaction.AnswerAttempt) (interaction.AnswerDisposition, error)
+	ContinueInteraction(string) error
+	RenderInteraction(string, string) (bool, error)
 	Done() <-chan struct{}
 	Err() error
 	Close()
@@ -73,10 +78,14 @@ type Runtime struct {
 	deliver             func(string, *discordgo.MessageSend) error
 	typing              func(string) error
 	interactionResponse func(*discordgo.Interaction, string)
+	respondNative       func(*discordgo.Interaction, *discordgo.InteractionResponse) error
+	validateIdentity    func(context.Context, string) (Identity, error)
 
-	mu     sync.Mutex
-	closed bool
-	lock   *flock.Flock
+	mu          sync.Mutex
+	closed      bool
+	lock        *flock.Flock
+	targets     map[string]replyTarget
+	targetOrder []string
 }
 
 func ValidateIdentity(ctx context.Context, token string) (Identity, error) {
@@ -183,30 +192,44 @@ func New(p *project.Project, driver harness.Driver, config Config) (*Runtime, er
 	ctx, cancel := context.WithCancel(context.Background())
 	runtime := &Runtime{
 		project: p, driver: driver, config: config, session: s, ctx: ctx, cancel: cancel,
+		targets: map[string]replyTarget{}, validateIdentity: ValidateIdentity,
 	}
 	runtime.deliver = func(channelID string, message *discordgo.MessageSend) error {
 		_, err := s.ChannelMessageSendComplex(channelID, message)
 		return err
 	}
 	runtime.typing = func(channelID string) error { return s.ChannelTyping(channelID) }
-	channelController, err := controller.New(ctx, controller.Config{
-		Project: p, Driver: driver, TurnTimeout: config.TurnTimeout, IdleTimeout: config.IdleTimeout,
-		MaxResident: config.MaxResident, MaxActive: config.MaxActive, Executable: config.Executable,
-		Audit: config.Audit, AuditPrefix: "Discord",
-	}, runtime)
-	if err != nil {
-		cancel()
-		return nil, err
+	runtime.respondNative = func(interaction *discordgo.Interaction, response *discordgo.InteractionResponse) error {
+		return s.InteractionRespond(interaction, response)
 	}
-	runtime.controller = channelController
 	s.AddHandler(runtime.handleMessage)
 	s.AddHandler(runtime.handleInteraction)
 	return runtime, nil
 }
 
+// startController crosses the trusted runtime boundary only after Run has
+// validated the token identity and acquired the per-application lock.
+func (r *Runtime) startController() error {
+	if r.controller != nil {
+		return nil
+	}
+	channelController, err := controller.New(r.ctx, controller.Config{
+		Project: r.project, Driver: r.driver, TurnTimeout: r.config.TurnTimeout, IdleTimeout: r.config.IdleTimeout,
+		MaxResident: r.config.MaxResident, MaxActive: r.config.MaxActive, Executable: r.config.Executable,
+		Audit: r.config.Audit, AuditPrefix: "Discord",
+		Interactions:    r,
+		InitialSurfaces: []controller.InitialSurface{{SurfaceID: r.config.Runtime.AllowedChannelID, ConversationID: conversationID(r.config.Runtime.ApplicationID, r.config.Runtime.AllowedChannelID)}},
+	}, r)
+	if err != nil {
+		return err
+	}
+	r.controller = channelController
+	return nil
+}
+
 func (r *Runtime) Run(ctx context.Context) error {
 	defer r.Close()
-	identity, err := ValidateIdentity(ctx, r.config.Token)
+	identity, err := r.validateIdentity(ctx, r.config.Token)
 	if err != nil {
 		return err
 	}
@@ -223,12 +246,16 @@ func (r *Runtime) Run(ctx context.Context) error {
 	}
 	r.lock = lock
 	defer func() { _ = lock.Unlock() }()
+	if err := r.startController(); err != nil {
+		return err
+	}
 	if err := r.registerCommands(identity.ApplicationID); err != nil {
 		return err
 	}
 	if err := r.session.Open(); err != nil {
 		return errors.New("cannot connect to the Discord Gateway")
 	}
+	r.recoverSurface(r.config.Runtime.AllowedChannelID)
 	_, _ = fmt.Fprintf(r.config.Audit, "Discord connected profile=%s agent=%s\n", r.config.Profile, r.project.Name)
 	select {
 	case <-ctx.Done():
@@ -250,12 +277,23 @@ func (r *Runtime) Close() {
 	r.mu.Unlock()
 	r.cancel()
 	_ = r.session.Close()
-	r.controller.Close()
+	if r.controller != nil {
+		r.controller.Close()
+	}
 }
 
 func (r *Runtime) handleMessage(_ *discordgo.Session, incoming *discordgo.MessageCreate) {
 	profile := r.config.Runtime
 	if !eligibleMessage(profile, incoming) {
+		return
+	}
+	if r.handleFallbackReply(incoming) {
+		return
+	}
+	conversation := conversationID(r.config.Runtime.ApplicationID, incoming.ChannelID)
+	if pending, ok, _ := r.controller.PendingInteraction(incoming.ChannelID, conversation); ok {
+		r.rememberTarget(pending.InputID, replyTarget{channelID: incoming.ChannelID, messageID: pending.InputID})
+		_, _ = r.controller.RenderInteraction(incoming.ChannelID, conversation)
 		return
 	}
 	surfaceKind := "guild"
@@ -270,12 +308,15 @@ func (r *Runtime) handleMessage(_ *discordgo.Session, incoming *discordgo.Messag
 	if err != nil {
 		return
 	}
+	target := replyTarget{channelID: incoming.ChannelID, messageID: incoming.ID}
+	r.rememberTarget(incoming.ID, target)
 	_, err = r.controller.Submit(r.ctx, controller.Inbound{
-		SurfaceID: incoming.ChannelID, ConversationID: conversationID(r.config.Runtime.ApplicationID, incoming.ChannelID),
+		SurfaceID: incoming.ChannelID, ConversationID: conversation,
 		InputID: incoming.ID, Text: "Discord message (JSON):\n" + string(text),
-		Target: replyTarget{channelID: incoming.ChannelID, messageID: incoming.ID},
+		Target: target,
 	})
 	if err != nil {
+		r.forgetTarget(incoming.ID)
 		return
 	}
 }
@@ -303,7 +344,17 @@ func directMessage(botUserID string, incoming *discordgo.MessageCreate) bool {
 }
 
 func (r *Runtime) handleInteraction(_ *discordgo.Session, incoming *discordgo.InteractionCreate) {
-	if incoming == nil || incoming.Type != discordgo.InteractionApplicationCommand {
+	if incoming == nil {
+		return
+	}
+	if incoming.Type == discordgo.InteractionMessageComponent || incoming.Type == discordgo.InteractionModalSubmit {
+		r.handleComponent(incoming)
+		return
+	}
+	if incoming.Type != discordgo.InteractionApplicationCommand {
+		return
+	}
+	if incoming.AppID != "" && incoming.AppID != r.config.Runtime.ApplicationID {
 		return
 	}
 	userID := ""
@@ -347,6 +398,7 @@ func (r *Runtime) Typing(target any) error {
 }
 
 func (r *Runtime) Deliver(outcome controller.Outcome) error {
+	r.forgetTarget(outcome.InputID)
 	reply, ok := outcome.Target.(replyTarget)
 	if !ok {
 		return errors.New("discord reply target is invalid")

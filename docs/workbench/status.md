@@ -96,9 +96,9 @@ proof rather than a process-wide flag; Codex derives that proof from exact
 app-server thread and turn provenance, so a propagated subagent call fails
 before persistence. Harness strategies own the bounded result disposition, and
 audit correlation excludes semantic request bytes. Harnesses opt into their
-native strategy only when a handler exists; production advertisement remains
-disabled until the Discord responder is wired. Credentialed acceptance remains
-issue #25 after the responder work and is not claimed here.
+native strategy only when a handler exists. The live Discord runtime now binds
+that handler to its renderer and deterministic text fallback codec;
+credentialed acceptance remains issue #25 and is not claimed here.
 
 The [credential-free clean-install check](../../spikes/clean-install/README.md)
 creates a disposable exact-tagged `darwin-arm64` release archive, verifies its
@@ -301,14 +301,19 @@ accepted runtime integration exposes only `waiting_for_input` and must park
 without retaining model-turn or harness capacity. The dispatch state already
 rejects reset while an interaction is nonterminal and treats that work as busy;
 ambiguous continuation also prevents automatic worktree retirement. The
-generic managed request-input schema and dispatcher handoff now exist but are
-deliberately not advertised by the live runtime until a responder is bound.
+generic managed request-input schema and dispatcher handoff are advertised only
+for the live Discord root after its compatible responder is bound.
 Codex has a fake-tested continuation-turn strategy and Claude has a fake-tested
 native deferred-tool strategy, both with root provenance and manager-owned
-capacity. The live Discord bot cannot render or answer these requests yet.
-Fake child processes provide live-style process-exit, same-session resume, and
-final controller-delivery evidence; credentialed end-to-end acceptance is
-issue #25 after the Discord responder lands, and is not claimed here.
+capacity. The Discord adapter now renders bounded native confirmations,
+non-freeform choices, text, and text-only forms through stable DiscordGo v0.29
+components, with deterministic degradation to an hctl-owned text grammar.
+Opaque reconstructable callback handles, exact application/user/surface
+authorization, durable answer-before-ack ordering, post-ack continuation, and
+ambiguous-delivery no-retry behavior are fake-tested. Fake child processes
+provide live-style process-exit, same-session resume, and final controller
+delivery evidence; credentialed end-to-end acceptance remains issue #25 and is
+not claimed here.
 
 A [live Discord acceptance pass](discord-live-acceptance.md) with an enrolled
 user-controlled bot exercised independent guild and DM write promotion,

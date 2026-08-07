@@ -207,6 +207,22 @@ func TestControllerRejectsBusyResetAndStopsAdmissionOnClose(t *testing.T) {
 	}
 }
 
+func TestControllerExpiryReleasesPendingSurface(t *testing.T) {
+	c, managed, _ := testController(t, 100)
+	submit(t, c, "surface", "conversation", "input", "target")
+	c.rendered["conversation"] = "interaction"
+	c.handleDispatch("conversation", dispatch.Event{Type: "interaction.expired", InputID: "input"})
+	if err := c.Reset("surface", "conversation"); err != nil {
+		t.Fatalf("reset after expiry: %v", err)
+	}
+	if _, exists := c.rendered["conversation"]; exists {
+		t.Fatal("expired interaction remained rendered")
+	}
+	if !reflect.DeepEqual(managed.resets, []string{"conversation"}) {
+		t.Fatalf("resets = %#v", managed.resets)
+	}
+}
+
 func TestControllerCloseSuppressesTerminalEventsForPendingWork(t *testing.T) {
 	c, managed, delivery := testController(t, 100)
 	managed.submitResults = []dispatch.SubmissionResult{{Status: "active"}, {Status: "queued"}}

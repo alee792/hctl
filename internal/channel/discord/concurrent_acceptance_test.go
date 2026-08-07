@@ -58,6 +58,12 @@ func TestConcurrentDiscordMutationsUseRealHarnessAdaptersAndWorktrees(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
+			if runtime.controller != nil {
+				t.Fatal("controller started before Discord identity validation and application lock")
+			}
+			if err := runtime.startController(); err != nil {
+				t.Fatal(err)
+			}
 			t.Cleanup(runtime.Close)
 			runtime.typing = func(string) error { return nil }
 			deliveries := make(chan acceptanceDelivery, 2)
@@ -120,6 +126,9 @@ func TestConcurrentDiscordMutationsUseRealHarnessAdaptersAndWorktrees(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
+			if err := restarted.startController(); err != nil {
+				t.Fatal(err)
+			}
 			restarted.Close()
 			if strings.Count(audit.String(), "dirty or untracked work") != 2 {
 				t.Fatalf("restart reconciliation diagnostics:\n%s", audit.String())
@@ -180,6 +189,9 @@ func TestDiscordStartupRetiresOnlyProvenCleanMergedWorktree(t *testing.T) {
 				Runtime: channelconfig.Profile{ApplicationID: "application", BotUserID: "bot", AllowedUserID: "person", AllowedGuildID: "guild", AllowedChannelID: "guild-channel"},
 			})
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.startController(); err != nil {
 				t.Fatal(err)
 			}
 			runtime.Close()

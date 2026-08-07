@@ -138,11 +138,7 @@ docker run --rm --entrypoint /bin/sh "$direct_image" -c '
   test -f /workspace/.hctl/apply/codex.json
   test ! -e /workspace/.claude
   test ! -e /workspace/CLAUDE.md
-  test ! -e /home/hctl/.codex/auth.json
-  test -z "$(find /home/hctl/.codex -mindepth 1 -maxdepth 1 ! -name tmp -print -quit)"
-  if [ -d /home/hctl/.codex/tmp ]; then
-    test -z "$(find /home/hctl/.codex/tmp -mindepth 1 -print -quit)"
-  fi
+  test -z "$(find /home/hctl/.codex -mindepth 1 -print -quit)"
 '
 
 docker build --platform linux/amd64 \

@@ -14,6 +14,22 @@ import (
 	"hctl/internal/interaction"
 )
 
+func TestVerifyDoesNotMutateConfiguredHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	executable := writeExecutable(t, "#!/bin/sh\nmkdir -p \"$HOME/.codex/tmp\"\n: > \"$HOME/.codex/tmp/arg0\"\necho 'codex-cli 0.144.1'\n")
+	if err := New(executable).Verify(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("verification mutated configured home: %v", entries)
+	}
+}
+
 func TestAppServerStartTurnAndResume(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "codex.log")
 	t.Setenv("FAKE_LOG", logPath)

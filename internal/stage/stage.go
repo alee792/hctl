@@ -108,8 +108,13 @@ type ManifestFile struct {
 
 // HarnessVersion returns the semantic version reported by a verified harness.
 func HarnessVersion(ctx context.Context, executable string) (string, error) {
+	home, err := os.MkdirTemp("", "hctl-harness-version-")
+	if err != nil {
+		return "", errors.New("cannot isolate harness version inspection")
+	}
+	defer func() { _ = os.RemoveAll(home) }()
 	command := exec.CommandContext(ctx, executable, "--version")
-	command.Env = secureenv.Child()
+	command.Env = secureenv.Staging(home)
 	output, err := command.Output()
 	if err != nil || len(output) > 4096 {
 		return "", errors.New("cannot read harness version")

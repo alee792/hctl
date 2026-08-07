@@ -1,0 +1,1 @@
+{"schema_version":1,"kind":"date_time","prompt":"When should the release begin?","fallback_text":"Reply with an RFC 3339 timestamp including its UTC offset.","policy":{"expires_after_seconds":86400,"cancellation":"allowed"},"field":{"id":"release_at","kind":"date_time","label":"Release time","required":true,"date_time_representation":"date_time"}}

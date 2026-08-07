@@ -1,0 +1,1 @@
+{"schema_version":1,"kind":"confirm","prompt":"Deploy the approved release?","fallback_text":"Reply yes to deploy or no to stop.","policy":{"expires_after_seconds":3600,"cancellation":"allowed"},"field":{"id":"deploy_release","kind":"confirm","label":"Deploy release","required":true}}

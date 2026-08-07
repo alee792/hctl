@@ -1,0 +1,1 @@
+{"schema_version":1,"action":"submit","fields":[{"field_id":"note","text":"Canary first"},{"field_id":"release_date","date_time":"2026-08-07"},{"field_id":"environment","option_ids":["staging"]}]}

@@ -11,6 +11,17 @@ guild channel and that user's DM, maps each surface to a durable turn-dispatch
 conversation, buffers native-harness output, and replies in the same channel.
 It requires no public listener, tunnel, TLS endpoint, or HTTP interaction key.
 
+A transport-neutral channel controller sits between the durable dispatcher and
+built-in vendor adapters. It owns deterministic surface registration,
+pending-turn correlation, bounded complete-response buffering, exact control
+result suppression, one-time write continuation, typing readiness, terminal
+failure classification, status/reset delegation, and dispatcher lifecycle.
+Vendor adapters admit and normalize native events and retain vendor identity,
+credentials, commands, reply targets, rendering, mentions policy, typing and
+delivery calls, and ambiguous-delivery semantics. Vendor payloads and reply
+targets remain process-local and never cross into dispatcher or durable session
+state. This is an internal seam, not a public or dynamically loaded plugin ABI.
+
 Portable `channels/discord.md` contains strict `mode: ambient` frontmatter and a
 bounded participation policy. Apply fingerprints the original source and adds
 the policy plus an exact `HCTL_NO_REPLY` control result to generated harness
@@ -42,6 +53,10 @@ idle surface; `/status` returns redacted runtime state without a model turn.
 - Other users, channels, bots, and webhooks are discarded before dispatch.
 - Replies are bounded, disable mentions, and are never retried after ambiguous
   delivery.
+- A second built-in adapter can reuse channel orchestration without importing
+  Discord types or duplicating the dispatcher-event state machine.
+- Rich forms, buttons, component schemas, and capability negotiation remain a
+  separate design decision rather than part of the controller interface.
 - Direct multi-agent routing, multiple channels/users, HTTP mode, proactive
   schedule delivery, hosted secret managers, and horizontal replicas are
   deferred.

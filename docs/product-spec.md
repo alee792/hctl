@@ -248,7 +248,14 @@ and removes the token from every child-process environment.
 
 `hctl run` auto-applies missing or stale setup, then serves the authorized user
 in one guild channel and DM. Each surface has independent durable dispatcher
-state. One deterministic managed-session lifecycle owns each surface's queue,
+state. A transport-neutral channel controller owns surface registration,
+pending-turn correlation, complete-response buffering and control-result
+handling, typing readiness, terminal classification, status/reset delegation,
+and dispatcher lifecycle. The Discord adapter retains Gateway/REST integration,
+authorization, native event filtering, reply references, rendering, mentions,
+commands, and delivery semantics. Transport-owned reply targets remain
+process-local and vendor payloads never enter dispatcher or durable state. One
+deterministic managed-session lifecycle owns each surface's queue,
 native session mapping, and resident harness process, while a shared state
 owner serializes durable updates across surfaces. Other users, channels, bots,
 and webhooks are ignored. Output is buffered until completion, exact
@@ -274,6 +281,37 @@ hibernates before a replacement opens; if all residents have backlogs, fair
 rotation happens only between turns and preserves every queued input. Duplicate
 delivery consumes neither a new queue entry nor capacity. `/status` includes
 only aggregate active, resident, limit, and queued counts.
+
+Channel-native human input uses a **transport-neutral interactive request**,
+not unrestricted generative UI. The versioned semantic union contains exactly
+`confirm`, `choose_one`, `choose_many`, `text`, `date_time`, and a modest
+`form`. Every request has a bounded prompt, an optional bounded text fallback,
+a relative expiry of 60 seconds through seven days, and an explicit allowed or
+forbidden cancellation policy. Its fields and choices use stable semantic IDs;
+choice labels, descriptions, values, selection cardinality, freeform input,
+text lengths, and date/time representation are explicit and bounded. A form
+has at most eight fields, each choice has at most 25 options, the whole request
+has at most 64 options and 32 KiB of encoded JSON, and answers have at most
+16 KiB of encoded JSON. Prompts are at most 2 KiB, fallbacks 4 KiB, labels 100
+bytes, descriptions 300 bytes, option values 256 bytes, and text answers 4,000
+Unicode code points. Semantic IDs contain 1-64 lowercase ASCII letters,
+digits, underscores, or hyphens, begin with a letter, and are unique within
+their request scope. Date input is canonical `YYYY-MM-DD`, time input is
+24-hour `HH:MM`, and combined date/time input is RFC 3339 with an explicit
+offset and is normalized to UTC.
+
+Answers refer only to the request's stable field and option IDs. Trusted hctl
+code independently validates them, orders fields and choices by the original
+request, normalizes text line endings and date/time representations, and
+rejects missing, duplicate, unknown, out-of-range, or inapplicable values.
+Adapters advertise supported request kinds and concrete limits before a
+lifecycle waits for input. An unsupported request deterministically uses its
+specified text fallback or fails clearly when no fallback exists. Hctl assigns
+interaction and callback IDs, ownership, authorization, expiry timestamps, and
+continuation metadata; none are model-authored fields. The contract has no raw
+vendor payloads, layout nesting, URLs, executable code, credential references,
+or A2UI surface schema. A future renderer may adapt this semantic contract
+without changing what the model is allowed to request.
 
 New and resumed channel-managed sessions run read-only in the shared workspace:
 Claude uses native plan permission mode, Codex uses a read-only sandbox with
@@ -454,11 +492,13 @@ compatibility, if that file is absent, hctl validates an existing owner-only
 and removes the old regular file. When both paths exist, the dispatch path is
 authoritative.
 
-The local stdin adapter and conversational Discord Gateway adapter share the same
-typed submission and event seam. The JSONL input adapter remains the reference
-for durable state and event semantics. Other vendor channels, generic webhooks,
-OAuth, proactive delivery, and public listener management remain outside the
-MVP.
+The local stdin adapter and transport-neutral channel controller share the turn
+dispatcher's typed submission and event seam. Built-in vendor adapters use the
+controller's normalized inbound-message and semantic-outcome interface; this is
+not a public plugin ABI or a rich component schema. The JSONL input adapter
+remains the reference for durable state and event semantics. Other vendor
+channels, generic webhooks, OAuth, proactive delivery, and public listener
+management remain outside the MVP.
 
 ## Managed tool boundary
 

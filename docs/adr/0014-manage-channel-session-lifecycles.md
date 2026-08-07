@@ -7,9 +7,12 @@
 A long-lived channel runtime owns one managed session lifecycle for each
 external conversation. The lifecycle owns that conversation's dispatcher
 worker, durable queue, native harness session mapping, and at most one resident
-harness process. Channel adapters submit input, observe bounded events, query a
-redacted lifecycle status, and reset only idle conversations; they do not own
-dispatcher goroutines or native processes themselves.
+harness process. The transport-neutral channel controller submits normalized
+input, observes bounded dispatcher events, buffers complete responses, queries
+redacted lifecycle status, and resets only idle conversations. Vendor adapters
+admit and normalize native input and render controller outcomes; neither the
+controller nor adapters own dispatcher goroutines or native processes
+themselves.
 
 When a managed conversation has no active or queued work, its resident harness
 process is closed after a configurable idle interval (15 minutes by default).
@@ -45,8 +48,10 @@ capacity coordinator built at this seam.
 
 ## Consequences
 
-- The Discord adapter retains only authorization, message classification,
-  response buffering, and delivery concerns.
+- The channel controller owns response buffering and reusable dispatcher-event
+  coordination. The Discord adapter retains authorization, native event
+  filtering and normalization, commands, reply rendering, typing calls, and
+  delivery concerns.
 - Safe status can distinguish inactive, idle, hibernated, queued, and active lifecycle
   states without paths or runtime identifiers.
 - Ordinary harness, worktree, close, and deadline failures retire only the

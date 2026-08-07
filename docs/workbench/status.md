@@ -64,6 +64,12 @@ The maintainer agent includes Matt Pocock's MIT-licensed `code-review` skill
 as a pinned, attributed portable import. Its independent Standards and Spec
 reviews layer beside the existing hctl-specific review skills.
 
+The transport-neutral interactive request contract is implemented as a strict
+in-process module with conformance fixtures for confirmations, choices, text,
+date/time input, forms, normalized answers, and deterministic text fallback.
+It is not yet exposed as a managed model tool or connected to durable input
+lifecycle state or a Discord renderer; those remain separate follow-up slices.
+
 The [credential-free clean-install check](../../spikes/clean-install/README.md)
 creates a disposable exact-tagged `darwin-arm64` release archive, verifies its
 checksum, extracts it into an isolated install prefix, copies a minimal agent
@@ -151,10 +157,14 @@ a generated custom subagent, and session resume in a fresh external workspace.
   application and identity to one authorized user, guild channel, and DM;
   credentials remain in the OS credential store. `hctl run` auto-applies stale
   setup, buffers responses for exact no-reply suppression, and exposes `/new`
-  and `/status` without requiring a public listener or tunnel. A deterministic
-  session manager owns one dispatcher worker and at most one resident harness
-  process per conversation, and serializes durable state updates across
-  surfaces.
+  and `/status` without requiring a public listener or tunnel. A
+  transport-neutral channel controller now owns reusable surface registration,
+  pending-turn correlation, buffering, exact controls, one-time elevation,
+  typing readiness, failure classification, and lifecycle delegation. Discord
+  retains its Gateway/REST adapter, native rendering, commands, and delivery
+  semantics. A deterministic session manager owns one dispatcher worker and at
+  most one resident harness process per conversation, and serializes durable
+  state updates across surfaces.
 - Root-agent Markdown schedules follow Eve's nested `schedules/` convention:
   strict frontmatter contains one valid standard five-field cron string and the
   body is the task prompt. Apply starts no clock. `hctl schedule trigger`

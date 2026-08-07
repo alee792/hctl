@@ -13,6 +13,47 @@ import (
 	"hctl/internal/rootfs"
 )
 
+func TestHarnessVersionDoesNotMutateConfiguredHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	executable := filepath.Join(t.TempDir(), "codex")
+	writeTestFile(t, executable, "#!/bin/sh\nmkdir -p \"$HOME/.codex/tmp\"\n: > \"$HOME/.codex/tmp/arg0\"\necho 'codex-cli 1.2.3'\n", 0o755)
+	version, err := HarnessVersion(context.Background(), executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != "1.2.3" {
+		t.Fatalf("version = %q", version)
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("version inspection mutated configured home: %v", entries)
+	}
+}
+
+func TestBuildPathDetectionRequiresAStandalonePathToken(t *testing.T) {
+	buildPath := []byte("/agent")
+	for _, data := range []string{
+		"command = \"/agent/tool\"",
+		"cwd=/agent",
+	} {
+		if !containsStandalonePath([]byte(data), buildPath) {
+			t.Fatalf("build path was not detected in %q", data)
+		}
+	}
+	for _, data := range []string{
+		"command = \"/opt/hctl/agents/agent\"",
+		"command = \"/prefix/agent/tool\"",
+	} {
+		if containsStandalonePath([]byte(data), buildPath) {
+			t.Fatalf("embedded path was rejected in %q", data)
+		}
+	}
+}
+
 func TestCreateStagesToolFreeAgentDeterministically(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "sample-agent")
 	writeTestFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Staged test agent.\n---\n\nBe concise.\n", 0o644)

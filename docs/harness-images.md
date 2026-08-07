@@ -1,0 +1,99 @@
+# Harness images
+
+Hctl's harness images are ordinary OCI build inputs. Each image contains one
+native harness, hctl, and the pinned Deno, Python/uv, and Go inputs that `apply`
+or `stage` may need. They do not contain an agent, provider credentials, login
+state, or conversation state.
+
+The Codex image definition is currently built and exercised without publishing
+on every pull request. Until exact release-tag publication is implemented,
+`ghcr.io/alee792/hctl/codex:VERSION` below documents the intended interface,
+not an available package. The Claude image remains separate work and must not
+be published without permission under Anthropic's terms.
+
+## Direct image
+
+Shipping the all-runtimes image is supported. Pin an exact hctl release tag,
+copy the agent as the image's non-root user, and apply it during the build:
+
+```dockerfile
+ARG HCTL_VERSION
+FROM ghcr.io/alee792/hctl/codex:${HCTL_VERSION}
+
+COPY --chown=65532:65532 . /agent
+RUN hctl apply /agent --workspace /workspace --harness codex \
+    --command /opt/hctl/harness/bin/codex
+
+ENTRYPOINT ["/opt/hctl/bin/hctl", "run", "/agent", "--workspace", "/workspace", "--harness", "codex", "--command", "/opt/hctl/harness/bin/codex"]
+```
+
+This is the shortest journey and retains the build toolchains. Use the
+two-stage form only when the smaller execution closure matters.
+
+## Selective two-stage image
+
+The clean final base is the same pinned Linux/amd64 Ubuntu platform manifest as
+the source image. The generic CA bundle is copied from the pinned build image;
+the raw Ubuntu layer does not supply one. The final image creates the required
+numeric identity and carries only the files selected by `hctl stage`. The
+source image provides `/out` as a non-root writable parent; the stage output
+itself, `/out/agent`, must not exist before the command runs:
+
+```dockerfile
+ARG HCTL_VERSION
+ARG UBUNTU_AMD64_DIGEST=sha256:019e8eb29a85e74d64925745884f2ec79aa27e3feab36353d24656f4d6b89467
+
+FROM ghcr.io/alee792/hctl/codex:${HCTL_VERSION} AS build
+COPY --chown=65532:65532 . /agent
+RUN hctl stage /agent --harness codex \
+    --command /opt/hctl/harness/bin/codex --output /out/agent
+
+FROM docker.io/library/ubuntu:24.04@${UBUNTU_AMD64_DIGEST}
+ENV HOME=/home/hctl \
+    PATH=/opt/hctl/bin:/opt/hctl/harness/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN groupadd --gid 65532 hctl \
+    && useradd --uid 65532 --gid 65532 --home-dir /home/hctl \
+       --shell /bin/sh --no-create-home --no-log-init hctl \
+    && mkdir -p /home/hctl/.codex /workspace \
+    && chown -R 65532:65532 /home/hctl /workspace
+COPY --from=build /out/agent/opt/ /opt/
+COPY --from=build --chown=65532:65532 /out/agent/workspace/ /workspace/
+COPY --from=build --chown=65532:65532 /out/agent/home/hctl/ /home/hctl/
+USER 65532:65532
+WORKDIR /workspace
+ENTRYPOINT ["/opt/hctl/bin/agent-entrypoint"]
+```
+
+Do not substitute Alpine: the published input and staged payload target
+Linux/amd64 with glibc. Keep `/workspace` and `/home/hctl` writable. Add any
+extra native utilities the agent expects in the downstream Dockerfile; they are
+not part of the selective hctl payload.
+
+## Runtime authentication
+
+Image builds and staging are credential-free. Authenticate only at runtime on
+a trusted system. For API-key automation, OpenAI recommends piping
+`OPENAI_API_KEY` to `codex login --with-api-key`; Codex then caches credentials
+under `$CODEX_HOME` or `~/.codex`. Treat that cache like a password. For
+example, initialize a private named volume in a short-lived process:
+
+```sh
+docker volume create my-agent-codex-home
+printenv OPENAI_API_KEY | docker run --rm -i \
+  --mount type=volume,src=my-agent-codex-home,dst=/home/hctl/.codex \
+  --entrypoint /opt/hctl/harness/bin/codex my-agent:VERSION \
+  login --with-api-key
+
+docker run --rm \
+  --mount type=volume,src=my-agent-codex-home,dst=/home/hctl/.codex \
+  my-agent:VERSION
+```
+
+An existing `~/.codex/auth.json` may instead be mounted or copied through the
+deployment platform's secret mechanism. Never add it to the Dockerfile, build
+context, staged tree, or registry layer. OpenAI's current
+[Codex authentication guidance](https://learn.chatgpt.com/docs/auth.md)
+documents API-key login, headless login, cache locations, and credential-store
+options.

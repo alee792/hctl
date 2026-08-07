@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -31,8 +32,13 @@ func (d *Driver) Executable() string { return d.executable }
 func (d *Driver) Verify(ctx context.Context) error {
 	versionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	home, err := os.MkdirTemp("", "hctl-codex-verify-")
+	if err != nil {
+		return errors.New("cannot isolate Codex verification")
+	}
+	defer func() { _ = os.RemoveAll(home) }()
 	command := exec.CommandContext(versionCtx, d.executable, "--version")
-	command.Env = secureenv.Child()
+	command.Env = secureenv.Staging(home)
 	output, err := command.Output()
 	if err != nil || len(output) > 4096 || !regexp.MustCompile(`\d+\.\d+\.\d+`).Match(output) {
 		return errors.New("codex executable did not provide a compatible semantic version")

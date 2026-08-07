@@ -300,11 +300,14 @@ binary construction in hosted CI. Binary builds now require and expose an exact
 version, exact-tag archives inject their tag, and one validated input manifest
 pins the Ubuntu Linux/amd64 base plus every harness and authored-tool runtime
 artifact by source, size, and checksum. The planned images are thin hctl-owned
-Ubuntu images rather than layers on vendor development environments. Codex is
-the first unpushed vertical slice; Claude publication remains blocked pending
-explicit permission, and an unpushed Claude CI build requires a separate
-authorization decision. Real container
-acceptance and harness image publication remain follow-up work. Portable
+Ubuntu images rather than layers on vendor development environments. CI now
+builds the unpushed Codex source image from verified inputs and proves its
+non-root direct journey plus a tool-free staged payload on the pinned clean
+base without credentials or model calls. The measured loader and shared-library
+closure is recorded alongside the writable-path and certificate contract.
+Claude publication remains blocked pending explicit permission, and an
+unpushed Claude CI build requires a separate authorization decision. The
+language runtime matrix and harness image publication remain follow-up work. Portable
 sandbox authoring is still deferred because the
 native harnesses do not expose equivalent
 sandbox contracts. Do not implement proposal capture, image deployment,

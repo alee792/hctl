@@ -1,7 +1,8 @@
 # ADR 0027: Stage agent filesystems for downstream OCI builds
 
 - Status: accepted
-- Implementation: `hctl stage` is implemented; harness images remain deferred
+- Implementation: `hctl stage` and unpushed Codex image acceptance are
+  implemented; publication and the Claude image remain deferred
 
 ## Decision
 
@@ -32,22 +33,26 @@ The documented two-stage optimization is:
 ```dockerfile
 FROM ghcr.io/alee792/hctl/codex:VERSION AS build
 COPY . /agent
-RUN hctl stage /agent --harness codex --output /out
+RUN hctl stage /agent --harness codex --output /out/agent
 
 FROM DOCUMENTED_COMPATIBLE_BASE
-COPY --from=build /out/opt/ /opt/
-COPY --from=build --chown=65532:65532 /out/workspace/ /workspace/
-COPY --from=build --chown=65532:65532 /out/home/hctl/ /home/hctl/
+COPY --from=build /out/agent/opt/ /opt/
+COPY --from=build --chown=65532:65532 /out/agent/workspace/ /workspace/
+COPY --from=build --chown=65532:65532 /out/agent/home/hctl/ /home/hctl/
 USER 65532:65532
 ENTRYPOINT ["/opt/hctl/bin/agent-entrypoint"]
 ```
+
+The source image creates `/out` as a writable directory owned by UID/GID
+65532. Staging runs as that identity and atomically creates a new child such as
+`/out/agent`; the output directory itself must not already exist.
 
 The Claude journeys change only the source image and harness argument. The
 two-stage form is recommended when image size, build-tool exposure, or offline
 startup matters; it is not required for correctness. `hctl stage` is the
 intended command name, not an authored manifest or an hctl-owned image builder.
-The harness images remain separate implementation work until their acceptance
-contracts are completed.
+The Claude image and publication remain separate implementation work until
+their acceptance contracts and release gates are completed.
 
 ### Staged layout
 

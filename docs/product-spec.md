@@ -784,15 +784,19 @@ deploy, or operate images.
 ```dockerfile
 FROM ghcr.io/alee792/hctl/codex:VERSION AS build
 COPY . /agent
-RUN hctl stage /agent --harness codex --output /out
+RUN hctl stage /agent --harness codex --output /out/agent
 
 FROM DOCUMENTED_COMPATIBLE_BASE
-COPY --from=build /out/opt/ /opt/
-COPY --from=build --chown=65532:65532 /out/workspace/ /workspace/
-COPY --from=build --chown=65532:65532 /out/home/hctl/ /home/hctl/
+COPY --from=build /out/agent/opt/ /opt/
+COPY --from=build --chown=65532:65532 /out/agent/workspace/ /workspace/
+COPY --from=build --chown=65532:65532 /out/agent/home/hctl/ /home/hctl/
 USER 65532:65532
 ENTRYPOINT ["/opt/hctl/bin/agent-entrypoint"]
 ```
+
+The source image provides `/out` as a writable parent owned by UID/GID 65532.
+The stage runs as that identity and creates a new child such as `/out/agent`;
+the child itself must not already exist.
 
 The staged tree contains hctl, the selected harness, immutable agent source,
 generated workspace setup and apply record, an empty writable harness home,

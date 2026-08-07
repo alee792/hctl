@@ -29,7 +29,7 @@ const (
 	finalHome      = "/home/hctl"
 	finalHCTL      = "/opt/hctl/bin/hctl"
 	manifestPath   = "opt/hctl/artifact.json"
-	maxStagedFile  = 256 << 20
+	maxStagedFile  = 384 << 20
 	maxStagedFiles = 65536
 	maxStagedBytes = int64(2 << 30)
 	runtimeUID     = 65532
@@ -108,8 +108,13 @@ type ManifestFile struct {
 
 // HarnessVersion returns the semantic version reported by a verified harness.
 func HarnessVersion(ctx context.Context, executable string) (string, error) {
+	home, err := os.MkdirTemp("", "hctl-harness-version-")
+	if err != nil {
+		return "", errors.New("cannot isolate harness version inspection")
+	}
+	defer func() { _ = os.RemoveAll(home) }()
 	command := exec.CommandContext(ctx, executable, "--version")
-	command.Env = secureenv.Child()
+	command.Env = secureenv.Staging(home)
 	output, err := command.Output()
 	if err != nil || len(output) > 4096 {
 		return "", errors.New("cannot read harness version")
@@ -445,6 +450,7 @@ func entrypointBytes(p *project.Project, harness string) []byte {
 
 func rejectBuildPaths(root string, request Request, prepared *project.Project) error {
 	prohibited := [][]byte{[]byte(root), []byte(prepared.SourceRoot), []byte(prepared.WorkspaceRoot), []byte(request.Project.SourceRoot), []byte(request.Project.WorkspaceRoot)}
+	finalAgent := "/opt/hctl/agents/" + prepared.Name
 	return filepath.WalkDir(filepath.Join(root, "workspace"), func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return errors.New("cannot inspect staged workspace")
@@ -460,12 +466,37 @@ func rejectBuildPaths(root string, request Request, prepared *project.Project) e
 			return errors.New("cannot inspect staged configuration")
 		}
 		for _, value := range prohibited {
-			if len(value) > 1 && bytes.Contains(data, value) {
+			if string(value) != finalAgent && string(value) != finalWorkspace && containsStandalonePath(data, value) {
 				return errors.New("staged configuration contains a build-only path")
 			}
 		}
 		return nil
 	})
+}
+
+func containsStandalonePath(data, value []byte) bool {
+	if len(value) <= 1 {
+		return false
+	}
+	offset := 0
+	for {
+		index := bytes.Index(data[offset:], value)
+		if index < 0 {
+			return false
+		}
+		index += offset
+		if index == 0 || !pathTokenByte(data[index-1]) {
+			return true
+		}
+		offset = index + 1
+	}
+}
+
+func pathTokenByte(value byte) bool {
+	return value == '/' || value == '.' || value == '_' || value == '-' ||
+		value >= '0' && value <= '9' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= 'a' && value <= 'z'
 }
 
 func collectFiles(root string) ([]ManifestFile, error) {

@@ -195,6 +195,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_t
 	}
 
 	unavailable := writeExecutable(t, `#!/bin/sh
+IFS= read -r line
 echo '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111"}'
 echo '{"type":"result","subtype":"error","is_error":true,"stop_reason":"tool_deferred_unavailable","session_id":"11111111-1111-4111-8111-111111111111","deferred_tool_use":{"id":"toolu_exact","name":"mcp__managed__channel.request_input","input":`+string(request)+`}}'
 `)

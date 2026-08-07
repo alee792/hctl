@@ -2,11 +2,14 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"hctl/internal/interaction"
 	"hctl/internal/rootfs"
 )
 
@@ -125,7 +128,7 @@ func TestLoadMigratesLegacyManifestFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "manifest_fingerprint") || !strings.Contains(string(data), `"schema_version": 2`) || !strings.Contains(string(data), `"agent_id": "reviewer@123"`) {
+	if strings.Contains(string(data), "manifest_fingerprint") || !strings.Contains(string(data), `"schema_version": 3`) || !strings.Contains(string(data), `"agent_id": "reviewer@123"`) {
 		t.Fatalf("legacy field was not migrated: %s", data)
 	}
 }
@@ -202,6 +205,235 @@ func TestConversationWorktreeAssignmentRoundTrips(t *testing.T) {
 	if strings.Contains(string(data), "token") || strings.Contains(string(data), "credential") {
 		t.Fatalf("dispatch state contains credential material: %s", data)
 	}
+}
+
+func TestInteractionLifecycleRoundTripsInSchemaThree(t *testing.T) {
+	root := t.TempDir()
+	state := &State{SchemaVersion: 3, Conversations: map[string]*Conversation{}}
+	conversation, err := state.GetOrCreate("reviewer@one", "claude", "discord-one", "source-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation.Interaction = validInteractionLifecycle()
+	conversation.Queue = []Input{{ID: conversation.Interaction.InputID, Text: "origin", Status: "parked"}}
+	conversation.InteractionTombstones = []interaction.Tombstone{{
+		InteractionDigest: interaction.Digest("old-interaction"), OwnerDigest: interaction.Digest("old-owner"),
+		Phase: interaction.PhaseExpired, FinishedAt: time.Date(2026, 8, 7, 1, 0, 0, 0, time.UTC),
+	}}
+	if err := Save(root, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.Conversations[conversationKey("reviewer@one", "claude", "discord-one", "source-1")]
+	if got == nil || got.Interaction == nil || got.Interaction.ID != conversation.Interaction.ID || len(got.InteractionTombstones) != 1 || loaded.SchemaVersion != 3 {
+		t.Fatalf("interaction state = %#v", got)
+	}
+}
+
+func TestLegacySchemaUpgradesOnlyWhenWritten(t *testing.T) {
+	root := t.TempDir()
+	writeStateAt(t, root, statePath, "reviewer@legacy", 0o600)
+	state, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SchemaVersion != 2 {
+		t.Fatalf("load eagerly upgraded schema to %d", state.SchemaVersion)
+	}
+	before, err := os.ReadFile(filepath.Join(root, statePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(before), `"schema_version":2`) {
+		t.Fatalf("legacy bytes changed on read: %s", before)
+	}
+	if err := Save(root, state); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(root, statePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(after), `"schema_version": 3`) {
+		t.Fatalf("schema was not upgraded on write: %s", after)
+	}
+}
+
+func TestLoadRejectsInteractionFieldsBeforeSchemaThree(t *testing.T) {
+	root := t.TempDir()
+	lifecycle, err := json.Marshal(validInteractionLifecycle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"schema_version":2,"conversations":{"reviewer@one:source-1:claude:local":{"id":"local","agent_id":"reviewer@one","harness":"claude","source_fingerprint":"source-1","queue":[],"outcomes":{},"outcome_order":[],"interaction":` + string(lifecycle) + `}}}`)
+	if err := rootfs.WriteAtomic(root, statePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(root); err == nil || !strings.Contains(err.Error(), "requires schema version 3") {
+		t.Fatalf("schema-2 interaction was accepted: %v", err)
+	}
+}
+
+func TestLoadRejectsDuplicateJSONKeysAtEveryInteractionLevel(t *testing.T) {
+	state := &State{SchemaVersion: 3, Conversations: map[string]*Conversation{}}
+	conversation, err := state.GetOrCreate("reviewer@one", "claude", "local", "source-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation.Interaction = validInteractionLifecycle()
+	conversation.Queue = []Input{{ID: conversation.Interaction.InputID, Text: "origin", Status: "parked"}}
+	conversation.InteractionTombstones = []interaction.Tombstone{{
+		InteractionDigest: interaction.Digest("old-interaction"),
+		OwnerDigest:       interaction.Digest("old-owner"),
+		Phase:             interaction.PhaseExpired,
+		FinishedAt:        time.Date(2026, 8, 7, 1, 0, 0, 0, time.UTC),
+	}}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := string(encoded)
+	surface := strings.Repeat("a", 64)
+	for _, test := range []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{name: "top level", old: `"schema_version":3`, new: `"schema_version":3,"schema_version":3`},
+		{name: "conversation", old: `"id":"local"`, new: `"id":"local","id":"local"`},
+		{name: "lifecycle", old: `"phase":"requested"`, new: `"phase":"requested","phase":"requested"`},
+		{name: "request", old: `"prompt":"Proceed?"`, new: `"prompt":"Proceed?","prompt":"Proceed?"`},
+		{name: "owner", old: `"surface_key":"` + surface + `"`, new: `"surface_key":"` + surface + `","surface_key":"` + surface + `"`},
+		{name: "tombstone", old: `"phase":"expired"`, new: `"phase":"expired","phase":"expired"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if !strings.Contains(valid, test.old) {
+				t.Fatalf("fixture does not contain %q", test.old)
+			}
+			root := t.TempDir()
+			duplicated := strings.Replace(valid, test.old, test.new, 1)
+			if err := rootfs.WriteAtomic(root, statePath, []byte(duplicated), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(root); err == nil || err.Error() != "dispatch state is invalid" {
+				t.Fatalf("duplicate key was accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsOversizedOrConflictingInteractionTombstones(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		tombstones []interaction.Tombstone
+	}{
+		{name: "too many", tombstones: interactionTombstones(interaction.MaxTerminalTombstones + 1)},
+		{name: "duplicate", tombstones: append(interactionTombstones(1), interactionTombstones(1)[0])},
+		{name: "pending conflict", tombstones: []interaction.Tombstone{{InteractionDigest: interaction.Digest(validInteractionLifecycle().ID), OwnerDigest: interaction.Digest("owner"), Phase: interaction.PhaseExpired, FinishedAt: time.Date(2026, 8, 7, 1, 0, 0, 0, time.UTC)}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			state := &State{SchemaVersion: 3, Conversations: map[string]*Conversation{}}
+			conversation, err := state.GetOrCreate("reviewer@one", "claude", "local", "source-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			conversation.Interaction = validInteractionLifecycle()
+			conversation.Queue = []Input{{ID: conversation.Interaction.InputID, Text: "origin", Status: "parked"}}
+			conversation.InteractionTombstones = test.tombstones
+			if err := Save(root, state); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(root); err == nil {
+				t.Fatal("invalid interaction tombstones were accepted")
+			}
+		})
+	}
+}
+
+func validInteractionLifecycle() *interaction.Lifecycle {
+	request := interaction.Request{
+		SchemaVersion: interaction.SchemaVersion, Kind: interaction.KindConfirm, Prompt: "Proceed?",
+		Policy: interaction.Policy{ExpiresAfterSeconds: interaction.MinExpirySeconds, Cancellation: interaction.CancellationAllowed},
+		Field:  &interaction.Field{ID: "approved", Kind: interaction.KindConfirm, Label: "Proceed", Required: true},
+	}
+	return &interaction.Lifecycle{
+		ID: "interaction_1234567890", InputID: "message-1",
+		Owner:   interaction.Owner{SurfaceKey: strings.Repeat("a", 64), PrincipalKey: strings.Repeat("b", 64)},
+		Request: request, Resolution: interaction.Resolution{Mode: interaction.RenderNative},
+		ExpiresAt: time.Date(2026, 8, 7, 2, 0, 0, 0, time.UTC), Continuation: interaction.ContinuationTurn,
+		Phase: interaction.PhaseRequested, Delivery: interaction.DeliveryIntended,
+	}
+}
+
+func TestLoadRejectsMismatchedParkedInteractionOrigins(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		withPending bool
+		queueID     string
+		status      string
+		wake        bool
+	}{
+		{name: "pending without queue", withPending: true},
+		{name: "wrong origin", withPending: true, queueID: "other", status: "parked"},
+		{name: "pending active", withPending: true, queueID: "message-1", status: "active"},
+		{name: "parked without pending", queueID: "message-1", status: "parked"},
+		{name: "wake without queue", wake: true},
+		{name: "wake with active queue", queueID: "message-1", status: "active", wake: true},
+		{name: "wake while pending", withPending: true, queueID: "message-1", status: "parked", wake: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			state := &State{SchemaVersion: 3, Conversations: map[string]*Conversation{}}
+			conversation, err := state.GetOrCreate("reviewer@one", "claude", "local", "source-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.withPending {
+				conversation.Interaction = validInteractionLifecycle()
+			}
+			if test.queueID != "" {
+				conversation.Queue = []Input{{ID: test.queueID, Text: "origin", Status: test.status}}
+			}
+			conversation.InteractionWakePending = test.wake
+			if err := Save(root, state); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(root); err == nil || !strings.Contains(err.Error(), "interaction origin") && !strings.Contains(err.Error(), "parked input") && !strings.Contains(err.Error(), "wake state") {
+				t.Fatalf("invalid origin was accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestRecoverUncertainPreservesParkedOrigin(t *testing.T) {
+	conversation := &Conversation{
+		Queue: []Input{
+			{ID: "parked", Text: "waiting", Status: "parked"},
+			{ID: "queued", Text: "later", Status: "queued"},
+		},
+		Outcomes: map[string]string{},
+	}
+	if uncertain := conversation.RecoverUncertain(); len(uncertain) != 0 {
+		t.Fatalf("parked input recovered as uncertain: %v", uncertain)
+	}
+	if len(conversation.Queue) != 2 || conversation.Queue[0].Status != "parked" {
+		t.Fatalf("parked queue changed: %#v", conversation.Queue)
+	}
+}
+
+func interactionTombstones(count int) []interaction.Tombstone {
+	result := make([]interaction.Tombstone, count)
+	for index := range result {
+		result[index] = interaction.Tombstone{
+			InteractionDigest: interaction.Digest(fmt.Sprintf("interaction-%d", index)), OwnerDigest: interaction.Digest("owner"),
+			Phase: interaction.PhaseExpired, FinishedAt: time.Date(2026, 8, 7, 1, 0, index%60, 0, time.UTC),
+		}
+	}
+	return result
 }
 
 func TestResetLifecyclePreservesWorktreeAssignment(t *testing.T) {

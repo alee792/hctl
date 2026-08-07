@@ -1,13 +1,21 @@
 package dispatch
 
 import (
+	"encoding/json"
 	"errors"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
+	"time"
+	"unicode/utf8"
 
+	"hctl/internal/interaction"
 	"hctl/internal/session"
 	"hctl/internal/worktree"
 )
+
+var interactionOutcomePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // conversationStore owns one in-memory view of the durable dispatch state.
 // A managed runtime shares it across conversation loops so saving one
@@ -16,6 +24,7 @@ type conversationStore struct {
 	mu    sync.Mutex
 	root  string
 	state *session.State
+	save  func(string, *session.State) error
 }
 
 type conversationRef struct {
@@ -26,14 +35,15 @@ type conversationRef struct {
 }
 
 type conversationSnapshot struct {
-	sessionID string
-	queueLen  int
-	firstID   string
-	active    bool
-	exists    bool
-	workspace string
-	branch    string
-	retiring  bool
+	sessionID       string
+	queueLen        int
+	firstID         string
+	active          bool
+	waitingForInput bool
+	exists          bool
+	workspace       string
+	branch          string
+	retiring        bool
 }
 
 type workspaceRecord struct {
@@ -50,23 +60,29 @@ func openConversationStore(root string) (*conversationStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &conversationStore{root: root, state: state}, nil
+	return &conversationStore{root: root, state: state, save: session.Save}, nil
 }
+
+func (s *conversationStore) persist() error { return s.save(s.root, s.state) }
 
 func (s *conversationStore) recover(ref conversationRef) ([]string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conversation, err := s.conversation(ref)
-	if err != nil {
-		return nil, "", err
-	}
-	uncertain := conversation.RecoverUncertain()
-	if len(uncertain) > 0 {
-		if err := session.Save(s.root, s.state); err != nil {
-			return nil, "", err
+	var uncertain []string
+	var sessionID string
+	err := s.persistMutationIfChanged(func() (bool, error) {
+		conversation, err := s.lookup(ref)
+		if err != nil {
+			return false, err
 		}
-	}
-	return uncertain, conversation.SessionID, nil
+		if conversation == nil {
+			return false, nil
+		}
+		sessionID = conversation.SessionID
+		uncertain = conversation.RecoverUncertain()
+		return len(uncertain) > 0, nil
+	})
+	return uncertain, sessionID, err
 }
 
 func (s *conversationStore) snapshot(ref conversationRef) (conversationSnapshot, error) {
@@ -79,7 +95,7 @@ func (s *conversationStore) snapshot(ref conversationRef) (conversationSnapshot,
 	if conversation == nil {
 		return conversationSnapshot{}, nil
 	}
-	snapshot := conversationSnapshot{sessionID: conversation.SessionID, queueLen: len(conversation.Queue), exists: true, workspace: conversation.WorkspaceRoot, branch: conversation.WorktreeBranch, retiring: conversation.WorktreeRetiring}
+	snapshot := conversationSnapshot{sessionID: conversation.SessionID, queueLen: len(conversation.Queue), waitingForInput: conversation.Interaction != nil, exists: true, workspace: conversation.WorkspaceRoot, branch: conversation.WorktreeBranch, retiring: conversation.WorktreeRetiring}
 	if len(conversation.Queue) > 0 {
 		snapshot.firstID = conversation.Queue[0].ID
 		snapshot.active = conversation.Queue[0].Status == "active"
@@ -105,6 +121,20 @@ func (s *conversationStore) queued(ref conversationRef) int {
 	return total
 }
 
+func (s *conversationStore) runnable(ref conversationRef) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var conversations []string
+	for _, conversation := range s.state.Conversations {
+		if conversation.AgentID != ref.agentID || conversation.Harness != ref.harness || conversation.SourceFingerprint != ref.fingerprint || !conversation.InteractionWakePending || conversation.Interaction != nil || len(conversation.Queue) == 0 || conversation.Queue[0].Status != "queued" {
+			continue
+		}
+		conversations = append(conversations, conversation.ID)
+	}
+	sort.Strings(conversations)
+	return conversations
+}
+
 func (s *conversationStore) workspaceRecords(ref conversationRef) ([]workspaceRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -124,11 +154,14 @@ func (s *conversationStore) workspaceRecords(ref conversationRef) ([]workspaceRe
 				break
 			}
 		}
+		if pending := conversation.Interaction; pending != nil && pending.Phase == interaction.PhaseResuming && pending.Resume == interaction.ResumeUncertain {
+			uncertain = true
+		}
 		records = append(records, workspaceRecord{
 			conversation: conversation.ID,
 			fingerprint:  conversation.SourceFingerprint,
 			assignment:   worktree.Assignment{Root: conversation.WorkspaceRoot, Branch: conversation.WorktreeBranch},
-			busy:         len(conversation.Queue) != 0,
+			busy:         len(conversation.Queue) != 0 || conversation.Interaction != nil,
 			uncertain:    uncertain,
 			retiring:     conversation.WorktreeRetiring,
 		})
@@ -140,28 +173,32 @@ func (s *conversationStore) workspaceRecords(ref conversationRef) ([]workspaceRe
 func (s *conversationStore) markWorkspaceRetiring(ref conversationRef) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conversation, err := s.lookup(ref)
-	if err != nil || conversation == nil {
-		return err
-	}
-	conversation.WorktreeRetiring = true
-	return session.Save(s.root, s.state)
+	return s.persistMutation(func() error {
+		conversation, err := s.lookup(ref)
+		if err != nil || conversation == nil {
+			return err
+		}
+		conversation.WorktreeRetiring = true
+		return nil
+	})
 }
 
 func (s *conversationStore) clearRetiredWorkspace(ref conversationRef, assignment worktree.Assignment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conversation, err := s.lookup(ref)
-	if err != nil || conversation == nil {
-		return err
-	}
-	if conversation.WorkspaceRoot != assignment.Root || conversation.WorktreeBranch != assignment.Branch || !conversation.WorktreeRetiring {
-		return errors.New("durable worktree retirement ownership changed")
-	}
-	conversation.WorkspaceRoot = ""
-	conversation.WorktreeBranch = ""
-	conversation.WorktreeRetiring = false
-	return session.Save(s.root, s.state)
+	return s.persistMutation(func() error {
+		conversation, err := s.lookup(ref)
+		if err != nil || conversation == nil {
+			return err
+		}
+		if conversation.WorkspaceRoot != assignment.Root || conversation.WorktreeBranch != assignment.Branch || !conversation.WorktreeRetiring {
+			return errors.New("durable worktree retirement ownership changed")
+		}
+		conversation.WorkspaceRoot = ""
+		conversation.WorktreeBranch = ""
+		conversation.WorktreeRetiring = false
+		return nil
+	})
 }
 
 func (s *conversationStore) inputStatus(ref conversationRef, inputID string) (string, bool, error) {
@@ -185,36 +222,33 @@ func (s *conversationStore) inputStatus(ref conversationRef, inputID string) (st
 func (s *conversationStore) assignWorkspaceAndAccept(ref conversationRef, workspace, branch, inputID, text string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conversation, err := s.conversation(ref)
+	conversation, err := s.lookup(ref)
 	if err != nil {
 		return "", false, err
 	}
-	if conversation.WorkspaceRoot != "" && (conversation.WorkspaceRoot != workspace || conversation.WorktreeBranch != branch) {
-		return "", false, errors.New("conversation already belongs to a different writable workspace")
+	if conversation != nil {
+		if conversation.WorkspaceRoot != "" && (conversation.WorkspaceRoot != workspace || conversation.WorktreeBranch != branch) {
+			return "", false, errors.New("conversation already belongs to a different writable workspace")
+		}
+		if status, duplicate, blocked := conversationAdmissionStatus(conversation, inputID); duplicate || blocked {
+			return status, duplicate, nil
+		}
 	}
-	priorWorkspace, priorBranch := conversation.WorkspaceRoot, conversation.WorktreeBranch
-	priorQueue := append([]session.Input(nil), conversation.Queue...)
-	priorOutcomes := make(map[string]string, len(conversation.Outcomes))
-	for id, outcome := range conversation.Outcomes {
-		priorOutcomes[id] = outcome
-	}
-	priorOrder := append([]string(nil), conversation.OutcomeOrder...)
-	rollback := func() {
-		conversation.WorkspaceRoot, conversation.WorktreeBranch = priorWorkspace, priorBranch
-		conversation.Queue, conversation.Outcomes, conversation.OutcomeOrder = priorQueue, priorOutcomes, priorOrder
-	}
-	conversation.WorkspaceRoot = workspace
-	conversation.WorktreeBranch = branch
-	status, duplicate, err := conversation.Accept(inputID, text)
-	if err != nil {
-		rollback()
-		return "", false, err
-	}
-	if err := session.Save(s.root, s.state); err != nil {
-		rollback()
-		return "", false, err
-	}
-	return status, duplicate, nil
+	var status string
+	err = s.persistMutation(func() error {
+		conversation, err = s.conversation(ref)
+		if err != nil {
+			return err
+		}
+		if conversation.WorkspaceRoot != "" && (conversation.WorkspaceRoot != workspace || conversation.WorktreeBranch != branch) {
+			return errors.New("conversation already belongs to a different writable workspace")
+		}
+		conversation.WorkspaceRoot = workspace
+		conversation.WorktreeBranch = branch
+		status, _, err = conversation.Accept(inputID, text)
+		return err
+	})
+	return status, false, err
 }
 
 func (s *conversationStore) lookup(ref conversationRef) (*session.Conversation, error) {
@@ -235,88 +269,392 @@ func (s *conversationStore) lookup(ref conversationRef) (*session.Conversation, 
 func (s *conversationStore) accept(ref conversationRef, id, text string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conversation, err := s.conversation(ref)
+	conversation, err := s.lookup(ref)
 	if err != nil {
 		return "", false, err
 	}
-	status, duplicate, err := conversation.Accept(id, text)
-	if err != nil || duplicate {
-		return status, duplicate, err
+	if conversation != nil {
+		if status, duplicate, blocked := conversationAdmissionStatus(conversation, id); duplicate || blocked {
+			return status, duplicate, nil
+		}
 	}
-	if err := session.Save(s.root, s.state); err != nil {
-		return "", false, err
-	}
-	return status, false, nil
+	var status string
+	err = s.persistMutation(func() error {
+		conversation, err = s.conversation(ref)
+		if err != nil {
+			return err
+		}
+		status, _, err = conversation.Accept(id, text)
+		return err
+	})
+	return status, false, err
 }
 
 func (s *conversationStore) startNext(ref conversationRef) (session.Input, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conversation, err := s.conversation(ref)
-	if err != nil {
-		return session.Input{}, err
-	}
-	next, err := conversation.StartNext()
-	if err != nil {
-		return session.Input{}, err
-	}
-	if err := session.Save(s.root, s.state); err != nil {
-		return session.Input{}, err
-	}
-	return next, nil
+	var next session.Input
+	err := s.persistMutation(func() error {
+		conversation, err := s.conversation(ref)
+		if err != nil {
+			return err
+		}
+		if conversation.Interaction != nil {
+			return ErrWaitingForInput
+		}
+		next, err = conversation.StartNext()
+		if err == nil {
+			conversation.InteractionWakePending = false
+		}
+		return err
+	})
+	return next, err
 }
 
 func (s *conversationStore) setSessionID(ref conversationRef, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conversation, err := s.conversation(ref)
-	if err != nil {
-		return err
-	}
-	if conversation.SessionID == id {
-		return nil
-	}
-	conversation.SessionID = id
-	return session.Save(s.root, s.state)
+	return s.persistMutationIfChanged(func() (bool, error) {
+		conversation, err := s.conversation(ref)
+		if err != nil {
+			return false, err
+		}
+		if conversation.SessionID == id {
+			return false, nil
+		}
+		conversation.SessionID = id
+		return true, nil
+	})
 }
 
 func (s *conversationStore) complete(ref conversationRef, inputID, outcome, resultSessionID string, fresh bool) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conversation, err := s.conversation(ref)
-	if err != nil {
-		return "", err
-	}
-	terminalSessionID := conversation.SessionID
-	if resultSessionID != "" {
-		terminalSessionID = resultSessionID
-		conversation.SessionID = resultSessionID
-	}
-	if err := conversation.Complete(inputID, outcome); err != nil {
-		return "", err
-	}
-	if fresh {
-		conversation.SessionID = ""
-	}
-	if err := session.Save(s.root, s.state); err != nil {
-		return "", err
-	}
-	return terminalSessionID, nil
+	var terminalSessionID string
+	err := s.persistMutation(func() error {
+		conversation, err := s.conversation(ref)
+		if err != nil {
+			return err
+		}
+		terminalSessionID = conversation.SessionID
+		if resultSessionID != "" {
+			terminalSessionID = resultSessionID
+			conversation.SessionID = resultSessionID
+		}
+		if err := conversation.Complete(inputID, outcome); err != nil {
+			return err
+		}
+		if fresh {
+			conversation.SessionID = ""
+		}
+		return nil
+	})
+	return terminalSessionID, err
 }
 
 func (s *conversationStore) reset(ref conversationRef) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conversation, err := s.conversation(ref)
+	return s.persistMutation(func() error {
+		conversation, err := s.conversation(ref)
+		if err != nil {
+			return err
+		}
+		if conversation.Interaction != nil {
+			return ErrConversationBusy
+		}
+		if conversation.WorkspaceRoot != "" {
+			conversation.ResetLifecycle()
+		} else {
+			s.state.Reset(ref.agentID, ref.harness, ref.id, ref.fingerprint)
+		}
+		return nil
+	})
+}
+
+func (s *conversationStore) loadInteraction(ref conversationRef) (interaction.DurableState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, err := s.lookup(ref)
+	if err != nil || conversation == nil {
+		return interaction.DurableState{}, err
+	}
+	return cloneInteractionState(interaction.DurableState{Pending: conversation.Interaction, Tombstones: conversation.InteractionTombstones})
+}
+
+func (s *conversationStore) openInteraction(ref conversationRef, pending *interaction.Lifecycle) error {
+	if pending == nil {
+		return errors.New("interaction is required")
+	}
+	copy, err := cloneInteractionState(interaction.DurableState{Pending: pending})
 	if err != nil {
 		return err
 	}
-	if conversation.WorkspaceRoot != "" {
-		conversation.ResetLifecycle()
-	} else {
-		s.state.Reset(ref.agentID, ref.harness, ref.id, ref.fingerprint)
+	if copy.Pending.Phase != interaction.PhaseRequested || copy.Pending.Delivery != interaction.DeliveryPending {
+		return errors.New("new interaction must have pending delivery")
 	}
-	return session.Save(s.root, s.state)
+	if err := copy.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistMutation(func() error {
+		conversation, err := s.conversation(ref)
+		if err != nil {
+			return err
+		}
+		if conversation.Interaction != nil {
+			return interaction.ErrAlreadyPending
+		}
+		if err := (interaction.DurableState{Pending: copy.Pending, Tombstones: conversation.InteractionTombstones}).Validate(); err != nil {
+			return err
+		}
+		if err := conversation.Park(copy.Pending.InputID); err != nil {
+			return err
+		}
+		conversation.Interaction = copy.Pending
+		return nil
+	})
+}
+
+func (s *conversationStore) updateInteraction(ref conversationRef, id string, mutate func(*interaction.Lifecycle) error) error {
+	if mutate == nil {
+		return errors.New("interaction mutation is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistMutation(func() error {
+		conversation, err := s.lookup(ref)
+		if err != nil {
+			return err
+		}
+		if conversation == nil || conversation.Interaction == nil || conversation.Interaction.ID != id {
+			return interaction.ErrInteractionMissing
+		}
+		current, err := cloneInteractionState(interaction.DurableState{Pending: conversation.Interaction})
+		if err != nil {
+			return err
+		}
+		originID, inputID := current.Pending.ID, current.Pending.InputID
+		if err := mutate(current.Pending); err != nil {
+			return err
+		}
+		if current.Pending == nil || current.Pending.ID != originID || current.Pending.InputID != inputID {
+			return errors.New("interaction correlation cannot change")
+		}
+		if err := current.Pending.Validate(); err != nil {
+			return err
+		}
+		conversation.Interaction = current.Pending
+		return nil
+	})
+}
+
+func (s *conversationStore) finishInteraction(ref conversationRef, finish interaction.FinishRequest) error {
+	if finish.InteractionID == "" || finish.FinishedAt.IsZero() || finish.FinishedAt.Location() != time.UTC || finish.FinishedAt.Nanosecond() != 0 {
+		return errors.New("interaction finish request is invalid")
+	}
+	if finish.Phase != interaction.PhaseCompleted && finish.Phase != interaction.PhaseCancelled && finish.Phase != interaction.PhaseExpired {
+		return errors.New("interaction finish phase is invalid")
+	}
+	if finish.OriginOutcome != "" && !interactionOutcomePattern.MatchString(finish.OriginOutcome) {
+		return errors.New("interaction origin outcome is invalid")
+	}
+	if len(finish.ResultSessionID) > 512 || !utf8.ValidString(finish.ResultSessionID) || strings.IndexFunc(finish.ResultSessionID, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return errors.New("interaction result session is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistMutation(func() error {
+		conversation, err := s.lookup(ref)
+		if err != nil {
+			return err
+		}
+		if conversation == nil {
+			return interaction.ErrInteractionMissing
+		}
+		if conversation.Interaction == nil || conversation.Interaction.ID != finish.InteractionID {
+			digest := interaction.Digest(finish.InteractionID)
+			for _, tombstone := range conversation.InteractionTombstones {
+				answerMatches := finish.AnswerDigest == "" || finish.AnswerDigest == tombstone.AnswerDigest
+				if tombstone.InteractionDigest == digest && tombstone.Phase == finish.Phase && answerMatches {
+					return nil
+				}
+			}
+			return interaction.ErrInteractionMissing
+		}
+		pending := conversation.Interaction
+		if finish.AnswerDigest != "" && finish.AnswerDigest != pending.AnswerDigest {
+			return errors.New("interaction finish answer digest conflicts with the accepted answer")
+		}
+		if finish.ResultSessionID != "" && finish.Phase != interaction.PhaseCompleted {
+			return errors.New("only a completed interaction may update the result session")
+		}
+		switch finish.Phase {
+		case interaction.PhaseCompleted:
+			normal := pending.Phase == interaction.PhaseResuming && pending.Resume == interaction.ResumeIntended && !finish.Recovery
+			recovered := pending.Phase == interaction.PhaseResuming && (pending.Resume == interaction.ResumeFailed || pending.Resume == interaction.ResumeUncertain) && finish.Recovery
+			if !normal && !recovered {
+				return interaction.ErrInteractionLate
+			}
+		case interaction.PhaseExpired:
+			if pending.Phase != interaction.PhaseRequested && pending.Phase != interaction.PhaseRendered || finish.FinishedAt.Before(pending.ExpiresAt) {
+				return interaction.ErrInteractionLate
+			}
+		case interaction.PhaseCancelled:
+			renderFailed := pending.Phase == interaction.PhaseRequested && pending.Delivery == interaction.DeliveryIntended
+			answerCancelled := pending.Phase == interaction.PhaseAnswered && pending.Answer != nil && pending.Answer.Action == interaction.ActionCancel
+			resumeRecovered := pending.Phase == interaction.PhaseResuming && (pending.Resume == interaction.ResumeFailed || pending.Resume == interaction.ResumeUncertain) && finish.Recovery
+			if !renderFailed && !answerCancelled && !resumeRecovered {
+				return interaction.ErrInteractionLate
+			}
+		}
+		answerDigest := finish.AnswerDigest
+		if answerDigest == "" {
+			answerDigest = pending.AnswerDigest
+		}
+		outcome := finish.OriginOutcome
+		if outcome == "" {
+			outcome = string(finish.Phase)
+		}
+		if finish.ResultSessionID != "" {
+			conversation.SessionID = finish.ResultSessionID
+		}
+		if err := conversation.CompleteParked(pending.InputID, outcome); err != nil {
+			return err
+		}
+		conversation.InteractionWakePending = len(conversation.Queue) > 0
+		conversation.InteractionTombstones = append(conversation.InteractionTombstones, interaction.Tombstone{
+			InteractionDigest: interaction.Digest(pending.ID),
+			OwnerDigest:       interaction.Digest(pending.Owner.SurfaceKey + ":" + pending.Owner.PrincipalKey),
+			AnswerDigest:      answerDigest,
+			Phase:             finish.Phase,
+			FinishedAt:        finish.FinishedAt,
+		})
+		for len(conversation.InteractionTombstones) > interaction.MaxTerminalTombstones {
+			conversation.InteractionTombstones = conversation.InteractionTombstones[1:]
+		}
+		conversation.Interaction = nil
+		return (interaction.DurableState{Tombstones: conversation.InteractionTombstones}).Validate()
+	})
+}
+
+type boundInteractionStore struct {
+	store *conversationStore
+	ref   conversationRef
+	wake  func() error
+}
+
+func (s *conversationStore) interactionStore(ref conversationRef) interaction.Store {
+	return &boundInteractionStore{store: s, ref: ref}
+}
+
+func (s *conversationStore) interactionStoreWithWake(ref conversationRef, wake func() error) interaction.Store {
+	return &boundInteractionStore{store: s, ref: ref, wake: wake}
+}
+
+func (s *boundInteractionStore) Load() (interaction.DurableState, error) {
+	return s.store.loadInteraction(s.ref)
+}
+
+func (s *boundInteractionStore) Open(pending *interaction.Lifecycle) error {
+	return s.store.openInteraction(s.ref, pending)
+}
+
+func (s *boundInteractionStore) Update(id string, mutate func(*interaction.Lifecycle) error) error {
+	return s.store.updateInteraction(s.ref, id, mutate)
+}
+
+func (s *boundInteractionStore) Finish(finish interaction.FinishRequest) error {
+	if err := s.store.finishInteraction(s.ref, finish); err != nil {
+		return err
+	}
+	if s.wake != nil {
+		return s.wake()
+	}
+	return nil
+}
+
+func (s *conversationStore) persistMutation(mutate func() error) error {
+	prior, err := cloneSessionState(s.state)
+	if err != nil {
+		return err
+	}
+	if err := mutate(); err != nil {
+		s.state = prior
+		return err
+	}
+	if err := s.persist(); err != nil {
+		s.state = prior
+		return err
+	}
+	return nil
+}
+
+func (s *conversationStore) persistMutationIfChanged(mutate func() (bool, error)) error {
+	prior, err := cloneSessionState(s.state)
+	if err != nil {
+		return err
+	}
+	changed, err := mutate()
+	if err != nil {
+		s.state = prior
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	if err := s.persist(); err != nil {
+		s.state = prior
+		return err
+	}
+	return nil
+}
+
+func conversationInputStatus(conversation *session.Conversation, inputID string) (string, bool) {
+	for _, input := range conversation.Queue {
+		if input.ID == inputID {
+			return input.Status, true
+		}
+	}
+	if status := conversation.Outcomes[inputID]; status != "" {
+		return status, true
+	}
+	return "", false
+}
+
+func conversationAdmissionStatus(conversation *session.Conversation, inputID string) (status string, duplicate, blocked bool) {
+	if status, duplicate = conversationInputStatus(conversation, inputID); duplicate {
+		return status, true, false
+	}
+	if conversation.Interaction != nil {
+		return string(LifecycleWaiting), false, true
+	}
+	return "", false, false
+}
+
+func cloneSessionState(state *session.State) (*session.State, error) {
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return nil, errors.New("cannot snapshot dispatch state")
+	}
+	var clone session.State
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		return nil, errors.New("cannot snapshot dispatch state")
+	}
+	return &clone, nil
+}
+
+func cloneInteractionState(state interaction.DurableState) (interaction.DurableState, error) {
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return interaction.DurableState{}, errors.New("cannot snapshot interaction state")
+	}
+	var clone interaction.DurableState
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		return interaction.DurableState{}, errors.New("cannot snapshot interaction state")
+	}
+	return clone, nil
 }
 
 func (s *conversationStore) conversation(ref conversationRef) (*session.Conversation, error) {

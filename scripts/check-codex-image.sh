@@ -84,7 +84,7 @@ docker build --platform linux/amd64 --pull \
   "$work/context"
 
 docker run --rm --entrypoint /bin/sh --env "EXPECTED_SHARED_LIBRARIES=$shared_libraries" "$source_image" -c '
-  set -eu
+  set -eux
   test "$(id -u):$(id -g)" = "65532:65532"
   test "$(hctl --version)" = "hctl '"$hctl_version"'"
   codex --version | grep -F "'"$codex_version"'" >/dev/null
@@ -102,6 +102,7 @@ docker run --rm --entrypoint /bin/sh --env "EXPECTED_SHARED_LIBRARIES=$shared_li
     ldd "$(command -v "$executable")"
   done | awk "{ if (\$2 == \"=>\" && \$3 ~ /^\//) print \$1; else if (\$1 ~ /^\//) { count=split(\$1, parts, \"/\"); print parts[count] } }" | sort -u)
   expected_libraries=$(printf "%s\n" "$EXPECTED_SHARED_LIBRARIES" | tr , "\n")
+  printf "actual shared libraries:\n%s\nexpected shared libraries:\n%s\n" "$actual_libraries" "$expected_libraries"
   test "$actual_libraries" = "$expected_libraries"
   for executable in hctl codex go; do
     ldd "$(command -v "$executable")" 2>&1 | grep -E "statically linked|not a dynamic executable" >/dev/null

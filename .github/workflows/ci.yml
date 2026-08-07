@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-and-build:
+    name: Check and build artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Bootstrap pinned development tools
+        run: ./scripts/bootstrap-tools.sh
+
+      - name: Run repository checks
+        run: ./scripts/check.sh
+
+      - name: Build target binaries twice
+        run: |
+          mkdir -p dist repeat
+          export PATH="$PWD/.tools/go/bin:$PWD/.tools/bin:$PATH"
+          ./scripts/build-hctl-binary.sh --target linux-amd64 --output dist/hctl_linux_amd64
+          ./scripts/build-hctl-binary.sh --target darwin-arm64 --output dist/hctl_darwin_arm64
+          ./scripts/build-hctl-binary.sh --target linux-amd64 --output repeat/hctl_linux_amd64
+          ./scripts/build-hctl-binary.sh --target darwin-arm64 --output repeat/hctl_darwin_arm64
+          cmp dist/hctl_linux_amd64 repeat/hctl_linux_amd64
+          cmp dist/hctl_darwin_arm64 repeat/hctl_darwin_arm64
+          ./dist/hctl_linux_amd64 --help >/dev/null
+          (cd dist && sha256sum hctl_linux_amd64 hctl_darwin_arm64 >hctl_ci_SHA256SUMS)
+
+      - name: Upload checked binaries
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: hctl-binaries-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7

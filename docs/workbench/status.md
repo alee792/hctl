@@ -291,8 +291,14 @@ ADR 0027 now settles the image/runtime boundary: `hctl stage` atomically
 prepares canonical agent filesystems, selects only discovered tool execution
 closures, records deterministic file and ownership evidence, and rejects
 build-path or credential-state leakage. Existing build and deployment systems
-still own OCI output and operation. Pinned harness image publication remains
-follow-up work. Portable sandbox authoring is still deferred because the
+still own OCI output and operation. The
+[artifact pipeline gap analysis](artifact-pipeline-gap-analysis.md) now defines
+a CI-first path from checked source through deterministic target binaries,
+unpushed image acceptance, and separately authorized exact-tag publication.
+The first foundation runs repository checks and reproducible Linux and Darwin
+binary construction in hosted CI; pinned image inputs, real container
+acceptance, and harness image publication remain follow-up work. Portable
+sandbox authoring is still deferred because the
 native harnesses do not expose equivalent
 sandbox contracts. Do not implement proposal capture, image deployment,
 sandbox source, or broker code merely to exercise future seams.

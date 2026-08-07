@@ -131,6 +131,56 @@ func TestStageRejectsNoncanonicalPythonRuntime(t *testing.T) {
 	}
 }
 
+func TestPruneDenoBuildCacheMaterializesContainedSymlinks(t *testing.T) {
+	workspace := t.TempDir()
+	cache := "cache"
+	denoDirectory := filepath.Join(workspace, cache, "deno-dir")
+	packageDirectory := filepath.Join(denoDirectory, "npm", "package")
+	realDirectory := filepath.Join(packageDirectory, "real")
+	if err := os.MkdirAll(realDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDirectory, "module.js"), []byte("export {};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(packageDirectory, "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pruneDenoBuildCache(workspace, cache); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(packageDirectory, "linked")
+	if info, err := os.Lstat(linked); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("materialized Deno directory = %v, %v", info, err)
+	}
+	data, err := os.ReadFile(filepath.Join(linked, "module.js"))
+	if err != nil || string(data) != "export {};\n" {
+		t.Fatalf("materialized Deno file = %q, %v", data, err)
+	}
+}
+
+func TestPruneDenoBuildCacheRejectsEscapingSymlink(t *testing.T) {
+	workspace := t.TempDir()
+	cache := "cache"
+	denoDirectory := filepath.Join(workspace, cache, "deno-dir")
+	if err := os.MkdirAll(filepath.Join(denoDirectory, "npm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.js")
+	if err := os.WriteFile(outside, []byte("outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(denoDirectory, "npm", "outside.js")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := pruneDenoBuildCache(workspace, cache)
+	if err == nil || !strings.Contains(err.Error(), "escapes its root") {
+		t.Fatalf("escaping Deno symlink error = %v", err)
+	}
+}
+
 func executableTestFile(t *testing.T, directory, name, content string) string {
 	t.Helper()
 	if err := os.MkdirAll(directory, 0o755); err != nil {

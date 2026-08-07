@@ -1,6 +1,11 @@
 # ADR 0021: Persist durable interactive-input lifecycles
 
 - Status: accepted
+- Integrated by: [ADR 0022](0022-gate-managed-channel-input-at-the-dispatcher.md),
+  [ADR 0023](0023-continue-codex-input-in-a-new-turn.md),
+  [ADR 0024](0024-resume-claude-channel-input-with-native-tool-deferral.md),
+  and [ADR 0025](0025-render-discord-input-with-bounded-native-components.md)
+- Implementation: integrated into the live Discord path on 2026-08-07
 
 ## Decision
 
@@ -70,10 +75,10 @@ continuation keys, paths, configuration, or credentials. Durable state contains
 no raw vendor payload or credential.
 
 This decision establishes the transport-neutral coordinator, lifecycle, and
-dispatch-store contract only. GitHub issues #21 through #24 separately own the
-managed `channel.request_input` tool, Claude native deferred-tool continuation,
-Codex continuation turns, and Discord rendering. Until those slices are wired,
-the live Discord and harness adapters do not offer interactive input.
+dispatch-store contract only. ADRs 0022 through 0025 separately add the managed
+`channel.request_input` tool, Codex continuation turns, Claude native
+deferred-tool continuation, and Discord rendering. Those integrations now make
+interactive input available to compatible live Discord root sessions.
 
 ## Context
 

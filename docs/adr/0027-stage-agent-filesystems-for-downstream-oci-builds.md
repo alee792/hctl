@@ -1,6 +1,7 @@
 # ADR 0027: Stage agent filesystems for downstream OCI builds
 
 - Status: accepted
+- Implementation: deferred; the staging command and harness images do not exist
 
 ## Decision
 

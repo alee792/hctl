@@ -1,6 +1,7 @@
 # ADR 0006: Use native inherited subagents
 
 - Status: accepted
+- Amended by: [ADR 0010](0010-allow-portable-subagent-effort.md)
 
 ## Decision
 

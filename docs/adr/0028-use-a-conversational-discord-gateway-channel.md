@@ -1,7 +1,15 @@
-# ADR 0012: Use a conversational Discord Gateway channel
+# ADR 0028: Use a conversational Discord Gateway channel
 
 - Status: accepted
-- Supersedes: signed Discord HTTP Interactions
+- Date: 2026-08-06
+- Supersedes: [ADR 0012](0012-use-signed-discord-http-interactions.md)
+- Amends: [ADR 0009](0009-use-a-local-secretless-operation-broker.md)
+- Extended by: [ADR 0014](0014-manage-channel-session-lifecycles.md),
+  [ADR 0015](0015-enforce-read-only-channel-sessions.md),
+  [ADR 0016](0016-isolate-writable-channel-conversations.md),
+  [ADR 0017](0017-bound-channel-runtime-capacity.md),
+  [ADR 0018](0018-reconcile-and-retire-managed-worktrees.md), and
+  [ADR 0025](0025-render-discord-input-with-bounded-native-components.md)
 
 ## Decision
 
@@ -10,17 +18,6 @@ REST API. It accepts ambient messages from one authorized user in one configured
 guild channel and that user's DM, maps each surface to a durable turn-dispatch
 conversation, buffers native-harness output, and replies in the same channel.
 It requires no public listener, tunnel, TLS endpoint, or HTTP interaction key.
-
-A transport-neutral channel controller sits between the durable dispatcher and
-built-in vendor adapters. It owns deterministic surface registration,
-pending-turn correlation, bounded complete-response buffering, exact control
-result suppression, one-time write continuation, typing readiness, terminal
-failure classification, status/reset delegation, and dispatcher lifecycle.
-Vendor adapters admit and normalize native events and retain vendor identity,
-credentials, commands, reply targets, rendering, mentions policy, typing and
-delivery calls, and ambiguous-delivery semantics. Vendor payloads and reply
-targets remain process-local and never cross into dispatcher or durable session
-state. This is an internal seam, not a public or dynamically loaded plugin ABI.
 
 Portable `channels/discord.md` contains strict `mode: ambient` frontmatter and a
 bounded participation policy. Apply fingerprints the original source and adds
@@ -46,6 +43,13 @@ native setup without overwriting modified generated files. Explicit
 `--input jsonl` preserves the headless stream interface. `/new` resets only an
 idle surface; `/status` returns redacted runtime state without a model turn.
 
+## Context
+
+This decision originally replaced ADR 0012 in commit `3f47d3d`. Restoring the
+superseded Interactions ADR under its original number preserves the decision
+history; the later number records the already-shipped Gateway decision without
+changing its effective date.
+
 ## Consequences
 
 - Discord application creation and privileged-intent enablement remain manual.
@@ -53,10 +57,6 @@ idle surface; `/status` returns redacted runtime state without a model turn.
 - Other users, channels, bots, and webhooks are discarded before dispatch.
 - Replies are bounded, disable mentions, and are never retried after ambiguous
   delivery.
-- A second built-in adapter can reuse channel orchestration without importing
-  Discord types or duplicating the dispatcher-event state machine.
-- Rich forms, buttons, component schemas, and capability negotiation remain a
-  separate design decision rather than part of the controller interface.
 - Direct multi-agent routing, multiple channels/users, HTTP mode, proactive
   schedule delivery, hosted secret managers, and horizontal replicas are
   deferred.

@@ -1,7 +1,8 @@
 # Working status
 
-- Updated: 2026-08-06
-- Repository: local-only `hctl` experiment; product naming remains deferred
+- Updated: 2026-08-07
+- Repository: GitHub-backed `hctl` experiment; publication remains pending and
+  product naming remains deferred
 - Purpose: let a clean session resume without depending on chat history or the
   previous Roster repository
 
@@ -20,8 +21,7 @@ open follow-up questions.
 
 ## Shipped prototype
 
-The repository contains a small Go CLI, with one maintained YAML dependency,
-that:
+The repository contains a small Go CLI that:
 
 - applies portable agent instructions, root and vendored Agent Plugins v1
   skills with bundled resources, native unmanaged plugin MCP declarations,
@@ -337,8 +337,11 @@ Opaque reconstructable callback handles, exact application/user/surface
 authorization, durable answer-before-ack ordering, post-ack continuation, and
 ambiguous-delivery no-retry behavior are fake-tested. Fake child processes
 provide live-style process-exit, same-session resume, and final controller
-delivery evidence; credentialed end-to-end acceptance remains issue #25 and is
-not claimed here.
+delivery evidence. Credentialed Codex interactive-input acceptance passed;
+credentialed Claude remained unavailable because the installed CLI had no
+authenticated account. The
+[interactive-input acceptance record](interactive-input-acceptance.md) keeps
+those claims separate from the broader credential-free evidence.
 
 A [live Discord acceptance pass](discord-live-acceptance.md) with an enrolled
 user-controlled bot exercised independent guild and DM write promotion,

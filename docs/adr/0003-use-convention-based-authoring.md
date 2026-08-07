@@ -1,14 +1,19 @@
 # ADR 0003: Use convention-based authoring
 
 - Status: accepted
+- Extended by: [ADR 0011](0011-start-github-connections-anonymously.md),
+  [ADR 0013](0013-run-schedules-as-fresh-dispatch-tasks.md),
+  [ADR 0019](0019-import-vendored-agent-plugin-skills.md), and
+  [ADR 0028](0028-use-a-conversational-discord-gateway-channel.md)
 
 ## Decision
 
 Make the authored directory layout the project API. Derive the agent name from
 the directory, load descriptive `instructions.md`, and discover optional
-Agent Skills directories at `skills/NAME/SKILL.md`, `tools/`, and immediate
-`subagents/` without a registry or required configuration file. Copy supported
-regular skill resources into each harness's project skill location. Keep
+authored paths such as Agent Skills directories at `skills/NAME/SKILL.md`,
+`tools/`, and immediate `subagents/` without a registry or required
+configuration file. Copy supported regular skill resources into each harness's
+project skill location. Keep
 harness-specific skill metadata beside `SKILL.md` only when the target has an
 honest native representation. When applying recognized vendor metadata to a
 different harness, copy it unchanged and warn that it may have no effect rather

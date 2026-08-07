@@ -1,6 +1,7 @@
 # ADR 0019: Import vendored Agent Plugin skills
 
 - Status: accepted
+- Extended by: [ADR 0020](0020-map-plugin-mcp-through-native-harness-configuration.md)
 
 ## Plain-English summary
 
@@ -55,8 +56,8 @@ project model.
 
 Skills are the smallest interoperable slice and require no credentials or
 runtime process supervision. Native plugin MCP mapping has different trust,
-configuration, lifecycle, and collision questions, so GitHub issue #27 owns it
-as a separately shaped phase.
+configuration, lifecycle, and collision questions, so it was shaped as the
+separate phase recorded in ADR 0020.
 
 ## Consequences
 

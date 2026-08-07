@@ -5,10 +5,11 @@
 ## Decision
 
 Treat an agent project as portable authored source that can be applied to any
-independently selected workspace. The agent source contains instructions,
-skills, tools, subagents, and native dependency files. The workspace contains
-generated harness files, apply records, dispatch state, runtime caches, and the
-files on which the harness and authored tools operate.
+independently selected workspace. The agent source contains authored project
+files such as instructions, skills, tools, subagents, harness-specific files,
+connections, channels, schedules, plugins, and native dependency files. The
+workspace contains generated harness files, apply records, dispatch state,
+runtime caches, and the files on which the harness and authored tools operate.
 
 `--workspace` defaults to the agent source directory, preserving a simple
 standalone-agent journey. Using an agent stored in another project or shared

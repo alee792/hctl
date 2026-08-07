@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -138,6 +139,31 @@ func TestGeneratedInstructionsContainDiscordParticipationPolicy(t *testing.T) {
 		}
 		if strings.Contains(content, "discord_components") || strings.Contains(content, "application_id") {
 			t.Fatalf("%s instructions omitted Discord policy: %q", harness, content)
+		}
+		settings, present := generated.Files[".claude/hctl-settings.json"]
+		if harness == "claude" {
+			if !present || !strings.Contains(string(settings.Content), `"matcher": "^mcp__managed__channel\\.request_input$"`) || !strings.Contains(string(settings.Content), `"claude-deferred-input"`) || strings.Contains(string(settings.Content), "Bash|") {
+				t.Fatalf("Claude deferred hook is not narrowly generated: %q", string(settings.Content))
+			}
+			var decoded struct {
+				Hooks map[string][]struct {
+					Matcher string `json:"matcher"`
+				} `json:"hooks"`
+			}
+			if err := json.Unmarshal(settings.Content, &decoded); err != nil || len(decoded.Hooks["PreToolUse"]) != 1 {
+				t.Fatalf("Claude deferred hook JSON = %#v, %v", decoded, err)
+			}
+			matcher := regexp.MustCompile(decoded.Hooks["PreToolUse"][0].Matcher)
+			for _, value := range []string{"mcp__managed__channelXrequest_input", "prefixmcp__managed__channel.request_input", "mcp__managed__channel.request_input_suffix", "mcp__other__channel.request_input"} {
+				if matcher.MatchString(value) {
+					t.Fatalf("near-match %q was intercepted", value)
+				}
+			}
+			if !matcher.MatchString("mcp__managed__channel.request_input") {
+				t.Fatal("exact managed tool did not match")
+			}
+		} else if present {
+			t.Fatal("Claude hook configuration was generated for Codex")
 		}
 	}
 }

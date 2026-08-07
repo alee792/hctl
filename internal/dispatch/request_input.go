@@ -13,10 +13,11 @@ import (
 var ErrRequestInputUnavailable = errors.New("managed interactive input is unavailable")
 
 type RequestInputContext struct {
-	ConversationID string
-	InputID        string
-	CorrelationID  string
-	Request        interaction.Request
+	ConversationID  string
+	InputID         string
+	CorrelationID   string
+	ContinuationKey string
+	Request         interaction.Request
 }
 
 type RequestInputHandler interface {
@@ -52,8 +53,17 @@ func (h CoordinatorRequestInputHandler) Handle(_ context.Context, request Reques
 	return h.Coordinator.Request(interaction.OpenRequest{
 		InteractionID: "interaction_" + hex.EncodeToString(digest[:16]), InputID: request.InputID,
 		Owner: h.Owner, Request: request.Request, Resolution: resolution,
-		Continuation: h.Continuation, ContinuationKey: h.ContinuationKey,
+		Continuation: h.Continuation, ContinuationKey: firstNonEmpty(request.ContinuationKey, h.ContinuationKey),
 	})
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func handleRequestInput(ctx context.Context, handler RequestInputHandler, conversation, inputID string, event *harness.RequestInputEvent) error {
@@ -68,7 +78,8 @@ func handleRequestInput(ctx context.Context, handler RequestInputHandler, conver
 	} else {
 		err = handler.Handle(ctx, RequestInputContext{
 			ConversationID: conversation, InputID: inputID, CorrelationID: event.CorrelationID,
-			Request: event.Request,
+			ContinuationKey: event.ContinuationKey,
+			Request:         event.Request,
 		})
 		if err == nil {
 			accepted = true

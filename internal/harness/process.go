@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"hctl/internal/secureenv"
@@ -28,12 +29,19 @@ func StartProcess(ctx context.Context, dir, executable string, args ...string) (
 }
 
 func StartProcessWithPolicy(ctx context.Context, dir, executable string, policy ExecutionPolicy, args ...string) (*Process, error) {
+	return StartProcessWithPolicyAndEnv(ctx, dir, executable, policy, nil, args...)
+}
+
+func StartProcessWithPolicyAndEnv(ctx context.Context, dir, executable string, policy ExecutionPolicy, environment map[string]string, args ...string) (*Process, error) {
 	if policy != PolicyDefault && policy != PolicyReadOnly && policy != PolicyWorkspaceWrite {
 		return nil, errors.New("unsupported harness execution policy")
 	}
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Dir = dir
 	cmd.Env = secureenv.With("HCTL_EXECUTION_POLICY", string(policy))
+	for key, value := range environment {
+		cmd.Env = replaceEnv(cmd.Env, key, value)
+	}
 	input, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, errors.New("cannot open harness input")
@@ -49,6 +57,17 @@ func StartProcessWithPolicy(ctx context.Context, dir, executable string, policy 
 	scanner := bufio.NewScanner(output)
 	scanner.Buffer(make([]byte, 4096), maxHarnessLine)
 	return &Process{cmd: cmd, input: input, scanner: scanner, exited: make(chan struct{})}, nil
+}
+
+func replaceEnv(environment []string, key, value string) []string {
+	prefix := key + "="
+	filtered := environment[:0]
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(filtered, prefix+value)
 }
 
 func (p *Process) Input() io.Writer { return p.input }

@@ -1779,6 +1779,32 @@ type managedEvent struct {
 	event        Event
 }
 
+func TestManagerConfiguresManagedInputBeforeAdmission(t *testing.T) {
+	p := testProject(t)
+	driver := newManagerDriver()
+	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(string, Event) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	if err := manager.ConfigureRequestInput(func(string) RequestInputHandler {
+		return testRequestInputHandler(&recordingInteractionRequester{})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Submit(context.Background(), "discord-guild", Submission{InputID: "message-1", Text: "origin"}); err != nil {
+		t.Fatal(err)
+	}
+	driver.waitStarted(t, "message-1")
+	if !driver.lastManagedRequestInput() {
+		t.Fatal("configured channel worker did not enable managed input")
+	}
+	if err := manager.ConfigureRequestInput(func(string) RequestInputHandler { return nil }); err == nil {
+		t.Fatal("managed input was reconfigured after admission")
+	}
+	driver.release("message-1")
+}
+
 func TestManagerOwnsCodexContinuationCapacityAndCommitsBeforeTerminalEvent(t *testing.T) {
 	p := testProject(t)
 	driver := newContinuationManagerDriver()
@@ -1890,6 +1916,194 @@ func TestManagerRestartClaimsDurableAnsweredContinuationOnce(t *testing.T) {
 	}
 }
 
+func TestManagerRestartClaimsDurableNativeDeferredContinuationOnce(t *testing.T) {
+	p := testProject(t)
+	ref := conversationRef{agentID: p.AgentID, harness: "claude", id: "discord-guild", fingerprint: p.SourceFingerprint}
+	store, pending := prepareDurableAnsweredInteraction(t, p, ref)
+	if err := store.updateInteraction(ref, pending.ID, func(current *interaction.Lifecycle) error {
+		current.Continuation = interaction.ContinuationNativeDeferredTool
+		current.ContinuationKey = "toolu_restart_exact"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	driver := newNativeDeferredManagerDriver()
+	events := make(chan Event, 16)
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+		events <- event
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	driver.waitContinuation(t)
+	if capacity := manager.Capacity(); capacity.Active != 1 || capacity.Resident != 1 {
+		t.Fatalf("native deferred capacity = %#v", capacity)
+	}
+	driver.releaseContinuation()
+	terminal := waitDispatchEvent(t, events, "turn.completed")
+	if terminal.Status != string(interaction.ContinuationNativeDeferredTool) || terminal.SessionID != "thread-1" || terminal.TurnID != "message-1" {
+		t.Fatalf("terminal = %#v", terminal)
+	}
+	state, err := manager.store.loadInteraction(ref)
+	if err != nil || state.Pending != nil || len(state.Tombstones) != 1 || state.Tombstones[0].InteractionDigest != interaction.Digest(pending.ID) {
+		t.Fatalf("state = %#v, %v", state, err)
+	}
+	select {
+	case <-driver.started:
+		t.Fatal("durable native deferred continuation was started twice")
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+func TestContinuationDeltaDeliveryFailureStopsRuntime(t *testing.T) {
+	p := testProject(t)
+	ref := conversationRef{agentID: p.AgentID, harness: "codex", id: "discord-guild", fingerprint: p.SourceFingerprint}
+	_, pending := prepareDurableAnsweredInteraction(t, p, ref)
+	driver := newContinuationManagerDriver()
+	deliveryErr := errors.New("continuation delta transport failed")
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+		if event.Type == "agent.output.delta" {
+			return deliveryErr
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	driver.waitContinuation(t)
+	driver.releaseContinuation()
+	assertContinuationDeliveryFatal(t, manager, deliveryErr)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		state, loadErr := manager.store.loadInteraction(ref)
+		if loadErr == nil && state.Pending != nil && state.Pending.ID == pending.ID && state.Pending.Resume == interaction.ResumeUncertain {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("delta failure lifecycle = %#v, %v", state, loadErr)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestContinuationDeltaDeliveryFailureCancelsBeforeDriverReturns(t *testing.T) {
+	p := testProject(t)
+	ref := conversationRef{agentID: p.AgentID, harness: "codex", id: "discord-guild", fingerprint: p.SourceFingerprint}
+	_, _ = prepareDurableAnsweredInteraction(t, p, ref)
+	driver := newBlockedAfterEmitContinuationDriver()
+	deliveryErr := errors.New("continuation callback transport failed")
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+		if event.Type == "agent.output.delta" {
+			return deliveryErr
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		driver.releaseReturn()
+		manager.Close()
+	})
+	select {
+	case <-driver.callbackReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not emit a delta")
+	}
+	select {
+	case <-driver.cancelObserved:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manager-fatal transition did not cancel the active continuation")
+	}
+	select {
+	case <-manager.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("manager did not stop before continuation driver return")
+	}
+	select {
+	case <-driver.returned:
+		t.Fatal("continuation driver returned before immediate fatal state was observed")
+	default:
+	}
+	if !errors.Is(manager.Err(), errDispatchEventDelivery) || !errors.Is(manager.Err(), deliveryErr) {
+		t.Fatalf("manager error = %v", manager.Err())
+	}
+	if _, err := manager.Submit(context.Background(), "discord-dm", Submission{InputID: "message-other", Text: "must reject"}); !errors.Is(err, errDispatchEventDelivery) {
+		t.Fatalf("post-failure admission = %v", err)
+	}
+	driver.releaseReturn()
+	select {
+	case <-driver.returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled continuation did not unwind")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		capacity := manager.Capacity()
+		if capacity.Active == 0 && capacity.Resident == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cancelled continuation capacity = %#v", capacity)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestContinuationTerminalDeliveryFailureStopsRuntimeAfterCommit(t *testing.T) {
+	p := testProject(t)
+	ref := conversationRef{agentID: p.AgentID, harness: "codex", id: "discord-guild", fingerprint: p.SourceFingerprint}
+	_, pending := prepareDurableAnsweredInteraction(t, p, ref)
+	driver := newContinuationManagerDriver()
+	deliveryErr := errors.New("continuation terminal transport failed")
+	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+		if event.Type == "turn.completed" {
+			return deliveryErr
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	driver.waitContinuation(t)
+	driver.releaseContinuation()
+	assertContinuationDeliveryFatal(t, manager, deliveryErr)
+	state, err := manager.store.loadInteraction(ref)
+	if err != nil || state.Pending != nil || len(state.Tombstones) != 1 || state.Tombstones[0].InteractionDigest != interaction.Digest(pending.ID) || state.Tombstones[0].Phase != interaction.PhaseCompleted {
+		t.Fatalf("terminal failure commit = %#v, %v", state, err)
+	}
+}
+
+func assertContinuationDeliveryFatal(t *testing.T, manager *Manager, deliveryErr error) {
+	t.Helper()
+	select {
+	case <-manager.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation delivery failure did not stop runtime")
+	}
+	if !errors.Is(manager.Err(), errDispatchEventDelivery) || !errors.Is(manager.Err(), deliveryErr) {
+		t.Fatalf("manager error = %v", manager.Err())
+	}
+	if _, err := manager.Submit(context.Background(), "discord-dm", Submission{InputID: "message-other", Text: "must reject"}); !errors.Is(err, errDispatchEventDelivery) {
+		t.Fatalf("post-failure admission = %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		capacity := manager.Capacity()
+		if capacity.Active == 0 && capacity.Resident == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("post-failure capacity = %#v", capacity)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestManagerRestartMarksClaimedContinuationUncertainWithoutRetry(t *testing.T) {
 	p := testProject(t)
 	ref := conversationRef{agentID: p.AgentID, harness: "codex", id: "discord-guild", fingerprint: p.SourceFingerprint}
@@ -1993,6 +2207,60 @@ func (d *continuationManagerDriver) waitContinuation(t *testing.T) {
 
 func (d *continuationManagerDriver) releaseContinuation() { close(d.release) }
 
+type nativeDeferredManagerDriver struct {
+	*continuationManagerDriver
+}
+
+type blockedAfterEmitContinuationDriver struct {
+	*managerDriver
+	callbackReturned chan struct{}
+	cancelObserved   chan struct{}
+	allowReturn      chan struct{}
+	returned         chan struct{}
+	releaseOnce      sync.Once
+}
+
+func newBlockedAfterEmitContinuationDriver() *blockedAfterEmitContinuationDriver {
+	return &blockedAfterEmitContinuationDriver{
+		managerDriver: newNamedManagerDriver("codex"), callbackReturned: make(chan struct{}),
+		cancelObserved: make(chan struct{}), allowReturn: make(chan struct{}), returned: make(chan struct{}),
+	}
+}
+
+func (d *blockedAfterEmitContinuationDriver) ContinueTurn(ctx context.Context, _ harness.OpenRequest, _ string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	emit(harness.Event{Type: "agent.output.delta", TurnID: "blocked-answer", ItemID: "answer", Delta: "cannot deliver"})
+	close(d.callbackReturned)
+	<-ctx.Done()
+	close(d.cancelObserved)
+	<-d.allowReturn
+	close(d.returned)
+	return interaction.ContinuationResult{Effect: interaction.EffectUncertain, OriginOutcome: "uncertain", ResultTurnID: intent.InputID}
+}
+
+func (d *blockedAfterEmitContinuationDriver) releaseReturn() {
+	d.releaseOnce.Do(func() { close(d.allowReturn) })
+}
+
+func newNativeDeferredManagerDriver() *nativeDeferredManagerDriver {
+	base := newContinuationManagerDriver()
+	base.name = "claude"
+	return &nativeDeferredManagerDriver{continuationManagerDriver: base}
+}
+
+func (d *nativeDeferredManagerDriver) ResumeDeferredTool(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	if request.Policy != harness.PolicyReadOnly || sessionID != "thread-1" || intent.InputID != "message-1" || intent.ContinuationKey != "toolu_restart_exact" {
+		return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+	}
+	d.started <- struct{}{}
+	select {
+	case <-d.release:
+	case <-ctx.Done():
+		return interaction.ContinuationResult{Effect: interaction.EffectUncertain, OriginOutcome: "uncertain"}
+	}
+	emit(harness.Event{Type: "agent.output.delta", SessionID: sessionID, TurnID: intent.InputID, ItemID: "answer", Delta: "done"})
+	return interaction.ContinuationResult{Effect: interaction.EffectSucceeded, OriginOutcome: "completed", ResultSessionID: sessionID, ResultTurnID: intent.InputID}
+}
+
 func waitDispatchEvent(t *testing.T, events <-chan Event, eventType string) Event {
 	t.Helper()
 	timer := time.NewTimer(2 * time.Second)
@@ -2054,6 +2322,7 @@ type managerDriver struct {
 	resumed       []string
 	policies      []harness.ExecutionPolicy
 	roots         []string
+	managedInputs []bool
 	inputRoots    map[string]string
 	inputSessions map[string]string
 	failures      map[string]error
@@ -2086,6 +2355,7 @@ func (d *managerDriver) Open(_ context.Context, request harness.OpenRequest) (ha
 	d.resumed = append(d.resumed, request.ResumeID)
 	d.policies = append(d.policies, request.Policy)
 	d.roots = append(d.roots, request.Root)
+	d.managedInputs = append(d.managedInputs, request.ManagedRequestInput)
 	if d.openErr != nil {
 		return nil, d.openErr
 	}
@@ -2094,6 +2364,12 @@ func (d *managerDriver) Open(_ context.Context, request harness.OpenRequest) (ha
 		sessionID = fmt.Sprintf("session-%d", d.next)
 	}
 	return &managerSession{driver: d, sessionID: sessionID, root: request.Root}, nil
+}
+
+func (d *managerDriver) lastManagedRequestInput() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.managedInputs) != 0 && d.managedInputs[len(d.managedInputs)-1]
 }
 
 func (d *managerDriver) waitStarted(t *testing.T, id string) {

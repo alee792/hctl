@@ -17,6 +17,7 @@ import (
 
 	"hctl/internal/connection/github"
 	"hctl/internal/harness"
+	"hctl/internal/harness/claude"
 	"hctl/internal/interaction"
 	"hctl/internal/project"
 	"hctl/internal/setup"
@@ -79,7 +80,8 @@ type requestInputRuntime interface {
 }
 
 func requestInputAvailable(requests requestInputRuntime) bool {
-	return requests != nil && requests.HarnessStrategyAvailable() && requests.ResponderAvailable()
+	return requests != nil && requests.HarnessStrategyAvailable() && requests.ResponderAvailable() ||
+		claude.DeferredBrokerAvailable(os.Getenv(claude.DeferredBrokerEnv))
 }
 
 func serveRequestsWithInput(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, input io.Reader, output, audit io.Writer) error {
@@ -179,6 +181,22 @@ func callManagedWithInput(p *project.Project, runtime managedRuntime, githubClie
 		return nil, requestID, call.Name, err
 	}
 	if requestInput {
+		if brokerPath := os.Getenv(claude.DeferredBrokerEnv); brokerPath != "" {
+			answer, err := claude.RequestDeferredBrokerResult(brokerPath, call.Arguments)
+			if err != nil {
+				return nil, requestID, call.Name, errors.New("deferred interactive input result was rejected")
+			}
+			if err := writeAudit(audit, p.AgentID, call.Name, requestID, "authorized"); err != nil {
+				return nil, requestID, call.Name, err
+			}
+			encoded, err := json.Marshal(answer)
+			if err != nil {
+				return nil, requestID, call.Name, errors.New("cannot encode deferred interactive input result")
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": string(encoded)}}, "structuredContent": map[string]any{"answer": answer}, "isError": false,
+			}, requestID, call.Name, nil
+		}
 		if !requestInputAvailable(requests) {
 			return nil, requestID, call.Name, errors.New("interactive input is unavailable in this session")
 		}

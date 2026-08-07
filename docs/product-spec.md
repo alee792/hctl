@@ -550,7 +550,8 @@ registration.
 
 ```sh
 hctl schedule trigger AGENT NAME --workspace WORKSPACE \
-  --harness claude --input-id OCCURRENCE_ID
+  --harness claude --input-id OCCURRENCE_ID \
+  --turn-timeout 90s --timeout 2m
 ```
 
 One-shot dispatch requires the selected setup to be current and the operator to
@@ -561,6 +562,20 @@ clears the stored native session ID; active work recovered after restart keeps
 the turn dispatcher's existing uncertain semantics and is never silently retried.
 Completed duplicate input returns the prior status without opening a harness.
 
+`--turn-timeout` configures a positive task-turn deadline up to 30 minutes and
+defaults to 90 seconds. It begins only after the native process opens and the
+occurrence is durably active. It is independent of the existing positive,
+bounded `--timeout`, which continues to cover verification and the complete
+command lifetime. Turn-deadline expiry aborts only that native process,
+durably records the occurrence as `uncertain`, clears its fresh-session
+continuation, persists the bounded `deadline_exceeded` reason separately from
+the lifecycle status, and returns a clear command error. The lifecycle line
+includes that reason. Repeating the input ID returns the retained uncertain
+outcome and reason without opening a process; generic restart uncertainty has
+no deadline reason, while a distinct later occurrence opens a fresh session.
+If the outer command context ends first, existing uncertain restart recovery
+remains authoritative.
+
 The command writes one bounded lifecycle line containing the schedule, input
 ID, status, duplicate flag, and runtime IDs when available. It never emits
 model text. A non-completed outcome returns a command error after the status is
@@ -568,7 +583,7 @@ reported. This task mode performs no channel delivery, registration, daemon
 installation, missed-run replay, overlap handling, credential use, or live
 model call during credential-free tests. TypeScript schedule handlers,
 subagent schedules, and Eve's hosted auth and delivery runtime are unsupported.
-A foreground UTC clock and durable per-turn deadlines are separate follow-ups.
+A foreground UTC clock remains a separate follow-up.
 
 Visible `tools/*.ts` and `tools/*.py` files each declare one tool. A visible
 `tools/NAME/tool.go` directory declares one Go tool. Filenames supply tool
@@ -673,6 +688,11 @@ compatibility, if that file is absent, hctl validates an existing owner-only
 `.hctl/gateway.json`, installs the validated bytes atomically at the new path,
 and removes the old regular file. When both paths exist, the dispatch path is
 authoritative.
+Dispatch state schema 4 retains compatibility with versions 1 through 3;
+existing state without outcome reasons remains valid and upgrades on its next
+write. A retained task deadline may add an optional bounded reason keyed only
+to its corresponding uncertain outcome; it does not introduce another
+lifecycle status or execution ledger.
 
 The local stdin adapter and transport-neutral channel controller share the turn
 dispatcher's typed submission and event seam. Built-in vendor adapters use the
@@ -827,7 +847,9 @@ The MVP is complete when credential-free tests prove:
 15. Nested Markdown schedules validate and fingerprint identically for both
     harnesses, and a one-shot trigger deduplicates stable occurrence IDs while
     opening a fresh native session for each accepted occurrence and discarding
-    model text.
+    model text. Its independent turn deadline aborts a stalled native process,
+    durably retains uncertainty for duplicate retries, and permits a later
+    occurrence to open a fresh session.
 16. An exact Discord write-access result promotes only that conversation into
     a validated branch-backed Git worktree, resumes the same Claude or Codex
     session under workspace-write policy, and continues the original request

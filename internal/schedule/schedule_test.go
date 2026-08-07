@@ -81,7 +81,7 @@ func TestTriggerRecoversSameOccurrenceAsUncertainWithoutRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "uncertain" || !result.Duplicate || result.SessionID != "interrupted-session" {
+	if result.Status != "uncertain" || !result.Duplicate || result.Reason != "" || result.SessionID != "interrupted-session" {
 		t.Fatalf("uncertain retry result = %#v", result)
 	}
 	if len(driver.resumed) != 0 {

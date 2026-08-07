@@ -2,10 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"hctl/internal/dispatch"
 )
 
 func TestHeadlessCommandIsNamedRun(t *testing.T) {
@@ -187,6 +190,75 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s",
 	}
 	if strings.Count(string(log), "Sweep stale billing work") != 2 {
 		t.Fatalf("schedule prompt was not submitted twice:\n%s", log)
+	}
+}
+
+func TestScheduleTriggerTurnDeadlinePersistsUncertainAndAllowsLaterOccurrence(t *testing.T) {
+	source := t.TempDir()
+	workspace := t.TempDir()
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "schedules", "sweep.md"), "---\ncron: '0 9 * * 1-5'\n---\n\nSweep stale work.\n", 0o644)
+	runtimeRoot := t.TempDir()
+	logPath := filepath.Join(runtimeRoot, "claude.log")
+	markerPath := filepath.Join(runtimeRoot, "stalled-once")
+	t.Setenv("FAKE_LOG", logPath)
+	t.Setenv("FAKE_MARKER", markerPath)
+	command := filepath.Join(runtimeRoot, "claude")
+	writeCLIFile(t, command, `#!/bin/sh
+if [ "${1-}" = "--version" ]; then
+  echo "2.1.221 (Claude Code)"
+  exit 0
+fi
+printf 'RUN\n' >> "$FAKE_LOG"
+IFS= read -r line || exit 1
+if [ ! -f "$FAKE_MARKER" ]; then
+  : > "$FAKE_MARKER"
+  IFS= read -r line
+  exit 1
+fi
+session_id="session-$$"
+printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session_id"
+printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"done"}\n' "$session_id"
+`, 0o755)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"apply", source, "--workspace", workspace, "--harness", "claude", "--command", command}, strings.NewReader(""), &output, &stderr, self); err != nil {
+		t.Fatal(err)
+	}
+
+	trigger := func(inputID string) error {
+		output.Reset()
+		stderr.Reset()
+		return Run([]string{"schedule", "trigger", source, "sweep", "--workspace", workspace, "--harness", "claude", "--input-id", inputID, "--command", command, "--turn-timeout", "20ms", "--timeout", "2s"}, strings.NewReader(""), &output, &stderr, self)
+	}
+	if err := trigger("occurrence-1"); !errors.Is(err, dispatch.ErrTurnDeadlineExceeded) || !strings.Contains(output.String(), "status=uncertain duplicate=false") || !strings.Contains(output.String(), "reason=deadline_exceeded") {
+		t.Fatalf("deadline trigger: err=%v output=%q", err, output.String())
+	}
+	if err := trigger("occurrence-1"); err == nil || !strings.Contains(err.Error(), "status uncertain") || !strings.Contains(output.String(), "status=uncertain duplicate=true") || !strings.Contains(output.String(), "reason=deadline_exceeded") {
+		t.Fatalf("duplicate trigger: err=%v output=%q", err, output.String())
+	}
+	if err := trigger("occurrence-2"); err != nil || !strings.Contains(output.String(), "status=completed duplicate=false") {
+		t.Fatalf("later trigger: err=%v output=%q stderr=%q", err, output.String(), stderr.String())
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(log), "RUN\n") != 2 {
+		t.Fatalf("deadline deduplication opened the harness unexpectedly:\n%s", log)
+	}
+}
+
+func TestScheduleTriggerValidatesTurnTimeoutIndependently(t *testing.T) {
+	for _, value := range []string{"0s", "31m"} {
+		var output, stderr bytes.Buffer
+		err := Run([]string{"schedule", "trigger", "agent", "sweep", "--harness", "claude", "--input-id", "occurrence-1", "--turn-timeout", value}, strings.NewReader(""), &output, &stderr, "")
+		if err == nil || !strings.Contains(err.Error(), "--turn-timeout must be greater than zero and at most 30m") {
+			t.Fatalf("turn timeout %q error = %v", value, err)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -177,6 +178,67 @@ func TestTaskInputsUseFreshSessionsAndDeduplicate(t *testing.T) {
 	}
 }
 
+func TestTaskTurnDeadlineAbortsAndDurablyDeduplicatesUncertainOutcome(t *testing.T) {
+	p := testProject(t)
+	driver := newDeadlineTaskDriver()
+	clock := newFakeClock()
+	var events []Event
+	emit := func(event Event) error {
+		events = append(events, event)
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runTask(context.Background(), p, driver, "schedule-daily", Submission{InputID: "occurrence-1", Text: "Run the task."}, emit, time.Minute, clock.NewTimer)
+	}()
+	driver.waitStarted(t)
+	clock.waitTimerAfter(t, time.Minute).Fire()
+	if err := <-done; !errors.Is(err, ErrTurnDeadlineExceeded) {
+		t.Fatalf("deadline error = %v", err)
+	}
+	if driver.abortCount() != 1 {
+		t.Fatalf("abort count = %d, want 1", driver.abortCount())
+	}
+	deadlineIndex := eventIndex(events, "turn.uncertain", "occurrence-1")
+	if deadlineIndex < 0 {
+		t.Fatalf("missing deadline lifecycle event: %#v", events)
+	}
+	deadline := events[deadlineIndex]
+	if deadline.Status != "deadline_exceeded" || deadline.Reason != session.OutcomeReasonDeadlineExceeded {
+		t.Fatalf("deadline event = %+v", deadline)
+	}
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := findConversation(state, "schedule-daily")
+	if conversation == nil || len(conversation.Queue) != 0 || conversation.Outcomes["occurrence-1"] != "uncertain" || conversation.OutcomeReasons["occurrence-1"] != session.OutcomeReasonDeadlineExceeded || conversation.SessionID != "" {
+		t.Fatalf("deadline state = %#v", conversation)
+	}
+
+	events = nil
+	if err := runTask(context.Background(), p, driver, "schedule-daily", Submission{InputID: "occurrence-1", Text: "Run the task."}, emit, time.Minute, clock.NewTimer); err != nil {
+		t.Fatal(err)
+	}
+	duplicateIndex := eventIndex(events, "input.duplicate", "occurrence-1")
+	if driver.openCount() != 1 || duplicateIndex < 0 || events[duplicateIndex].Reason != session.OutcomeReasonDeadlineExceeded {
+		t.Fatalf("duplicate reopened harness: opens=%d events=%#v", driver.openCount(), events)
+	}
+	select {
+	case <-driver.returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("late harness events blocked after task deadline")
+	}
+
+	if err := runTask(context.Background(), p, driver, "schedule-daily", Submission{InputID: "occurrence-2", Text: "Run the task."}, emit, time.Minute, clock.NewTimer); err != nil {
+		t.Fatal(err)
+	}
+	if driver.openCount() != 2 || !reflect.DeepEqual(driver.resumeIDs(), []string{"", ""}) {
+		t.Fatalf("later occurrence did not use a fresh session: opens=%d resumes=%v", driver.openCount(), driver.resumeIDs())
+	}
+}
+
 type fakeDriver struct {
 	started    chan string
 	release    chan struct{}
@@ -248,6 +310,87 @@ func (s *taskSession) RunTurn(_ context.Context, input harness.Input, emit func(
 }
 func (s *taskSession) Close() error { return nil }
 func (s *taskSession) Abort()       {}
+
+type deadlineTaskDriver struct {
+	mu       sync.Mutex
+	opens    int
+	aborts   int
+	resumes  []string
+	started  chan struct{}
+	release  chan struct{}
+	returned chan struct{}
+}
+
+func newDeadlineTaskDriver() *deadlineTaskDriver {
+	return &deadlineTaskDriver{started: make(chan struct{}, 1), release: make(chan struct{}), returned: make(chan struct{})}
+}
+
+func (d *deadlineTaskDriver) Name() string                 { return "claude" }
+func (d *deadlineTaskDriver) Executable() string           { return "/fake/claude" }
+func (d *deadlineTaskDriver) Verify(context.Context) error { return nil }
+func (d *deadlineTaskDriver) Open(_ context.Context, request harness.OpenRequest) (harness.Session, error) {
+	d.mu.Lock()
+	d.opens++
+	index := d.opens
+	d.resumes = append(d.resumes, request.ResumeID)
+	d.mu.Unlock()
+	return &deadlineTaskSession{driver: d, index: index}, nil
+}
+func (d *deadlineTaskDriver) waitStarted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-d.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for task turn")
+	}
+}
+func (d *deadlineTaskDriver) openCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.opens
+}
+func (d *deadlineTaskDriver) abortCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.aborts
+}
+func (d *deadlineTaskDriver) resumeIDs() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string{}, d.resumes...)
+}
+
+type deadlineTaskSession struct {
+	driver *deadlineTaskDriver
+	index  int
+}
+
+func (s *deadlineTaskSession) InitialEvents() []harness.Event {
+	return []harness.Event{{Type: "session.started", SessionID: fmt.Sprintf("deadline-session-%d", s.index)}}
+}
+func (s *deadlineTaskSession) RunTurn(_ context.Context, input harness.Input, emit func(harness.Event)) (harness.TurnResult, error) {
+	if s.index == 1 {
+		s.driver.started <- struct{}{}
+		<-s.driver.release
+		for index := 0; index < 128; index++ {
+			emit(harness.Event{Type: "agent.output.delta", SessionID: "late", TurnID: input.ID, Delta: "late"})
+		}
+		close(s.driver.returned)
+		return harness.TurnResult{}, errors.New("aborted")
+	}
+	return harness.TurnResult{SessionID: fmt.Sprintf("deadline-session-%d", s.index), TurnID: input.ID, Status: "completed"}, nil
+}
+func (s *deadlineTaskSession) Close() error { return nil }
+func (s *deadlineTaskSession) Abort() {
+	s.driver.mu.Lock()
+	s.driver.aborts++
+	s.driver.mu.Unlock()
+	select {
+	case <-s.driver.release:
+	default:
+		close(s.driver.release)
+	}
+}
 
 type lineOutput struct {
 	mu     sync.Mutex

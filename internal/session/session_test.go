@@ -128,7 +128,7 @@ func TestLoadMigratesLegacyManifestFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "manifest_fingerprint") || !strings.Contains(string(data), `"schema_version": 3`) || !strings.Contains(string(data), `"agent_id": "reviewer@123"`) {
+	if strings.Contains(string(data), "manifest_fingerprint") || !strings.Contains(string(data), `"schema_version": 4`) || !strings.Contains(string(data), `"agent_id": "reviewer@123"`) {
 		t.Fatalf("legacy field was not migrated: %s", data)
 	}
 }
@@ -207,7 +207,7 @@ func TestConversationWorktreeAssignmentRoundTrips(t *testing.T) {
 	}
 }
 
-func TestInteractionLifecycleRoundTripsInSchemaThree(t *testing.T) {
+func TestInteractionLifecycleRoundTripsAfterSchemaUpgrade(t *testing.T) {
 	root := t.TempDir()
 	state := &State{SchemaVersion: 3, Conversations: map[string]*Conversation{}}
 	conversation, err := state.GetOrCreate("reviewer@one", "claude", "discord-one", "source-1")
@@ -228,7 +228,7 @@ func TestInteractionLifecycleRoundTripsInSchemaThree(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := loaded.Conversations[conversationKey("reviewer@one", "claude", "discord-one", "source-1")]
-	if got == nil || got.Interaction == nil || got.Interaction.ID != conversation.Interaction.ID || len(got.InteractionTombstones) != 1 || loaded.SchemaVersion != 3 {
+	if got == nil || got.Interaction == nil || got.Interaction.ID != conversation.Interaction.ID || len(got.InteractionTombstones) != 1 || loaded.SchemaVersion != 4 {
 		t.Fatalf("interaction state = %#v", got)
 	}
 }
@@ -257,7 +257,7 @@ func TestLegacySchemaUpgradesOnlyWhenWritten(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(after), `"schema_version": 3`) {
+	if !strings.Contains(string(after), `"schema_version": 4`) {
 		t.Fatalf("schema was not upgraded on write: %s", after)
 	}
 }
@@ -425,6 +425,77 @@ func TestRecoverUncertainPreservesParkedOrigin(t *testing.T) {
 	}
 }
 
+func TestOutcomeReasonPersistsWithoutChangingUncertainLifecycle(t *testing.T) {
+	root := t.TempDir()
+	state := &State{SchemaVersion: 3, Conversations: map[string]*Conversation{}}
+	conversation, err := state.GetOrCreate("reviewer@one", "claude", "schedule", "source-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := conversation.Accept("occurrence-1", "run"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conversation.StartNext(); err != nil {
+		t.Fatal(err)
+	}
+	if err := conversation.CompleteWithReason("occurrence-1", "uncertain", OutcomeReasonDeadlineExceeded); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(root, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedConversation, err := loaded.GetOrCreate("reviewer@one", "claude", "schedule", "source-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedConversation.Outcomes["occurrence-1"] != "uncertain" || loadedConversation.OutcomeReason("occurrence-1") != OutcomeReasonDeadlineExceeded {
+		t.Fatalf("loaded outcome = %#v", loadedConversation)
+	}
+}
+
+func TestLoadExistingUncertainOutcomeWithoutReason(t *testing.T) {
+	root := t.TempDir()
+	conversation := &Conversation{
+		ID: "schedule", AgentID: "reviewer@one", Harness: "claude", SourceFingerprint: "source-1",
+		Outcomes: map[string]string{"occurrence-1": "uncertain"}, OutcomeOrder: []string{"occurrence-1"},
+	}
+	state := &State{SchemaVersion: 3, Conversations: map[string]*Conversation{
+		conversationKey("reviewer@one", "claude", "schedule", "source-1"): conversation,
+	}}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rootfs.WriteAtomic(root, statePath, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedConversation, err := loaded.GetOrCreate("reviewer@one", "claude", "schedule", "source-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedConversation.Outcomes["occurrence-1"] != "uncertain" || loadedConversation.OutcomeReason("occurrence-1") != "" {
+		t.Fatalf("legacy uncertain outcome changed: %#v", loadedConversation)
+	}
+	if err := Save(root, loaded); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.SchemaVersion != 4 {
+		t.Fatalf("upgraded schema = %d, want 4", upgraded.SchemaVersion)
+	}
+}
+
 func interactionTombstones(count int) []interaction.Tombstone {
 	result := make([]interaction.Tombstone, count)
 	for index := range result {
@@ -439,10 +510,10 @@ func interactionTombstones(count int) []interaction.Tombstone {
 func TestResetLifecyclePreservesWorktreeAssignment(t *testing.T) {
 	conversation := &Conversation{
 		SessionID: "session-1", WorkspaceRoot: "/tmp/worktree", WorktreeBranch: "hctl/test/one",
-		Queue: []Input{{ID: "message-1", Status: "queued"}}, Outcomes: map[string]string{"old": "completed"}, OutcomeOrder: []string{"old"},
+		Queue: []Input{{ID: "message-1", Status: "queued"}}, Outcomes: map[string]string{"old": "uncertain"}, OutcomeOrder: []string{"old"}, OutcomeReasons: map[string]string{"old": OutcomeReasonDeadlineExceeded},
 	}
 	conversation.ResetLifecycle()
-	if conversation.SessionID != "" || len(conversation.Queue) != 0 || len(conversation.Outcomes) != 0 || len(conversation.OutcomeOrder) != 0 {
+	if conversation.SessionID != "" || len(conversation.Queue) != 0 || len(conversation.Outcomes) != 0 || len(conversation.OutcomeOrder) != 0 || len(conversation.OutcomeReasons) != 0 {
 		t.Fatalf("lifecycle was not reset: %#v", conversation)
 	}
 	if conversation.WorkspaceRoot != "/tmp/worktree" || conversation.WorktreeBranch != "hctl/test/one" {

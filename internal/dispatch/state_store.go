@@ -260,6 +260,16 @@ func (s *conversationStore) inputStatus(ref conversationRef, inputID string) (st
 	return "", false, nil
 }
 
+func (s *conversationStore) outcomeReason(ref conversationRef, inputID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, err := s.lookup(ref)
+	if err != nil || conversation == nil {
+		return "", err
+	}
+	return conversation.OutcomeReason(inputID), nil
+}
+
 func (s *conversationStore) assignWorkspaceAndAccept(ref conversationRef, workspace, branch, inputID, text string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -369,6 +379,10 @@ func (s *conversationStore) setSessionID(ref conversationRef, id string) error {
 }
 
 func (s *conversationStore) complete(ref conversationRef, inputID, outcome, resultSessionID string, fresh bool) (string, error) {
+	return s.completeWithReason(ref, inputID, outcome, "", resultSessionID, fresh)
+}
+
+func (s *conversationStore) completeWithReason(ref conversationRef, inputID, outcome, reason, resultSessionID string, fresh bool) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var terminalSessionID string
@@ -382,7 +396,7 @@ func (s *conversationStore) complete(ref conversationRef, inputID, outcome, resu
 			terminalSessionID = resultSessionID
 			conversation.SessionID = resultSessionID
 		}
-		if err := conversation.Complete(inputID, outcome); err != nil {
+		if err := conversation.CompleteWithReason(inputID, outcome, reason); err != nil {
 			return err
 		}
 		if fresh {

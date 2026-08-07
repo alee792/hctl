@@ -11,7 +11,7 @@ can dispatch one occurrence through the durable turn dispatcher, but every accep
 occurrence starts a fresh native-harness session so recurring work does not
 silently inherit old model context. The supplied input ID makes retries
 deduplicatable. Automatic clocks, deployment registration, output delivery,
-and per-turn deadline policy remain separate work.
+and per-turn deadline policy were separated from the initial schedule slice.
 
 ## Decision
 
@@ -41,8 +41,12 @@ status line is written.
 
 The `cron` value is parsed as a standard expression in this slice but no clock
 evaluates it. HCTL-015 owns UTC evaluation and overlap behavior when it adds a
-foreground clock. HCTL-014 separately owns durable per-turn deadline behavior;
-the command currently retains the turn dispatcher's bounded whole-process timeout.
+foreground clock. HCTL-014 subsequently added an operator-selected task-turn
+deadline independent of the command's bounded whole-process timeout. Expiry
+aborts that task process and completes the durable occurrence as uncertain,
+with a separate bounded `deadline_exceeded` reason. The stable input ID
+therefore returns that classified result instead of replaying it, while a later
+occurrence still opens a fresh session.
 
 ## Context
 

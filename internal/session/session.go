@@ -42,6 +42,7 @@ type Conversation struct {
 	Queue                     []Input                 `json:"queue"`
 	Outcomes                  map[string]string       `json:"outcomes"`
 	OutcomeOrder              []string                `json:"outcome_order"`
+	OutcomeReasons            map[string]string       `json:"outcome_reasons,omitempty"`
 	Interaction               *interaction.Lifecycle  `json:"interaction,omitempty"`
 	InteractionTombstones     []interaction.Tombstone `json:"interaction_tombstones,omitempty"`
 	InteractionWakePending    bool                    `json:"interaction_wake_pending,omitempty"`
@@ -57,6 +58,10 @@ const (
 	inputQueued = "queued"
 	inputActive = "active"
 	inputParked = "parked"
+
+	// OutcomeReasonDeadlineExceeded distinguishes a confirmed task deadline
+	// from an otherwise ambiguous uncertain outcome.
+	OutcomeReasonDeadlineExceeded = "deadline_exceeded"
 )
 
 func Load(root string) (*State, error) {
@@ -70,7 +75,7 @@ func Load(root string) (*State, error) {
 			return nil, errors.New("dispatch state must be a small regular file")
 		}
 		if !exists {
-			return &State{SchemaVersion: 3, Conversations: map[string]*Conversation{}}, nil
+			return &State{SchemaVersion: 4, Conversations: map[string]*Conversation{}}, nil
 		}
 		state, err := decode(data, mode)
 		if err != nil {
@@ -100,7 +105,7 @@ func decode(data []byte, mode os.FileMode) (*State, error) {
 	var state State
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&state); err != nil || (state.SchemaVersion != 1 && state.SchemaVersion != 2 && state.SchemaVersion != 3) || state.Conversations == nil {
+	if err := decoder.Decode(&state); err != nil || (state.SchemaVersion < 1 || state.SchemaVersion > 4) || state.Conversations == nil {
 		return nil, errors.New("dispatch state is invalid")
 	}
 	var extra any
@@ -128,6 +133,9 @@ func decode(data []byte, mode os.FileMode) (*State, error) {
 		if state.SchemaVersion < 3 && (conversation.Interaction != nil || len(conversation.InteractionTombstones) != 0) {
 			return nil, errors.New("dispatch interaction state requires schema version 3")
 		}
+		if state.SchemaVersion < 4 && len(conversation.OutcomeReasons) != 0 {
+			return nil, errors.New("dispatch outcome reasons require schema version 4")
+		}
 		if err := (interaction.DurableState{Pending: conversation.Interaction, Tombstones: conversation.InteractionTombstones}).Validate(); err != nil {
 			return nil, errors.New("dispatch interaction state is invalid")
 		}
@@ -140,9 +148,12 @@ func decode(data []byte, mode os.FileMode) (*State, error) {
 		if conversation.Outcomes == nil {
 			conversation.Outcomes = map[string]string{}
 		}
+		if conversation.OutcomeReasons == nil {
+			conversation.OutcomeReasons = map[string]string{}
+		}
 		seen := map[string]bool{}
 		for index, input := range conversation.Queue {
-			validStatus := input.Status == inputQueued || input.Status == inputActive || state.SchemaVersion == 3 && input.Status == inputParked
+			validStatus := input.Status == inputQueued || input.Status == inputActive || state.SchemaVersion >= 3 && input.Status == inputParked
 			if input.ID == "" || input.Text == "" || !validStatus || seen[input.ID] || input.Status == inputParked && index != 0 {
 				return nil, errors.New("dispatch queue state is invalid")
 			}
@@ -166,6 +177,11 @@ func decode(data []byte, mode os.FileMode) (*State, error) {
 		}
 		if len(conversation.Outcomes) != len(conversation.OutcomeOrder) {
 			return nil, errors.New("dispatch outcome state is invalid")
+		}
+		for id, reason := range conversation.OutcomeReasons {
+			if conversation.Outcomes[id] != "uncertain" || reason != OutcomeReasonDeadlineExceeded {
+				return nil, errors.New("dispatch outcome reason state is invalid")
+			}
 		}
 	}
 	return &state, nil
@@ -225,7 +241,7 @@ func rejectDuplicateJSONKeys(data []byte) error {
 }
 
 func Save(root string, state *State) error {
-	state.SchemaVersion = 3
+	state.SchemaVersion = 4
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return errors.New("cannot encode dispatch state")
@@ -277,6 +293,7 @@ func (c *Conversation) ResetLifecycle() {
 	c.Queue = nil
 	c.Outcomes = map[string]string{}
 	c.OutcomeOrder = nil
+	c.OutcomeReasons = map[string]string{}
 	c.InteractionWakePending = false
 }
 
@@ -312,11 +329,18 @@ func (c *Conversation) StartNext() (Input, error) {
 }
 
 func (c *Conversation) Complete(id, outcome string) error {
+	return c.CompleteWithReason(id, outcome, "")
+}
+
+func (c *Conversation) CompleteWithReason(id, outcome, reason string) error {
 	if len(c.Queue) == 0 || c.Queue[0].ID != id || c.Queue[0].Status != inputActive {
 		return fmt.Errorf("active input %s does not match durable queue", id)
 	}
+	if reason != "" && (outcome != "uncertain" || reason != OutcomeReasonDeadlineExceeded) {
+		return errors.New("unsupported dispatch outcome reason")
+	}
 	c.Queue = c.Queue[1:]
-	c.remember(id, outcome)
+	c.remember(id, outcome, reason)
 	return nil
 }
 
@@ -337,7 +361,7 @@ func (c *Conversation) CompleteParked(id, outcome string) error {
 		return errors.New("parked input does not match durable queue")
 	}
 	c.Queue = c.Queue[1:]
-	c.remember(id, outcome)
+	c.remember(id, outcome, "")
 	return nil
 }
 
@@ -347,7 +371,7 @@ func (c *Conversation) RecoverUncertain() []string {
 	for _, input := range c.Queue {
 		if input.Status == inputActive {
 			uncertain = append(uncertain, input.ID)
-			c.remember(input.ID, "uncertain")
+			c.remember(input.ID, "uncertain", "")
 			continue
 		}
 		kept = append(kept, input)
@@ -356,17 +380,32 @@ func (c *Conversation) RecoverUncertain() []string {
 	return uncertain
 }
 
-func (c *Conversation) remember(id, outcome string) {
+// OutcomeReason returns the optional bounded classification for a retained
+// terminal outcome.
+func (c *Conversation) OutcomeReason(id string) string {
+	return c.OutcomeReasons[id]
+}
+
+func (c *Conversation) remember(id, outcome, reason string) {
 	if c.Outcomes == nil {
 		c.Outcomes = map[string]string{}
+	}
+	if c.OutcomeReasons == nil {
+		c.OutcomeReasons = map[string]string{}
 	}
 	if c.Outcomes[id] == "" {
 		c.OutcomeOrder = append(c.OutcomeOrder, id)
 	}
 	c.Outcomes[id] = outcome
+	if reason == "" {
+		delete(c.OutcomeReasons, id)
+	} else {
+		c.OutcomeReasons[id] = reason
+	}
 	for len(c.OutcomeOrder) > maxRecentOutcome {
 		oldest := c.OutcomeOrder[0]
 		c.OutcomeOrder = c.OutcomeOrder[1:]
 		delete(c.Outcomes, oldest)
+		delete(c.OutcomeReasons, oldest)
 	}
 }

@@ -653,7 +653,7 @@ func TestManagerRunsConcurrentWritableSurfacesInIsolationForHarnesses(t *testing
 			manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, 2, 2, func(conversation string, event Event) error {
 				events <- managedEvent{conversation: conversation, event: event}
 				return nil
-			}, newFakeIdleClock().NewTimer, provider)
+			}, newFakeClock().NewTimer, provider)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -712,7 +712,7 @@ func TestManagerRunsConcurrentWritableSurfacesInIsolationForHarnesses(t *testing
 			manager.Close()
 
 			restartedDriver := newNamedManagerDriver(harnessName)
-			restarted, err := newManager(context.Background(), p, restartedDriver, time.Minute, time.Hour, 2, 2, func(string, Event) error { return nil }, newFakeIdleClock().NewTimer, provider)
+			restarted, err := newManager(context.Background(), p, restartedDriver, time.Minute, time.Hour, 2, 2, func(string, Event) error { return nil }, newFakeClock().NewTimer, provider)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -750,7 +750,7 @@ func TestManagerContainsHarnessFailureToOneWritableConversation(t *testing.T) {
 	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, 2, 2, func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	}, newFakeIdleClock().NewTimer, provider)
+	}, newFakeClock().NewTimer, provider)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -827,7 +827,7 @@ func TestManagerReportsAndContainsWritableResolutionFailure(t *testing.T) {
 	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, 2, 2, func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	}, newFakeIdleClock().NewTimer, provider)
+	}, newFakeClock().NewTimer, provider)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -876,7 +876,7 @@ func TestManagerHibernatesAndResumesWritableConversationsIndependently(t *testin
 			}
 
 			driver := newNamedManagerDriver(harnessName)
-			clock := newFakeIdleClock()
+			clock := newFakeClock()
 			events := make(chan managedEvent, 128)
 			manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, 2, 2, func(conversation string, event Event) error {
 				events <- managedEvent{conversation: conversation, event: event}
@@ -1331,7 +1331,7 @@ func TestManagerHibernatesAndResumesIdleHarnesses(t *testing.T) {
 		t.Run(harnessName, func(t *testing.T) {
 			p := testProject(t)
 			driver := newNamedManagerDriver(harnessName)
-			clock := newFakeIdleClock()
+			clock := newFakeClock()
 			events := make(chan managedEvent, 32)
 			manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(conversation string, event Event) error {
 				events <- managedEvent{conversation: conversation, event: event}
@@ -1387,7 +1387,7 @@ func TestManagerElevatesOnceAndReusesDurableWritableWorkspace(t *testing.T) {
 	elevatedRoot := t.TempDir()
 	provider := &fakeWorkspaceProvider{project: projectAtWorkspace(p, elevatedRoot), assignment: worktree.Assignment{Root: elevatedRoot, Branch: "hctl/test/conversation"}}
 	driver := newManagerDriver()
-	clock := newFakeIdleClock()
+	clock := newFakeClock()
 	events := make(chan managedEvent, 64)
 	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
@@ -1458,7 +1458,7 @@ func TestManagerElevatesOnceAndReusesDurableWritableWorkspace(t *testing.T) {
 	restarted, err := newManager(context.Background(), p, restartedDriver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(conversation string, event Event) error {
 		restartedEvents <- managedEvent{conversation: conversation, event: event}
 		return nil
-	}, newFakeIdleClock().NewTimer, provider)
+	}, newFakeClock().NewTimer, provider)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1522,7 +1522,7 @@ func TestManagerElevationFailurePreservesReadOnlyConversation(t *testing.T) {
 func TestManagerDoesNotHibernateActiveOrQueuedWork(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
-	clock := newFakeIdleClock()
+	clock := newFakeClock()
 	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(string, Event) error { return nil }, clock.NewTimer, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1547,7 +1547,7 @@ func TestManagerClassifiesHibernateCloseFailureWithoutLosingConversation(t *test
 	p := testProject(t)
 	driver := newManagerDriver()
 	driver.closeErr = errors.New("close failed")
-	clock := newFakeIdleClock()
+	clock := newFakeClock()
 	events := make(chan managedEvent, 32)
 	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
@@ -1627,7 +1627,7 @@ func TestManagerBoundsBlockedHibernateClose(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	driver.blockProcessClose()
-	clock := newFakeIdleClock()
+	clock := newFakeClock()
 	events := make(chan managedEvent, 32)
 	manager, err := newManager(context.Background(), p, driver, time.Minute, time.Hour, DefaultMaxResidentSessions, DefaultMaxActiveTurns, func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
@@ -1659,7 +1659,7 @@ func TestManagedRunBoundsBlockedCloseAfterAdmissionsStop(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	driver.blockProcessClose()
-	clock := newFakeIdleClock()
+	clock := newFakeClock()
 	store, err := openConversationStore(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -2691,21 +2691,21 @@ func (s *managerSession) Abort() {
 	})
 }
 
-type fakeIdleClock struct {
-	created chan *fakeIdleTimer
+type fakeClock struct {
+	created chan *fakeTimer
 }
 
-func newFakeIdleClock() *fakeIdleClock {
-	return &fakeIdleClock{created: make(chan *fakeIdleTimer, 16)}
+func newFakeClock() *fakeClock {
+	return &fakeClock{created: make(chan *fakeTimer, 16)}
 }
 
-func (c *fakeIdleClock) NewTimer(after time.Duration) idleTimer {
-	timer := &fakeIdleTimer{after: after, fired: make(chan time.Time, 1)}
+func (c *fakeClock) NewTimer(after time.Duration) dispatchTimer {
+	timer := &fakeTimer{after: after, fired: make(chan time.Time, 1)}
 	c.created <- timer
 	return timer
 }
 
-func (c *fakeIdleClock) waitTimerAfter(t *testing.T, after time.Duration) *fakeIdleTimer {
+func (c *fakeClock) waitTimerAfter(t *testing.T, after time.Duration) *fakeTimer {
 	t.Helper()
 	for {
 		timer := c.waitTimer(t)
@@ -2715,7 +2715,7 @@ func (c *fakeIdleClock) waitTimerAfter(t *testing.T, after time.Duration) *fakeI
 	}
 }
 
-func (c *fakeIdleClock) waitTimer(t *testing.T) *fakeIdleTimer {
+func (c *fakeClock) waitTimer(t *testing.T) *fakeTimer {
 	t.Helper()
 	select {
 	case timer := <-c.created:
@@ -2726,7 +2726,7 @@ func (c *fakeIdleClock) waitTimer(t *testing.T) *fakeIdleTimer {
 	}
 }
 
-func (c *fakeIdleClock) assertNoTimer(t *testing.T) {
+func (c *fakeClock) assertNoTimer(t *testing.T) {
 	t.Helper()
 	select {
 	case <-c.created:
@@ -2735,15 +2735,15 @@ func (c *fakeIdleClock) assertNoTimer(t *testing.T) {
 	}
 }
 
-type fakeIdleTimer struct {
+type fakeTimer struct {
 	after time.Duration
 	fired chan time.Time
 	once  sync.Once
 }
 
-func (t *fakeIdleTimer) C() <-chan time.Time { return t.fired }
-func (t *fakeIdleTimer) Stop() bool          { return true }
-func (t *fakeIdleTimer) Fire() {
+func (t *fakeTimer) C() <-chan time.Time { return t.fired }
+func (t *fakeTimer) Stop() bool          { return true }
+func (t *fakeTimer) Fire() {
 	t.once.Do(func() { t.fired <- time.Time{} })
 }
 

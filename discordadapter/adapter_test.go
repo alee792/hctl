@@ -54,6 +54,8 @@ type memoryCredentials struct {
 	values    map[string]string
 	setErr    error
 	deleteErr error
+	setCalls  int
+	failSetAt int
 }
 
 func (store *memoryCredentials) Get(id string) (string, error) {
@@ -68,7 +70,8 @@ func (store *memoryCredentials) Get(id string) (string, error) {
 func (store *memoryCredentials) Set(id, value string) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.setErr != nil {
+	store.setCalls++
+	if store.setErr != nil && (store.failSetAt == 0 || store.setCalls == store.failSetAt) {
 		return store.setErr
 	}
 	store.values[id] = value
@@ -287,6 +290,32 @@ func TestSetupRollsBackCredentialOnProfileFailure(t *testing.T) {
 	}
 }
 
+func TestSetupReportsCredentialRollbackFailure(t *testing.T) {
+	t.Setenv("HCTL_DISCORD_TOKEN", "")
+	profiles := &memoryProfiles{profiles: map[string]Profile{"default": fixtureProfile()}, putErr: errors.New("save failed")}
+	credentials := &memoryCredentials{values: map[string]string{"default": "old-token"}, setErr: errors.New("restore failed"), failSetAt: 2}
+	dependencies := Dependencies{Profiles: profiles, Credentials: credentials, Discord: func(string) (Discord, error) { return &fakeDiscord{}, nil }, Locks: func(string) (ApplicationLock, error) { return &fakeLock{}, nil }}
+	err := RunCommand(context.Background(), []string{"setup", "--profile", "default"}, strings.NewReader("new-token\n333\n444\n555\n"), io.Discard, io.Discard, dependencies)
+	if err == nil || !strings.Contains(err.Error(), "cannot restore the prior credential") {
+		t.Fatalf("setup rollback error = %v", err)
+	}
+	if credentials.values["default"] != "new-token" {
+		t.Fatalf("failed rollback unexpectedly changed credential = %q", credentials.values["default"])
+	}
+}
+
+func TestRemoveReportsProfileRollbackFailure(t *testing.T) {
+	profiles := &memoryProfiles{profiles: map[string]Profile{"default": fixtureProfile()}, putErr: errors.New("restore failed")}
+	credentials := &memoryCredentials{values: map[string]string{"default": "fake-token"}, deleteErr: errors.New("keyring unavailable")}
+	_, err := remove("default", Dependencies{Profiles: profiles, Credentials: credentials, Discord: func(string) (Discord, error) { return &fakeDiscord{}, nil }, Locks: func(string) (ApplicationLock, error) { return &fakeLock{}, nil }})
+	if err == nil || !strings.Contains(err.Error(), "cannot restore the profile") {
+		t.Fatalf("remove rollback error = %v", err)
+	}
+	if _, ok := profiles.profiles["default"]; ok {
+		t.Fatal("failed rollback unexpectedly restored profile")
+	}
+}
+
 func TestLegacyProfileMigrationPreservesExactIdentity(t *testing.T) {
 	root := t.TempDir()
 	legacy := filepath.Join(root, "config.toml")
@@ -379,9 +408,8 @@ func TestRuntimeProtocolCoversGatewayDeliveryInteractionReconnectAndShutdown(t *
 	}
 	writeHostFrame(t, encoder, "host.fetch.1", "", channeladapter.AttachmentFetch{TransferID: "transfer.in.1", AttachmentHandle: attachmentMessage.Attachments[0].Handle, MaximumBytes: 16})
 	firstChunk := readAdapterFrame(t, decoder).Payload.(*channeladapter.AttachmentChunk)
-	finalChunk := readAdapterFrame(t, decoder).Payload.(*channeladapter.AttachmentChunk)
-	if firstChunk.Data != "YWJj" || finalChunk.Data != "" || !finalChunk.Final {
-		t.Fatalf("attachment chunks = %#v, %#v", firstChunk, finalChunk)
+	if firstChunk.Data != "YWJj" || !firstChunk.Final {
+		t.Fatalf("attachment chunk = %#v", firstChunk)
 	}
 	writeHostFrame(t, encoder, "host.ack.2", attachmentInbound.ID, channeladapter.EventAck{Disposition: "accepted"})
 	waitUntil(t, func() bool { return pendingEventCount(runtime) == 0 })

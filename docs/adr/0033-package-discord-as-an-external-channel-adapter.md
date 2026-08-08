@@ -60,9 +60,12 @@ former owner-only hctl `config.toml` Discord profile shape, validate it, and
 atomically migrate only that selected non-secret profile.
 
 Setup reads a token through the inherited trusted terminal (hidden when it is
-a terminal), validates bot identity and authorization scope, and safely rolls
-back credential replacement when profile publication fails. Remove restores
-the profile if keyring deletion fails. `HCTL_DISCORD_TOKEN` remains an explicit
+a terminal), validates bot identity and authorization scope, and uses a
+compensating rollback for credential replacement when profile publication
+fails. Remove likewise attempts to restore the profile if keyring deletion
+fails. Either operation reports an explicit actionable error if its rollback
+also fails instead of claiming that the prior state was restored.
+`HCTL_DISCORD_TOKEN` remains an explicit
 deployment compatibility input for setup, status, and runtime. It is consumed
 only inside the selected adapter and never appears in a command argument,
 profile, operation result, protocol frame, diagnostic, log, package artifact,

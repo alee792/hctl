@@ -21,6 +21,7 @@ type Dependencies struct {
 	Discord     DiscordFactory
 	Locks       LockFactory
 	After       func(time.Duration) <-chan time.Time
+	WriteAfter  func(time.Duration) <-chan time.Time
 	HTTP        HTTPClient
 }
 
@@ -29,7 +30,7 @@ func DefaultDependencies() (Dependencies, error) {
 	if err != nil {
 		return Dependencies{}, err
 	}
-	return Dependencies{Profiles: profiles, Credentials: OSKeyring{}, Discord: NewDiscord, Locks: NewApplicationLock, After: time.After}, nil
+	return Dependencies{Profiles: profiles, Credentials: OSKeyring{}, Discord: NewDiscord, Locks: NewApplicationLock, After: time.After, WriteAfter: time.After}, nil
 }
 
 func (dependencies Dependencies) validate() error {
@@ -117,10 +118,14 @@ func setup(ctx context.Context, profileID string, input io.Reader, terminal io.W
 		return channeladapter.OperationResult{}, err
 	}
 	if err := dependencies.Profiles.Put(profileID, profile); err != nil {
+		var rollbackErr error
 		if oldTokenErr == nil {
-			_ = dependencies.Credentials.Set(profileID, oldToken)
+			rollbackErr = dependencies.Credentials.Set(profileID, oldToken)
 		} else {
-			_ = dependencies.Credentials.Delete(profileID)
+			rollbackErr = dependencies.Credentials.Delete(profileID)
+		}
+		if rollbackErr != nil {
+			return channeladapter.OperationResult{}, errors.New("cannot save Discord profile and cannot restore the prior credential; run setup again")
 		}
 		return channeladapter.OperationResult{}, err
 	}
@@ -166,7 +171,9 @@ func remove(profileID string, dependencies Dependencies) (channeladapter.Operati
 	}
 	if err := dependencies.Credentials.Delete(profileID); err != nil {
 		if profileErr == nil {
-			_ = dependencies.Profiles.Put(profileID, profile)
+			if restoreErr := dependencies.Profiles.Put(profileID, profile); restoreErr != nil {
+				return channeladapter.OperationResult{}, errors.New("cannot remove Discord credential and cannot restore the profile; run setup or remove again")
+			}
 		}
 		return channeladapter.OperationResult{}, err
 	}

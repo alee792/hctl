@@ -355,9 +355,11 @@ effect. It prominently accepts that the harness/model can access the PAT,
 retains one local/headless environment contract, leaves native Git and `gh`
 operator-owned, and keeps ADR 0009 unchanged for future secret-bearing managed
 operations. The credentialless native fixture is the configuration-generation
-evidence path; no live PAT or broker is required. Installer/cache/CLI behavior
-remains #76, official artifact packaging remains #66, and native generation and
- runtime proof remain #67. The currently shipped anonymous managed GitHub code
+evidence path; no live PAT or broker is required. #76 resolves that fixture to
+an offline harness-targeted launch descriptor and selectively stages its exact
+closure, but it does not map authored source or write native configuration.
+Official artifact packaging remains #66, and source-to-Claude/Codex generation
+and native runtime proof remain #67. The currently shipped anonymous managed GitHub code
 has not yet been removed.
 
 ADR 0032 and the dependency-free `hctl/channeladapter` module now define the
@@ -384,8 +386,10 @@ publishes raw and prepared current-platform artifacts for reuse across
 workspaces. Prepared receipts detect sibling-runtime corruption as well as
 executable drift. Offline resolution gives each narrow capability consumer
 only defensive metadata and verified paths; generic staging copies only the
-artifact ids that consumer selects. No package execution, credential flow,
-native MCP generation, or channel protocol is present in the installer. #65
+artifact ids that consumer selects. The native consumer can derive a
+credential-free launch descriptor without reading ambient values or generating
+harness files. No package execution, credential flow, native MCP generation,
+or channel protocol is present in the installer. #65
 and #82 supply the two closed capability contracts, while #76 supplies their
 shared installed-artifact boundary. #66 and #67 consume that boundary for the
 official GitHub package and native harness generation; #83 and #84 consume it

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -101,6 +102,105 @@ func TestStoreLocalInstallResolveSelectiveStageAndLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(store.root, "blobs", digestHex(first))); err != nil {
 		t.Fatalf("shared blob removed with metadata: %v", err)
+	}
+}
+
+func TestNativeMCPConsumerResolvesLaunchesAndStagesOffline(t *testing.T) {
+	parent := t.TempDir()
+	packageRoot := filepath.Join(parent, "source")
+	if err := os.Mkdir(packageRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	primary := []byte("#!/bin/sh\nprintf '%s:%s' \"$1\" \"$FIXTURE_MODE\"\n")
+	secondary := []byte("#!/bin/sh\nexit 0\n")
+	document := fixtureDocument(fixtureOptions{Artifacts: []fixtureArtifact{
+		{ID: "primary", PayloadPath: "payload/primary", ExecutablePath: "bin/primary", Data: primary},
+		{ID: "secondary", PayloadPath: "payload/secondary", ExecutablePath: "bin/secondary", Data: secondary},
+	}})
+	capability := document["capabilities"].([]any)[0].(map[string]any)
+	capability["arguments"] = []string{"launch-descriptor"}
+	capability["environment"] = map[string]string{"FIXTURE_MODE": "offline"}
+	writeJSON(t, filepath.Join(packageRoot, packageManifestName), document)
+	writeTestBytes(t, filepath.Join(packageRoot, "payload", "primary"), primary, 0o600)
+	writeTestBytes(t, filepath.Join(packageRoot, "payload", "secondary"), secondary, 0o600)
+
+	store := NewStore(t.TempDir(), nil)
+	if _, err := store.Install(context.Background(), InstallOptions{Source: packageRoot, Trust: TrustOperator}); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	if err := os.Rename(packageRoot, filepath.Join(parent, "source-unavailable")); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := store.ResolveNativeMCP(context.Background(), "fixture-package", "primary")
+	if err != nil {
+		t.Fatalf("offline ResolveNativeMCP() error = %v", err)
+	}
+	descriptor, err := resolved.LaunchDescriptor("codex")
+	if err != nil {
+		t.Fatalf("LaunchDescriptor() error = %v", err)
+	}
+	if descriptor.Command != resolved.Executable || descriptor.ServerName != "primary" || descriptor.Target.Startup != StartupOptional || descriptor.Target.Trust != TrustNativeProject {
+		t.Fatalf("launch descriptor = %#v", descriptor)
+	}
+	command := exec.Command(descriptor.Command, descriptor.Arguments...)
+	command.Dir = descriptor.WorkingDirectory
+	for name, value := range descriptor.EnvironmentDefaults {
+		command.Env = append(command.Env, name+"="+value)
+	}
+	output, err := command.Output()
+	if err != nil || string(output) != "launch-descriptor:offline" {
+		t.Fatalf("fake native launch = %q, %v", output, err)
+	}
+
+	stageRoot := t.TempDir()
+	staged, err := store.StageArtifacts(context.Background(), "fixture-package", []string{"primary"}, stageRoot)
+	if err != nil {
+		t.Fatalf("offline StageArtifacts() error = %v", err)
+	}
+	if len(staged) != 1 || staged[0].Artifact.ID != "primary" {
+		t.Fatalf("staged = %#v", staged)
+	}
+	physicalExecutable := filepath.Join(stageRoot, filepath.FromSlash(strings.TrimPrefix(staged[0].Executable, "/")))
+	if data, err := os.ReadFile(physicalExecutable); err != nil || !bytes.Equal(data, primary) {
+		t.Fatalf("staged executable = %q, %v", data, err)
+	}
+	secondaryPattern := filepath.Join(stageRoot, "opt", "hctl", "integrations", "fixture-package", "*", "secondary")
+	if matches, _ := filepath.Glob(secondaryPattern); len(matches) != 0 {
+		t.Fatalf("unselected closure was staged: %v", matches)
+	}
+}
+
+func TestStoreInstallsChannelAdapterThroughSharedEnvelope(t *testing.T) {
+	payload := []byte("#!/bin/sh\nexit 0\n")
+	packageRoot := t.TempDir()
+	document := channelAdapterFixtureDocument(t, payload)
+	writeJSON(t, filepath.Join(packageRoot, packageManifestName), document)
+	writeTestBytes(t, filepath.Join(packageRoot, "payload", "fixture-channel"), payload, 0o600)
+
+	store := NewStore(t.TempDir(), nil)
+	installed, err := store.Install(context.Background(), InstallOptions{Source: packageRoot, Trust: TrustOperator})
+	if err != nil {
+		t.Fatalf("channel-adapter Install() error = %v", err)
+	}
+	if len(installed.State.Capabilities) != 1 || installed.State.Capabilities[0].Type != ChannelAdapterType || installed.State.Capabilities[0].Version != ChannelAdapterVersion {
+		t.Fatalf("installed channel capability = %#v", installed.State.Capabilities)
+	}
+	resolved, err := store.Resolve(context.Background(), "fixture-channel-adapter")
+	if err != nil {
+		t.Fatalf("channel-adapter Resolve() error = %v", err)
+	}
+	selection, err := resolved.Package.SelectChannelAdapter("fixture", runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("SelectChannelAdapter() error = %v", err)
+	}
+	artifact, found := resolved.Artifact(selection.Artifact.ID)
+	if !found || artifact.Executable == "" {
+		t.Fatalf("resolved channel artifact = %#v, %t", artifact, found)
+	}
+	staged, err := store.StageArtifacts(context.Background(), "fixture-channel-adapter", selection.Capability.Artifacts, t.TempDir())
+	if err != nil || len(staged) != 1 {
+		t.Fatalf("channel-adapter StageArtifacts() = %#v, %v", staged, err)
 	}
 }
 
@@ -440,7 +540,7 @@ func TestStoreRejectsMismatchAndUnsupportedCapabilityBeforePayloadAccess(t *test
 	t.Run("capability", func(t *testing.T) {
 		root := t.TempDir()
 		manifest := fixtureDocument(fixtureOptions{Artifacts: []fixtureArtifact{{ID: "primary", PayloadPath: "payload/missing", ExecutablePath: "bin/server", Data: []byte("payload")}}})
-		manifest["capabilities"] = []any{map[string]any{"type": "channel-adapter", "version": 1, "id": "future"}}
+		manifest["capabilities"] = []any{map[string]any{"type": "channel-adapter", "version": 2, "id": "future"}}
 		writeJSON(t, filepath.Join(root, packageManifestName), manifest)
 		if _, err := NewStore(t.TempDir(), nil).Install(context.Background(), InstallOptions{Source: root, Trust: TrustOperator}); err == nil || !strings.Contains(err.Error(), "channel-adapter") {
 			t.Fatalf("unsupported capability error = %v", err)
@@ -536,6 +636,30 @@ func fixtureDocument(options fixtureOptions) map[string]any {
 		"provenance":    map[string]any{"source": "https://example.invalid/fixture", "revision": options.ID + "-" + options.Version},
 		"compatibility": map[string]any{"minimum": options.Minimum, "before": options.Before}, "artifacts": artifacts, "capabilities": capabilities,
 	}
+}
+
+func channelAdapterFixtureDocument(t *testing.T, payload []byte) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "channel-adapter-fixture.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	artifact := document["artifacts"].([]any)[0].(map[string]any)
+	artifact["id"] = "current-platform"
+	artifact["os"] = runtime.GOOS
+	artifact["architecture"] = runtime.GOARCH
+	artifact["size"] = len(payload)
+	artifact["sha256"] = digestHex(payload)
+	executable := artifact["executable"].(map[string]any)
+	executable["size"] = len(payload)
+	executable["sha256"] = digestHex(payload)
+	capability := document["capabilities"].([]any)[0].(map[string]any)
+	capability["artifacts"] = []string{"current-platform"}
+	return document
 }
 
 type archiveEntry struct {

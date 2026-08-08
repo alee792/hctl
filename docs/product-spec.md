@@ -786,7 +786,11 @@ closures beneath `/opt/hctl/integrations/PACKAGE/MANIFEST/ARTIFACT/`; an agent
 that requests no integration contributes no package artifacts. The consumer
 that maps a validated authored connection or channel request into this lookup
 remains with that capability's delivery, rather than becoming a generic plugin
-runtime.
+runtime. For `native-mcp`, the offline consumer can derive a credential-free,
+harness-targeted launch descriptor from the exact installed metadata and
+verified paths. It does not read ambient values or write native configuration.
+#67 remains responsible for mapping authored connection source into generated
+Claude and Codex configuration and proving the native runtime journey.
 
 The first recognized capability is `native-mcp` version 1. It declares a
 stable native server name with collision behavior fixed to rejection, the exact

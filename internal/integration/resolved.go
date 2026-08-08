@@ -39,6 +39,20 @@ type NativeMCPResolution struct {
 	Executable string
 }
 
+// NativeMCPLaunchDescriptor is the credential-free process metadata a narrow
+// native harness generator can consume. EnvironmentDefaults contains only
+// literal manifest values; RequiredEnvironment contains names and descriptions
+// but never reads or resolves ambient values.
+type NativeMCPLaunchDescriptor struct {
+	ServerName          string
+	Command             string
+	Arguments           []string
+	WorkingDirectory    string
+	EnvironmentDefaults map[string]string
+	RequiredEnvironment []EnvironmentRequirement
+	Target              NativeHarnessTarget
+}
+
 // StagedArtifact identifies one selectively copied closure beneath the
 // canonical staged integration prefix.
 type StagedArtifact struct {
@@ -190,4 +204,51 @@ func (resolved NativeMCPResolution) ValidateExecutable() error {
 		return errors.New("resolved native-mcp executable escapes its immutable artifact root")
 	}
 	return nil
+}
+
+// LaunchDescriptor derives one harness-targeted descriptor entirely from an
+// offline verified resolution. It does not read the environment, start a
+// process, or write native Claude or Codex configuration.
+func (resolved NativeMCPResolution) LaunchDescriptor(harness string) (NativeMCPLaunchDescriptor, error) {
+	if err := resolved.ValidateExecutable(); err != nil {
+		return NativeMCPLaunchDescriptor{}, err
+	}
+	var target NativeHarnessTarget
+	found := false
+	for _, candidate := range resolved.Selection.Capability.Harnesses {
+		if candidate.Name == harness {
+			target = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return NativeMCPLaunchDescriptor{}, fmt.Errorf("native-mcp capability %q does not support harness %q", resolved.Selection.Capability.ID, harness)
+	}
+	workingDirectory := filepath.Join(resolved.Root, filepath.FromSlash(resolved.Selection.Capability.WorkingDirectory))
+	canonicalRoot, err := rootfs.CanonicalDir(resolved.Root)
+	if err != nil {
+		return NativeMCPLaunchDescriptor{}, errors.New("resolved native-mcp artifact root is missing or unsafe; verify and reinstall the package")
+	}
+	canonicalWorkingDirectory, err := rootfs.CanonicalDir(workingDirectory)
+	if err != nil {
+		return NativeMCPLaunchDescriptor{}, errors.New("resolved native-mcp working directory is missing or unsafe; verify and reinstall the package")
+	}
+	relative, err := filepath.Rel(canonicalRoot, canonicalWorkingDirectory)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return NativeMCPLaunchDescriptor{}, errors.New("resolved native-mcp working directory escapes its immutable artifact root")
+	}
+	environment := make(map[string]string, len(resolved.Selection.Capability.Environment))
+	for name, value := range resolved.Selection.Capability.Environment {
+		environment[name] = value
+	}
+	return NativeMCPLaunchDescriptor{
+		ServerName:          resolved.Selection.Capability.ServerName,
+		Command:             resolved.Executable,
+		Arguments:           append([]string(nil), resolved.Selection.Capability.Arguments...),
+		WorkingDirectory:    canonicalWorkingDirectory,
+		EnvironmentDefaults: environment,
+		RequiredEnvironment: append([]EnvironmentRequirement(nil), resolved.Selection.Capability.RequiredEnvironment...),
+		Target:              target,
+	}, nil
 }

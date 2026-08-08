@@ -166,7 +166,12 @@ and executable identity, then returns defensive package metadata plus exact
 prepared paths. A capability consumer supplies the artifact ids from its own
 closed schema. Generic selective staging copies only those verified ids to the
 canonical package/manifest/artifact prefix. The installer does not infer MCP,
-channel, credential, policy, confirmation, or process behavior from them.
+channel, credential, policy, confirmation, or process behavior from them. The
+native-MCP consumer may derive a credential-free, harness-targeted launch
+descriptor containing the exact executable, literal arguments and defaults,
+working directory, ambient variable names, startup, and trust metadata. It
+does not resolve ambient values, start the process, select authored source, or
+write Claude or Codex configuration; that generation remains #67.
 
 ## Context
 
@@ -187,9 +192,10 @@ rebuilding hctl.
 
 ## Consequences
 
-- The credentialless native-MCP fixture and official `github-mcp-server`
-  executable metadata validate and select through the same vendor-neutral
-  code path.
+- The credentialless native-MCP fixture, deterministic no-op channel-adapter
+  fixture, and official `github-mcp-server` executable metadata install,
+  validate, and select through the same vendor-neutral envelope without
+  sharing a capability runtime.
 - An unknown capability or later unsupported `channel-adapter` version is
   rejected without reading or executing its artifact.
 - Root hctl dependencies remain independent of package SDKs.

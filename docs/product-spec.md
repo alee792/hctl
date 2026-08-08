@@ -900,6 +900,14 @@ feature and limit negotiation may only narrow the manifest declaration.
 Every mode runs from the verified package root; no manifest field selects the
 agent workspace or an ambient working directory.
 
+Channel setup retains trusted terminal input and has a separate ten-minute
+human enrollment deadline. Remove also retains trusted input, while status has
+no stdin; status and remove remain bounded to 30 seconds. Interrupt or caller
+cancellation kills the complete private operation process group and bounds
+reaping. The generic per-agent/channel selection store locks the complete
+read-modify-write transaction across processes before atomically replacing its
+owner-only file.
+
 The channel-adapter protocol is one bounded bidirectional JSONL stream over an
 exact verified child process's stdin/stdout. The adapter opens with
 hello; hctl selects one compatible version plus profile, feature, limit, and
@@ -934,6 +942,9 @@ Ordinary commands and deliveries have 30-second deadlines, attachments 60
 seconds, and graceful shutdown five seconds before forced tree cleanup.
 The narrowed frame ceiling applies to reads and writes, and the narrowed
 outstanding ceiling bounds correlations and retained route/event state.
+Startup recovery separately admits at most 64 frames and 8 MiB before replay,
+and target saturation rejects new input without evicting an older accepted
+reply target.
 
 An adapter keeps an event id and exact bytes stable until hctl acknowledges a
 durable acceptance, duplicate, or rejection. Exact same-content replay is
@@ -951,8 +962,9 @@ adapter replay: pending renders are issued once, while previously delivered
 interactions are restored without posting duplicate vendor UI. Shutdown stops
 admission, retires interaction UI, asks the adapter to drain, then applies
 independently bounded process-tree and controller cleanup. Retained stderr is
-capped, credential-redacted, control-cleaned, and protocol-shaped output is
-suppressed before terminating only that adapter runtime.
+capped by emitted sanitized bytes, credential-redacted across arbitrary write
+boundaries, control-cleaned, and protocol-shaped output is suppressed before
+terminating only that adapter runtime.
 
 Setup, status, and remove use exact package modes. Secret entry and credential
 storage occur inside the trusted adapter using its inherited operator terminal

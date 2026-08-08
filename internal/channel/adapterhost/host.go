@@ -114,6 +114,14 @@ type interactionTarget struct {
 	cancel                               context.CancelFunc
 }
 type eventReceipt struct{ digest string }
+type queuedFrame struct {
+	frame channeladapter.Envelope
+	size  int
+}
+type frameQueue struct {
+	frames []queuedFrame
+	bytes  int
+}
 type synchronizedWriter struct {
 	mu     sync.Mutex
 	target io.Writer
@@ -178,6 +186,7 @@ func New(config Config) (*Runtime, error) {
 
 func (runtime *Runtime) Run(ctx context.Context) error {
 	stderr := newDiagnosticWriter(runtime.config.Audit, runtime.config.Environment)
+	defer stderr.Flush()
 	stderr.onProtocolViolation = func() { runtime.fail(errors.New("channel-adapter emitted protocol-shaped stderr")) }
 	process, err := runtime.config.launchProcess(runtime.config.Launch, runtime.config.Environment, stderr)
 	if err != nil {
@@ -347,11 +356,10 @@ func (runtime *Runtime) readLoop() {
 	}()
 	recoveryDone := runtime.recoveryDone
 	recovered := recoveryDone == nil
-	deferred := make([]channeladapter.Envelope, 0)
+	deferred := frameQueue{}
 	for {
-		if recovered && len(deferred) > 0 {
-			frame := deferred[0]
-			deferred = deferred[1:]
+		if recovered && len(deferred.frames) > 0 {
+			frame, _ := deferred.pop()
 			if err := runtime.handle(frame); err != nil {
 				runtime.fail(err)
 				return
@@ -371,11 +379,10 @@ func (runtime *Runtime) readLoop() {
 				continue
 			}
 			if !recovered {
-				if len(deferred) >= runtime.limits.MaxOutstanding {
-					runtime.fail(errors.New("channel-adapter startup replay exceeded negotiated capacity"))
+				if err := deferred.add(result.frame); err != nil {
+					runtime.fail(err)
 					return
 				}
-				deferred = append(deferred, result.frame)
 				continue
 			}
 			if err := runtime.handle(result.frame); err != nil {
@@ -384,6 +391,30 @@ func (runtime *Runtime) readLoop() {
 			}
 		}
 	}
+}
+
+func (queue *frameQueue) add(frame channeladapter.Envelope) error {
+	encoded, err := channeladapter.MarshalFrame(frame, channeladapter.FromAdapter)
+	if err != nil {
+		return err
+	}
+	size := len(encoded) + 1
+	if len(queue.frames) >= channeladapter.MaxQueuedFrames || queue.bytes+size > channeladapter.MaxQueuedBytes {
+		return errors.New("channel-adapter startup replay exceeded bounded queue capacity")
+	}
+	queue.frames = append(queue.frames, queuedFrame{frame: frame, size: size})
+	queue.bytes += size
+	return nil
+}
+
+func (queue *frameQueue) pop() (channeladapter.Envelope, bool) {
+	if len(queue.frames) == 0 {
+		return channeladapter.Envelope{}, false
+	}
+	first := queue.frames[0]
+	queue.frames = queue.frames[1:]
+	queue.bytes -= first.size
+	return first.frame, true
 }
 
 func (runtime *Runtime) routeResponse(frame channeladapter.Envelope) bool {
@@ -447,7 +478,12 @@ func (runtime *Runtime) inbound(frame channeladapter.Envelope, incoming channela
 	surfaceID, conversation := incoming.Route.Handle, incoming.ConversationID
 	message := incoming.Message
 	target := target{route: incoming.Route, message: &message}
-	runtime.remember(incoming.SourceID, target)
+	if err := runtime.remember(incoming.SourceID, target); err != nil {
+		_, _ = fmt.Fprintln(runtime.config.Audit, "Channel adapter admission status=rejected reason=target_capacity")
+		runtime.rememberEvent(frame)
+		_, writeErr := runtime.write(context.Background(), channeladapter.EventAck{Disposition: "rejected"}, frame.ID, channeladapter.CommandTimeout)
+		return writeErr
+	}
 	attachments := make([]map[string]any, 0, len(incoming.Attachments))
 	for _, attachment := range incoming.Attachments {
 		attachments = append(attachments, map[string]any{"name": attachment.Name, "media_type": attachment.MediaType, "size": attachment.Size})
@@ -462,6 +498,7 @@ func (runtime *Runtime) inbound(frame channeladapter.Envelope, incoming channela
 	disposition := "accepted"
 	if result.Duplicate {
 		disposition = "duplicate"
+		runtime.forget(incoming.SourceID)
 	}
 	if submitErr != nil {
 		disposition = "rejected"
@@ -840,7 +877,9 @@ func (runtime *Runtime) RecoverTarget(surfaceID, inputID string) (any, bool) {
 		return nil, false
 	}
 	recovered = target{route: surface.Route}
-	runtime.remember(inputID, recovered)
+	if err := runtime.remember(inputID, recovered); err != nil {
+		return nil, false
+	}
 	return recovered, true
 }
 func (runtime *Runtime) Render(ctx context.Context, intent interaction.RenderIntent) interaction.EffectOutcome {
@@ -988,22 +1027,29 @@ func (runtime *Runtime) recoverInteractions(ctx context.Context) error {
 	}
 	return nil
 }
-func (runtime *Runtime) remember(input string, value target) {
+func (runtime *Runtime) remember(input string, value target) error {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	if _, ok := runtime.targets[input]; !ok {
-		runtime.targetOrder = append(runtime.targetOrder, input)
+	if _, ok := runtime.targets[input]; ok {
+		runtime.targets[input] = value
+		return nil
 	}
+	if len(runtime.targets) >= runtime.limits.MaxOutstanding {
+		return errors.New("channel-adapter reply-target capacity is exhausted")
+	}
+	runtime.targetOrder = append(runtime.targetOrder, input)
 	runtime.targets[input] = value
-	for len(runtime.targetOrder) > runtime.limits.MaxOutstanding {
-		oldest := runtime.targetOrder[0]
-		runtime.targetOrder = runtime.targetOrder[1:]
-		delete(runtime.targets, oldest)
-	}
+	return nil
 }
 func (runtime *Runtime) forget(input string) {
 	runtime.mu.Lock()
 	delete(runtime.targets, input)
+	for index, existing := range runtime.targetOrder {
+		if existing == input {
+			runtime.targetOrder = append(runtime.targetOrder[:index], runtime.targetOrder[index+1:]...)
+			break
+		}
+	}
 	runtime.mu.Unlock()
 }
 

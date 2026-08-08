@@ -11,20 +11,39 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"hctl/channeladapter"
+	"hctl/internal/integration"
 )
 
-// RunOperation executes one exact bounded setup/status/remove mode. Setup may
-// use the trusted input and diagnostic terminal, while stdout remains one
-// closed non-secret result object.
-func RunOperation(ctx context.Context, launch Launch, environment []string, input io.Reader, terminal io.Writer) (channeladapter.OperationResult, error) {
+const setupOperationTimeout = 10 * time.Minute
+
+// RunOperation executes one exact bounded setup/status/remove mode. Setup and
+// remove may use trusted input and the diagnostic terminal, while stdout
+// remains one closed non-secret result object.
+func RunOperation(ctx context.Context, mode integration.ChannelAdapterMode, launch Launch, environment []string, input io.Reader, terminal io.Writer) (channeladapter.OperationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return channeladapter.OperationResult{}, err
+	}
+	timeout := channeladapter.CommandTimeout
+	switch mode {
+	case integration.ChannelAdapterSetup:
+		timeout = setupOperationTimeout
+	case integration.ChannelAdapterStatus:
+		input = nil
+	case integration.ChannelAdapterRemove:
+	default:
+		return channeladapter.OperationResult{}, errors.New("channel-adapter operation mode is invalid")
+	}
 	command := exec.Command(launch.Command, launch.Arguments...)
 	command.Dir = launch.WorkingDirectory
 	command.Env = append([]string(nil), environment...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Stdin = input
-	command.Stderr = newDiagnosticWriter(terminal, environment)
+	diagnostics := newDiagnosticWriter(terminal, environment)
+	defer diagnostics.Flush()
+	command.Stderr = diagnostics
 	var output boundedBuffer
 	output.maximum = channeladapter.MaxOperationResultBytes + 1
 	command.Stdout = &output
@@ -33,7 +52,7 @@ func RunOperation(ctx context.Context, launch Launch, environment []string, inpu
 	}
 	done := make(chan error, 1)
 	go func() { done <- command.Wait() }()
-	timer := time.NewTimer(channeladapter.CommandTimeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	var waitErr error
 	select {
@@ -94,51 +113,201 @@ type diagnosticWriter struct {
 	mu                  sync.Mutex
 	remaining           int
 	writer              io.Writer
-	redactions          []string
+	redactions          [][]byte
 	onProtocolViolation func()
+	secretPending       []byte
+	protocolLine        []byte
+	linePrefix          []byte
+	utf8Pending         []byte
+	atLineStart         bool
+	outputLineStart     bool
+	flushed             bool
 }
 
 func newDiagnosticWriter(writer io.Writer, environment []string) *diagnosticWriter {
 	if writer == nil {
 		writer = io.Discard
 	}
-	var redactions []string
+	var redactions [][]byte
 	for _, entry := range environment {
 		key, value, found := strings.Cut(entry, "=")
 		upper := strings.ToUpper(key)
 		if found && value != "" && (strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD") || strings.Contains(upper, "CREDENTIAL")) {
-			redactions = append(redactions, value)
+			redactions = append(redactions, []byte(value))
 		}
 	}
-	return &diagnosticWriter{remaining: channeladapter.MaxStderrBytes, writer: writer, redactions: redactions}
+	return &diagnosticWriter{remaining: channeladapter.MaxStderrBytes, writer: writer, redactions: redactions, atLineStart: true, outputLineStart: true}
 }
 
 func (writer *diagnosticWriter) Write(data []byte) (int, error) {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
 	original := len(data)
-	if len(data) > writer.remaining {
-		data = data[:max(writer.remaining, 0)]
-	}
-	writer.remaining -= len(data)
-	if len(data) > 0 {
-		message := strings.ToValidUTF8(string(data), "�")
-		for _, secret := range writer.redactions {
-			message = strings.ReplaceAll(message, secret, "[redacted]")
-		}
-		if strings.Contains(message, `"protocol_version"`) && strings.Contains(message, `"payload"`) {
-			message = "[protocol-like stderr redacted]\n"
-			if writer.onProtocolViolation != nil {
-				writer.onProtocolViolation()
-			}
-		}
-		message = strings.Map(func(value rune) rune {
-			if value < 0x20 && value != '\n' && value != '\t' || value == 0x7f {
-				return ' '
-			}
-			return value
-		}, message)
-		_, _ = fmt.Fprintf(writer.writer, "channel-adapter stderr: %s", message)
+	if !writer.flushed {
+		writer.consume(data)
 	}
 	return original, nil
+}
+
+func (writer *diagnosticWriter) consume(data []byte) {
+	for _, value := range data {
+		if writer.protocolLine != nil {
+			if len(writer.protocolLine) < channeladapter.MaxFrameBytes {
+				writer.protocolLine = append(writer.protocolLine, value)
+			}
+			if value == '\n' {
+				writer.finishProtocolLine()
+			}
+			continue
+		}
+		if writer.atLineStart {
+			if value == ' ' || value == '\t' || value == '\r' {
+				writer.linePrefix = append(writer.linePrefix, value)
+				continue
+			}
+			if value == '{' || value == '[' {
+				writer.protocolLine = append(writer.protocolLine, writer.linePrefix...)
+				writer.protocolLine = append(writer.protocolLine, value)
+				writer.linePrefix = nil
+				writer.atLineStart = false
+				continue
+			}
+			writer.feedSecret(writer.linePrefix)
+			writer.linePrefix = nil
+			writer.atLineStart = false
+		}
+		writer.feedSecret([]byte{value})
+		if value == '\n' {
+			writer.atLineStart = true
+		}
+	}
+}
+
+func (writer *diagnosticWriter) finishProtocolLine() {
+	protocolLike := bytes.Contains(writer.protocolLine, []byte(`"protocol_version"`)) && bytes.Contains(writer.protocolLine, []byte(`"payload"`))
+	if protocolLike {
+		writer.feedSecret([]byte("[protocol-like stderr redacted]\n"))
+		if writer.onProtocolViolation != nil {
+			writer.onProtocolViolation()
+		}
+	} else {
+		writer.feedSecret(writer.protocolLine)
+	}
+	writer.protocolLine = nil
+	writer.atLineStart = true
+}
+
+func (writer *diagnosticWriter) feedSecret(data []byte) {
+	if len(writer.redactions) == 0 {
+		writer.feedUTF8(data)
+		return
+	}
+	for _, value := range data {
+		writer.secretPending = append(writer.secretPending, value)
+		for len(writer.secretPending) > 0 {
+			matched, prefix := false, false
+			for _, secret := range writer.redactions {
+				if bytes.Equal(writer.secretPending, secret) {
+					matched = true
+					break
+				}
+				if bytes.HasPrefix(secret, writer.secretPending) {
+					prefix = true
+				}
+			}
+			if matched {
+				writer.feedUTF8([]byte("[redacted]"))
+				writer.secretPending = nil
+				break
+			}
+			if prefix {
+				break
+			}
+			writer.feedUTF8(writer.secretPending[:1])
+			writer.secretPending = writer.secretPending[1:]
+		}
+	}
+}
+
+func (writer *diagnosticWriter) feedUTF8(data []byte) {
+	writer.utf8Pending = append(writer.utf8Pending, data...)
+	for len(writer.utf8Pending) > 0 {
+		if !utf8.FullRune(writer.utf8Pending) {
+			return
+		}
+		value, size := utf8.DecodeRune(writer.utf8Pending)
+		if value == utf8.RuneError && size == 1 {
+			writer.emitRune(utf8.RuneError)
+			writer.utf8Pending = writer.utf8Pending[1:]
+			continue
+		}
+		writer.emitRune(value)
+		writer.utf8Pending = writer.utf8Pending[size:]
+	}
+}
+
+func (writer *diagnosticWriter) emitRune(value rune) {
+	if value < 0x20 && value != '\n' && value != '\t' || value == 0x7f {
+		value = ' '
+	}
+	if writer.outputLineStart {
+		writer.writeBounded([]byte("channel-adapter stderr: "))
+		writer.outputLineStart = false
+	}
+	encoded := []byte(string(value))
+	if len(encoded) <= writer.remaining {
+		writer.writeBounded(encoded)
+	} else {
+		writer.remaining = 0
+	}
+	if value == '\n' {
+		writer.outputLineStart = true
+	}
+}
+
+func (writer *diagnosticWriter) writeBounded(data []byte) {
+	if writer.remaining <= 0 {
+		return
+	}
+	if len(data) > writer.remaining {
+		data = data[:writer.remaining]
+	}
+	writer.remaining -= len(data)
+	_, _ = writer.writer.Write(data)
+}
+
+// Flush emits the last safe diagnostic fragment after the child exits. A
+// fragment that is still a credential prefix is suppressed rather than
+// retaining part of the inherited value.
+func (writer *diagnosticWriter) Flush() {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.flushed {
+		return
+	}
+	writer.flushed = true
+	if writer.protocolLine != nil {
+		writer.finishProtocolLine()
+	}
+	writer.feedSecret(writer.linePrefix)
+	writer.linePrefix = nil
+	if len(writer.secretPending) > 0 {
+		prefix := false
+		for _, secret := range writer.redactions {
+			if bytes.HasPrefix(secret, writer.secretPending) {
+				prefix = true
+				break
+			}
+		}
+		if prefix {
+			writer.feedUTF8([]byte("[redacted]"))
+		} else {
+			writer.feedUTF8(writer.secretPending)
+		}
+		writer.secretPending = nil
+	}
+	if len(writer.utf8Pending) > 0 {
+		writer.emitRune(utf8.RuneError)
+		writer.utf8Pending = nil
+	}
 }

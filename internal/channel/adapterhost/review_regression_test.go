@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -169,7 +172,9 @@ func TestNegotiatedLimitsBoundSemanticsAndOutstandingAdmission(t *testing.T) {
 func TestInteractionReceiptAnswerCancellationAndErrorRetireCapacity(t *testing.T) {
 	runtime, encoder, controlled := regressionRuntime(1)
 	message := channeladapter.MessageRef{Handle: "message_1"}
-	runtime.remember("input-1", target{route: channeladapter.Route{Handle: "route_1"}, message: &message})
+	if err := runtime.remember("input-1", target{route: channeladapter.Route{Handle: "route_1"}, message: &message}); err != nil {
+		t.Fatal(err)
+	}
 	intent := interaction.RenderIntent{InteractionID: "interaction.1", InputID: "input-1", Request: confirmInteraction()}
 	if outcome := runtime.Render(context.Background(), intent); outcome != interaction.EffectSucceeded || len(runtime.interactions) != 1 || len(runtime.outstanding) != 1 {
 		t.Fatalf("render outcome=%s interactions=%d outstanding=%d", outcome, len(runtime.interactions), len(runtime.outstanding))
@@ -202,11 +207,123 @@ func TestBoundedStderrRedactsCredentialAndProtocol(t *testing.T) {
 	writer := newDiagnosticWriter(&output, []string{"HCTL_DISCORD_TOKEN=" + secret})
 	var violated atomic.Bool
 	writer.onProtocolViolation = func() { violated.Store(true) }
-	_, _ = writer.Write([]byte("failure token=" + secret + "\n"))
-	_, _ = writer.Write([]byte(`{"protocol_version":1,"payload":{"token":"` + secret + `"}}`))
-	if got := output.String(); strings.Contains(got, secret) || !strings.Contains(got, "[redacted]") || !strings.Contains(got, "protocol-like stderr redacted") || !violated.Load() {
+	for _, fragment := range []string{"failure token=adapter-", "secret-value\n{\"proto", "col_version\":1,\"pay", `load":{"token":"adapter-secret-value"}}`} {
+		_, _ = writer.Write([]byte(fragment))
+	}
+	writer.Flush()
+	if got := output.String(); len(got) > channeladapter.MaxStderrBytes || strings.Contains(got, secret) || !strings.Contains(got, "[redacted]") || !strings.Contains(got, "protocol-like stderr redacted") || !violated.Load() {
 		t.Fatalf("safe stderr = %q", got)
 	}
+	output.Reset()
+	writer = newDiagnosticWriter(&output, []string{"HCTL_DISCORD_TOKEN=" + secret})
+	_, _ = writer.Write([]byte("partial adapter-sec"))
+	writer.Flush()
+	if got := output.String(); strings.Contains(got, "adapter-sec") || !strings.Contains(got, "[redacted]") {
+		t.Fatalf("partial credential stderr = %q", got)
+	}
+}
+
+func TestSanitizedStderrOutputCapIncludesPrefixes(t *testing.T) {
+	var output bytes.Buffer
+	writer := newDiagnosticWriter(&output, nil)
+	for index := 0; index < channeladapter.MaxStderrBytes; index++ {
+		_, _ = writer.Write([]byte("x\n"))
+	}
+	writer.Flush()
+	if output.Len() != channeladapter.MaxStderrBytes {
+		t.Fatalf("sanitized stderr bytes = %d", output.Len())
+	}
+}
+
+func TestStartupReplayQueueAndReplyTargetsFailWithoutEviction(t *testing.T) {
+	frame := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.connection.1", Payload: channeladapter.Connection{State: channeladapter.ConnectionReady}}
+	queue := frameQueue{}
+	for index := 0; index < channeladapter.MaxQueuedFrames; index++ {
+		frame.ID = fmt.Sprintf("adapter.connection.%d", index+1)
+		if err := queue.add(frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := queue.add(frame); err == nil {
+		t.Fatal("startup replay frame ceiling was not enforced")
+	}
+	queue = frameQueue{bytes: channeladapter.MaxQueuedBytes}
+	if err := queue.add(frame); err == nil {
+		t.Fatal("startup replay byte ceiling was not enforced")
+	}
+
+	runtime, encoder, controlled := regressionRuntime(1)
+	first := target{route: channeladapter.Route{Handle: "route_1"}}
+	if err := runtime.remember("input-1", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.remember("input-2", target{route: channeladapter.Route{Handle: "route_2"}}); err == nil || runtime.targets["input-1"].route.Handle != "route_1" {
+		t.Fatal("reply-target saturation silently evicted accepted work")
+	}
+	incoming := channeladapter.InboundMessage{SourceID: "input-2", Route: channeladapter.Route{Handle: "route_1"}, ConversationID: "conversation-1", SurfaceKind: channeladapter.SurfaceDirect, SurfaceKey: strings.Repeat("a", 64), PrincipalKey: strings.Repeat("b", 64), Message: channeladapter.MessageRef{Handle: "message_2"}, Author: channeladapter.Author{Handle: "author_1"}, Text: "hello"}
+	envelope := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.inbound.capacity", Payload: incoming}
+	if err := runtime.inbound(envelope, incoming); err != nil {
+		t.Fatal(err)
+	}
+	if controlled.submitted.Load() != 0 || len(encoder.frames) == 0 || encoder.frames[len(encoder.frames)-1].Payload.(channeladapter.EventAck).Disposition != "rejected" {
+		t.Fatal("saturated reply target was not rejected before controller admission")
+	}
+	runtime.forget("input-1")
+	if err := runtime.remember("input-2", target{route: incoming.Route}); err != nil {
+		t.Fatal("released reply-target capacity was not reusable")
+	}
+}
+
+func TestOperationModesPreserveHumanInputAndCancelTheProcessTree(t *testing.T) {
+	if setupOperationTimeout <= channeladapter.CommandTimeout {
+		t.Fatal("interactive setup retained the ordinary command deadline")
+	}
+	script := filepath.Join(t.TempDir(), "adapter")
+	writeFile(t, script, `#!/bin/sh
+operation="$1"
+status=ready
+if [ "$operation" = status ]; then
+  if IFS= read -r unexpected; then exit 9; fi
+elif ! IFS= read -r answer || [ "$answer" != trusted-input ]; then
+  exit 8
+fi
+[ "$operation" = remove ] && status=removed
+printf '{"schema_version":1,"operation":"%s","profile_id":"default","status":"%s","message":"ok"}\n' "$operation" "$status"
+`, 0o755)
+	for _, mode := range []integration.ChannelAdapterMode{integration.ChannelAdapterSetup, integration.ChannelAdapterRemove, integration.ChannelAdapterStatus} {
+		result, err := RunOperation(context.Background(), mode, Launch{Command: script, Arguments: []string{string(mode), "--profile", "default"}, WorkingDirectory: filepath.Dir(script)}, AdapterEnvironment(""), strings.NewReader("trusted-input\n"), io.Discard)
+		if err != nil || result.Operation != string(mode) {
+			t.Fatalf("%s operation terminal contract = %#v, %v", mode, result, err)
+		}
+	}
+
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	writeFile(t, script, "#!/bin/sh\nsleep 60 &\nprintf '%s' \"$!\" > \"$HCTL_CHILD_PID\"\nwait\n", 0o755)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := RunOperation(ctx, integration.ChannelAdapterSetup, Launch{Command: script, Arguments: []string{"setup", "--profile", "default"}, WorkingDirectory: filepath.Dir(script)}, secureenv.Replace(AdapterEnvironment(""), map[string]string{"HCTL_CHILD_PID": pidFile}), strings.NewReader(""), io.Discard)
+		done <- err
+	}()
+	waitForFile(t, pidFile)
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPID, err := strconv.Atoi(string(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("operation cancellation = %v", err)
+		}
+	case <-time.After(channeladapter.ForcedExitTimeout + time.Second):
+		t.Fatal("cancelled operation did not stop")
+	}
+	waitFor(t, func() bool { return errors.Is(syscall.Kill(childPID, 0), syscall.ESRCH) }, "cancelled operation child cleanup")
 }
 
 type stuckProcess struct{ kills atomic.Int32 }

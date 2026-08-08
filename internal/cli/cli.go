@@ -504,6 +504,12 @@ func (d *currentSetupDriver) OpenProject(ctx context.Context, p *project.Project
 }
 
 func runChannel(args []string, input io.Reader, output, stderr io.Writer) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runChannelContext(ctx, args, input, output, stderr)
+}
+
+func runChannelContext(ctx context.Context, args []string, input io.Reader, output, stderr io.Writer) error {
 	if len(args) < 3 || args[1] != "discord" || (args[0] != "setup" && args[0] != "status" && args[0] != "remove") {
 		return errors.New("usage: hctl channel <setup|status|remove> discord AGENT [--profile NAME] [--config PATH]")
 	}
@@ -529,7 +535,6 @@ func runChannel(args []string, input io.Reader, output, stderr io.Writer) error 
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
 	resolved, err := store.ResolveChannelAdapter(ctx, "discord")
 	if err != nil {
 		return discordAdapterRemedy(err, args[2])
@@ -539,7 +544,7 @@ func runChannel(args []string, input io.Reader, output, stderr io.Writer) error 
 	if err != nil {
 		return discordAdapterRemedy(err, args[2])
 	}
-	result, err := adapterhost.RunOperation(ctx, launch, adapterhost.AdapterEnvironment("HCTL_DISCORD_TOKEN"), input, stderr)
+	result, err := adapterhost.RunOperation(ctx, mode, launch, adapterhost.AdapterEnvironment("HCTL_DISCORD_TOKEN"), input, stderr)
 	if err != nil {
 		return err
 	}

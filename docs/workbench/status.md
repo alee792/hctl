@@ -467,7 +467,10 @@ replies, replay, token-isolated harness environments, and graceful cleanup.
 External-process regressions also prove semantic direct/shared identity,
 status/reset, interaction answer and cancellation, exact render receipt,
 delivered-interaction restore, ambiguous no-retry delivery, child failure,
-negotiated bounds, credential-redacted stderr, and bounded forced cleanup. #85 removes
+negotiated frame/outstanding and fixed queue bounds, stream-safe
+credential-redacted stderr, signal-aware operation process-tree cancellation,
+non-evicting reply-target saturation, interprocess-safe selection updates, and
+bounded forced cleanup. #85 removes
 the retained old code and Discord-only root dependencies.
 
 The transition continues to honor an explicit profile, the established

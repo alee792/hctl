@@ -81,6 +81,11 @@ most one closed, 16-KiB, non-secret operation-result JSON object to stdout and
 then exits. The result contains only operation, profile id, a stable status,
 and bounded safe identity/message text. Status is non-interactive. The adapter
 owns enrollment, validation, lookup, replacement, rotation, and removal.
+Setup keeps trusted stdin and stderr attached and has a separate ten-minute
+human enrollment deadline. Remove also retains trusted terminal input; status
+receives no stdin. Status and remove retain the ordinary 30-second bound.
+Caller cancellation or an interrupt kills the complete private process group
+and waits only through the forced-reap bound.
 
 ## Runtime handshake and semantic messages
 
@@ -206,8 +211,11 @@ The negotiated frame ceiling is installed on both decoder and encoder. The
 negotiated semantic text and attachment ceilings apply in their respective
 directions, while `max_outstanding` bounds live correlations, retained event
 receipts, remembered reply targets, startup surfaces, and newly admitted
-surfaces. Admission waits only to its operation deadline and never creates an
-unbounded goroutine or map.
+surfaces. Reply-target saturation rejects new input before controller admission
+and never evicts an older accepted target. Startup replay is independently
+bounded to 64 frames and 8 MiB before durable recovery opens admission.
+Admission waits only to its operation deadline and never creates an unbounded
+goroutine or map.
 
 Neither side may silently drop, reorder, merge, or overwrite a semantic frame.
 When its bounded queue is full it stops admission and applies pipe
@@ -250,9 +258,11 @@ and then kills the complete process tree after the five-second deadline. Reap
 after a forced kill is independently bounded by two seconds, and controller
 cleanup has its own bounded drain so a stuck controller cannot retain the
 adapter process. Adapter stderr is capped at 64 KiB, strips unsafe controls,
-redacts inherited credential values, and suppresses protocol-shaped content
-instead of retaining it before terminating that adapter runtime. Adapter reconnect
-does not write dispatcher, session, worktree, capacity, or interaction state.
+redacts inherited credential values across arbitrary stream-write boundaries,
+and suppresses protocol-shaped content instead of retaining it before
+terminating that adapter runtime. The 64-KiB ceiling counts emitted sanitized
+bytes, including diagnostic prefixes, rather than untrusted raw input. Adapter
+reconnect does not write dispatcher, session, worktree, capacity, or interaction state.
 Hctl's existing durable store remains the only writer.
 
 ## Ownership and dependency direction

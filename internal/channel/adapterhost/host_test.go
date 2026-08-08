@@ -306,13 +306,13 @@ printf '{"schema_version":1,"operation":"%s","profile_id":"default","status":"%s
 `, 0o755)
 	t.Setenv("HCTL_DISCORD_TOKEN", "expected")
 	for _, operation := range []string{"setup", "status", "remove"} {
-		result, err := RunOperation(context.Background(), Launch{Command: script, Arguments: []string{operation, "--profile", "default"}, WorkingDirectory: filepath.Dir(script)}, AdapterEnvironment("HCTL_DISCORD_TOKEN"), strings.NewReader(""), io.Discard)
+		result, err := RunOperation(context.Background(), integration.ChannelAdapterMode(operation), Launch{Command: script, Arguments: []string{operation, "--profile", "default"}, WorkingDirectory: filepath.Dir(script)}, AdapterEnvironment("HCTL_DISCORD_TOKEN"), strings.NewReader(""), io.Discard)
 		if err != nil || result.Operation != operation || result.ProfileID != "default" || operation == "remove" && result.Status != "removed" {
 			t.Fatalf("%s operation = %#v, %v", operation, result, err)
 		}
 	}
 	writeFile(t, script, "#!/bin/sh\nhead -c 20000 /dev/zero | tr '\\000' x\n", 0o755)
-	if _, err := RunOperation(context.Background(), Launch{Command: script, Arguments: []string{"status"}, WorkingDirectory: filepath.Dir(script)}, AdapterEnvironment("HCTL_DISCORD_TOKEN"), strings.NewReader(""), io.Discard); err == nil || !strings.Contains(err.Error(), "invalid non-secret result") {
+	if _, err := RunOperation(context.Background(), integration.ChannelAdapterStatus, Launch{Command: script, Arguments: []string{"status"}, WorkingDirectory: filepath.Dir(script)}, AdapterEnvironment("HCTL_DISCORD_TOKEN"), strings.NewReader(""), io.Discard); err == nil || !strings.Contains(err.Error(), "invalid non-secret result") {
 		t.Fatalf("oversized operation result error = %v", err)
 	}
 }

@@ -77,7 +77,10 @@ Hctl retains only the transport-neutral binding from an agent and channel kind
 to that opaque profile id in an owner-only selection file. Successful external
 setup records the binding, while remove clears it only if it still selects the
 removed profile. This store contains no Discord identity, routing, or credential
-fields.
+fields. Its complete read-modify-write transaction is serialized by an
+owner-only interprocess lock, so concurrent setup/remove processes cannot lose
+an unrelated selection despite atomic file replacement.
+
 Adapter-owned profiles use an owner-only file beneath the OS user configuration
 directory. When that file lacks a selected profile, the adapter can read the
 former owner-only hctl `config.toml` Discord profile shape, validate it, and

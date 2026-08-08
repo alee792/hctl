@@ -21,6 +21,8 @@ var (
 
 const DefaultIdleTimeout = 15 * time.Minute
 
+const maxManagerDiagnostics = 32
+
 type Lifecycle string
 
 const (
@@ -735,7 +737,7 @@ func (c *managerContinuation) Resume(ctx context.Context, intent interaction.Con
 		}
 		p, err = m.workspaces.Resolve(ctx, c.conversation, worktree.Assignment{Root: snapshot.workspace, Branch: snapshot.branch})
 		if err != nil {
-			m.reportDiagnostic(fmt.Sprintf("native continuation workspace resolution failed: %v", err))
+			m.recordDiagnostic(fmt.Sprintf("native continuation workspace resolution failed: %v", err))
 			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
 		}
 		policy = harness.PolicyWorkspaceWrite
@@ -845,9 +847,14 @@ func (m *Manager) Diagnostics() []string {
 	return append([]string(nil), m.diagnostics...)
 }
 
-func (m *Manager) reportDiagnostic(message string) {
+func (m *Manager) recordDiagnostic(message string) {
 	m.mu.Lock()
-	m.diagnostics = append(m.diagnostics, message)
+	if len(m.diagnostics) < maxManagerDiagnostics {
+		m.diagnostics = append(m.diagnostics, message)
+	} else {
+		copy(m.diagnostics, m.diagnostics[1:])
+		m.diagnostics[len(m.diagnostics)-1] = message
+	}
 	sink := m.diagnosticSink
 	m.mu.Unlock()
 	if sink != nil {
@@ -876,23 +883,23 @@ func (m *Manager) reconcileWorkspaces(ctx context.Context) error {
 			if inspectErr != nil {
 				detail += "; ownership also could not be verified: " + inspectErr.Error()
 			}
-			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved: %s; repair durable ownership locally", record.assignment.Root, detail))
+			m.recordDiagnostic(fmt.Sprintf("worktree %s preserved: %s; repair durable ownership locally", record.assignment.Root, detail))
 			continue
 		}
 		if record.retiring {
 			if err := reconciler.Retire(ctx, record.conversation, record.assignment); err != nil {
-				m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved after interrupted cleanup: %v; repair the exact target and restart hctl", record.assignment.Root, err))
+				m.recordDiagnostic(fmt.Sprintf("worktree %s preserved after interrupted cleanup: %v; repair the exact target and restart hctl", record.assignment.Root, err))
 				continue
 			}
 			if err := m.store.clearRetiredWorkspace(ref, record.assignment); err != nil {
 				return err
 			}
-			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s retirement completed after interrupted cleanup", record.assignment.Root))
+			m.recordDiagnostic(fmt.Sprintf("worktree %s retirement completed after interrupted cleanup", record.assignment.Root))
 			continue
 		}
 		inspection, err := reconciler.Inspect(ctx, record.conversation, record.assignment)
 		if err != nil {
-			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved because ownership could not be verified: %v; repair it locally before this conversation can resume", record.assignment.Root, err))
+			m.recordDiagnostic(fmt.Sprintf("worktree %s preserved because ownership could not be verified: %v; repair it locally before this conversation can resume", record.assignment.Root, err))
 			continue
 		}
 		reason := inspection.Reason
@@ -903,20 +910,20 @@ func (m *Manager) reconcileWorkspaces(ctx context.Context) error {
 			reason = "uncertain recovered work"
 		}
 		if record.busy || record.uncertain || !inspection.Clean || !inspection.Merged {
-			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved: %s", record.assignment.Root, reason))
+			m.recordDiagnostic(fmt.Sprintf("worktree %s preserved: %s", record.assignment.Root, reason))
 			continue
 		}
 		if err := m.store.markWorkspaceRetiring(ref); err != nil {
 			return err
 		}
 		if err := reconciler.Retire(ctx, record.conversation, record.assignment); err != nil {
-			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s cleanup was interrupted: %v; durable ownership was preserved for retry", record.assignment.Root, err))
+			m.recordDiagnostic(fmt.Sprintf("worktree %s cleanup was interrupted: %v; durable ownership was preserved for retry", record.assignment.Root, err))
 			continue
 		}
 		if err := m.store.clearRetiredWorkspace(ref, record.assignment); err != nil {
 			return err
 		}
-		m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s retired after verifying it was inactive, clean, and merged", record.assignment.Root))
+		m.recordDiagnostic(fmt.Sprintf("worktree %s retired after verifying it was inactive, clean, and merged", record.assignment.Root))
 	}
 	return nil
 }

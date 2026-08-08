@@ -2049,6 +2049,27 @@ func TestWritableParkedContinuationAuditsPackageResolutionFailures(t *testing.T)
 	}
 }
 
+func TestManagerDiagnosticsRetainBoundedTailWhileAuditReceivesEveryFailure(t *testing.T) {
+	manager := &Manager{}
+	var audit diagnosticRecorder
+	if err := manager.ConfigureDiagnosticSink(audit.add); err != nil {
+		t.Fatal(err)
+	}
+	total := maxManagerDiagnostics + 7
+	all := make([]string, total)
+	for index := range total {
+		all[index] = fmt.Sprintf("native continuation workspace resolution failed: repeated-%02d", index)
+		manager.recordDiagnostic(all[index])
+	}
+	wantTail := all[total-maxManagerDiagnostics:]
+	if got := manager.Diagnostics(); !reflect.DeepEqual(got, wantTail) {
+		t.Fatalf("diagnostic tail = %#v, want %#v", got, wantTail)
+	}
+	if got := strings.Split(audit.string(), "\n"); !reflect.DeepEqual(got, all) {
+		t.Fatalf("audit sequence = %#v, want every failure %#v", got, all)
+	}
+}
+
 func TestManagerRestartClaimsDurableAnsweredContinuationOnce(t *testing.T) {
 	p := testProject(t)
 	ref := conversationRef{agentID: p.AgentID, harness: "codex", id: "discord-guild", fingerprint: p.SourceFingerprint}

@@ -12,10 +12,12 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"hctl/internal/connection/github"
+	"hctl/internal/friction"
 	"hctl/internal/harness"
 	"hctl/internal/harness/claude"
 	"hctl/internal/interaction"
@@ -46,6 +48,10 @@ type managedRuntime interface {
 
 type runtimeOpener func(context.Context, *project.Project) (managedRuntime, error)
 
+type frictionRecorder interface {
+	Record(*project.Project, string) bool
+}
+
 func serveWithRuntime(source, workspace, harnessName string, input io.Reader, output, audit io.Writer, githubClient *github.Client, openRuntime runtimeOpener) error {
 	p, err := project.Load(source, harnessName, workspace)
 	if err != nil {
@@ -60,13 +66,13 @@ func serveWithRuntime(source, workspace, harnessName string, input io.Reader, ou
 			return openErr
 		}
 		defer opened.Close()
-		return serveRequests(p, opened, githubClient, input, output, audit)
+		return serveRequestsWithFriction(p, opened, githubClient, friction.NewDefault(), input, output, audit)
 	}
-	return serveRequests(p, nil, githubClient, input, output, audit)
+	return serveRequestsWithFriction(p, nil, githubClient, friction.NewDefault(), input, output, audit)
 }
 
-func serveRequests(p *project.Project, runtime managedRuntime, githubClient *github.Client, input io.Reader, output, audit io.Writer) error {
-	return serveRequestsWithInput(p, runtime, githubClient, nil, input, output, audit)
+func serveRequestsWithFriction(p *project.Project, runtime managedRuntime, githubClient *github.Client, recorder frictionRecorder, input io.Reader, output, audit io.Writer) error {
+	return serveRequestsWithInputAndFriction(p, runtime, githubClient, nil, recorder, input, output, audit)
 }
 
 // requestInputRuntime is intentionally process-local. Production MCP children
@@ -85,6 +91,10 @@ func requestInputAvailable(requests requestInputRuntime) bool {
 }
 
 func serveRequestsWithInput(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, input io.Reader, output, audit io.Writer) error {
+	return serveRequestsWithInputAndFriction(p, runtime, githubClient, requests, friction.NewDefault(), input, output, audit)
+}
+
+func serveRequestsWithInputAndFriction(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, recorder frictionRecorder, input io.Reader, output, audit io.Writer) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), maxLineBytes)
 	encoder := json.NewEncoder(output)
@@ -117,6 +127,15 @@ func serveRequestsWithInput(p *project.Project, runtime managedRuntime, githubCl
 				"outputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"text": map[string]any{"type": "string"}}, "required": []string{"text"}},
 				"annotations":  map[string]any{"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
 			}}
+			if p.FrictionNotes {
+				tools = append(tools, map[string]any{
+					"name":         "record-friction",
+					"description":  "Retain one concise friction note in private local hctl state for later human review. Use only after completing the primary task when concrete material friction could help improve the agent project or its hctl integration. This is not telemetry and is not loaded into future sessions.",
+					"inputSchema":  map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"note": map[string]any{"type": "string", "maxLength": friction.MaxNoteBytes}}, "required": []string{"note"}},
+					"outputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"recorded": map[string]any{"type": "boolean"}}, "required": []string{"recorded"}},
+					"annotations":  map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+				})
+			}
 			if p.GitHubConnection != nil {
 				tools = append(tools, github.Definitions(p.GitHubConnection.Description)...)
 			}
@@ -130,7 +149,7 @@ func serveRequestsWithInput(p *project.Project, runtime managedRuntime, githubCl
 			}
 			writeResult(encoder, request.ID, map[string]any{"tools": tools})
 		case "tools/call":
-			result, requestID, toolName, err := callManagedWithInput(p, runtime, githubClient, requests, request.ID, request.Params, audit)
+			result, requestID, toolName, err := callManagedWithInputAndFriction(p, runtime, githubClient, requests, recorder, request.ID, request.Params, audit)
 			if err != nil {
 				if auditErr := writeAudit(audit, p.AgentID, toolName, requestID, "failed"); auditErr != nil {
 					return auditErr
@@ -153,10 +172,14 @@ func serveRequestsWithInput(p *project.Project, runtime managedRuntime, githubCl
 }
 
 func callManaged(p *project.Project, runtime managedRuntime, githubClient *github.Client, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
-	return callManagedWithInput(p, runtime, githubClient, nil, id, params, audit)
+	return callManagedWithInputAndFriction(p, runtime, githubClient, nil, friction.NewDefault(), id, params, audit)
 }
 
 func callManagedWithInput(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
+	return callManagedWithInputAndFriction(p, runtime, githubClient, requests, friction.NewDefault(), id, params, audit)
+}
+
+func callManagedWithInputAndFriction(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, recorder frictionRecorder, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
 	requestID := managedRequestID(id, nil)
 	var call struct {
 		Name      string          `json:"name"`
@@ -221,6 +244,28 @@ func callManagedWithInput(p *project.Project, runtime managedRuntime, githubClie
 		structured := map[string]any{"disposition": string(disposition.Disposition)}
 		return map[string]any{
 			"content":           []any{map[string]any{"type": "text", "text": string(disposition.Disposition)}},
+			"structuredContent": structured,
+			"isError":           false,
+		}, requestID, call.Name, nil
+	}
+	if call.Name == "record-friction" {
+		if !p.FrictionNotes {
+			return nil, requestID, call.Name, errors.New("record-friction is not enabled for this agent")
+		}
+		var arguments struct {
+			Note string `json:"note"`
+		}
+		if err := decodeStrict(call.Arguments, &arguments); err != nil || !utf8.ValidString(arguments.Note) || strings.TrimSpace(arguments.Note) == "" || len([]byte(arguments.Note)) > friction.MaxNoteBytes {
+			return nil, requestID, call.Name, errors.New("friction note must be non-empty and within the configured byte limit")
+		}
+		if err := writeAudit(audit, p.AgentID, call.Name, requestID, "authorized"); err != nil {
+			return nil, requestID, call.Name, err
+		}
+		recorded := recorder != nil && recorder.Record(p, arguments.Note)
+		structured := map[string]any{"recorded": recorded}
+		encoded, _ := json.Marshal(structured)
+		return map[string]any{
+			"content":           []any{map[string]any{"type": "text", "text": string(encoded)}},
 			"structuredContent": structured,
 			"isError":           false,
 		}, requestID, call.Name, nil

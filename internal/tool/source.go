@@ -162,8 +162,8 @@ func Discover(root string) (Inventory, error) {
 }
 
 func addSource(inventory *Inventory, seen map[string]string, source Source) error {
-	if source.Name == "echo" {
-		return errors.New("tool name \"echo\" is reserved by hctl")
+	if source.Name == "echo" || source.Name == "record-friction" {
+		return fmt.Errorf("tool name %q is reserved by hctl", source.Name)
 	}
 	if prior := seen[source.Name]; prior != "" {
 		return fmt.Errorf("duplicate tool name %q from %s and %s", source.Name, prior, source.Path)

@@ -102,6 +102,36 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 	}
 }
 
+func TestGeneratedInstructionsIncludeFrictionGuidanceOnlyWhenEnabled(t *testing.T) {
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			p := &project.Project{Name: "reviewer", Harness: harness, SourceFingerprint: "source", Instructions: []byte("Review carefully.\n")}
+			generated, err := filesFor(p, "/opt/hctl/bin/hctl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := "AGENTS.md"
+			if harness == "claude" {
+				path = "CLAUDE.md"
+			}
+			if strings.Contains(string(generated.Files[path].Content), "record-friction") {
+				t.Fatal("disabled friction guidance was generated")
+			}
+			p.FrictionNotes = true
+			generated, err = filesFor(p, "/opt/hctl/bin/hctl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			instructions := string(generated.Files[path].Content)
+			for _, required := range []string{"record-friction", "primary task", "at most one", "never retry", "sensitive"} {
+				if !strings.Contains(instructions, required) {
+					t.Fatalf("friction guidance missing %q: %s", required, instructions)
+				}
+			}
+		})
+	}
+}
+
 func TestApplyMoreThanEightSkillsForBothHarnesses(t *testing.T) {
 	root := testAgent(t)
 	for index := 0; index < 12; index++ {

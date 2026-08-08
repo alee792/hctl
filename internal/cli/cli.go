@@ -374,6 +374,9 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 		}
 	}
 	toolNames := []string{"echo"}
+	if p.FrictionNotes {
+		toolNames = append(toolNames, "record-friction")
+	}
 	if p.GitHubConnection != nil {
 		toolNames = append(toolNames, github.GetRepository, github.ListIssues, github.GetIssue)
 	}

@@ -134,6 +134,53 @@ func WriteAtomic(root, relative string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
+// WriteAtomicExclusive publishes a new file beneath root without traversing
+// symlinked parents or replacing an existing path. The temporary file and
+// final hard link live in the same directory, so publication is atomic.
+func WriteAtomicExclusive(root, relative string, data []byte, mode os.FileMode) error {
+	relative, err := CleanRelative(relative)
+	if err != nil {
+		return errors.New("internal output path is invalid")
+	}
+	if err := secureMkdirAll(root, filepath.ToSlash(filepath.Dir(relative)), 0o755); err != nil {
+		return err
+	}
+	target := filepath.Join(root, filepath.FromSlash(relative))
+	if _, err := os.Lstat(target); err == nil {
+		return fmt.Errorf("refusing to replace existing file %s", relative)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("cannot inspect file %s", relative)
+	}
+	temp, err := os.CreateTemp(filepath.Dir(target), ".hctl-write-*")
+	if err != nil {
+		return fmt.Errorf("cannot stage file %s", relative)
+	}
+	tempName := temp.Name()
+	defer func() { _ = os.Remove(tempName) }()
+	if err := temp.Chmod(mode); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("cannot set file mode for %s", relative)
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("cannot write file %s", relative)
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("cannot sync file %s", relative)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("cannot close file %s", relative)
+	}
+	if err := os.Link(tempName, target); err != nil {
+		if _, inspectErr := os.Lstat(target); inspectErr == nil {
+			return fmt.Errorf("refusing to replace existing file %s", relative)
+		}
+		return fmt.Errorf("cannot install file %s", relative)
+	}
+	return nil
+}
+
 // EnsurePrivateDir creates a persistent private directory beneath root without
 // traversing symlinks.
 func EnsurePrivateDir(root, relative string) error {

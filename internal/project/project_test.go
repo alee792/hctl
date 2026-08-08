@@ -436,8 +436,63 @@ func TestLoadRejectsInvalidSubagentEffortFrontmatter(t *testing.T) {
 func TestLoadKeepsRootInstructionsDescriptionOnly(t *testing.T) {
 	root := agent(t, "portable")
 	write(t, filepath.Join(root, "instructions.md"), "---\ndescription: Test agent.\neffort: high\n---\n\nBe concise.\n")
-	if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "one plain description only") {
+	if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "description and optional friction-notes only") {
 		t.Fatalf("root effort was not rejected: %v", err)
+	}
+}
+
+func TestLoadParsesOptionalFrictionNotes(t *testing.T) {
+	root := agent(t, "portable")
+	baseline, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.FrictionNotes {
+		t.Fatal("friction notes enabled by default")
+	}
+
+	write(t, filepath.Join(root, "instructions.md"), "---\ndescription: Test agent.\nfriction-notes: false\n---\n\nBe concise.\n")
+	disabled, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.FrictionNotes {
+		t.Fatal("explicitly disabled friction notes were enabled")
+	}
+
+	write(t, filepath.Join(root, "instructions.md"), "---\nfriction-notes: true\ndescription: Test agent.\n---\n\nBe concise.\n")
+	enabled, err := Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !enabled.FrictionNotes {
+		t.Fatal("friction notes opt-in was ignored")
+	}
+	if enabled.SourceFingerprint == baseline.SourceFingerprint || enabled.SourceFingerprint == disabled.SourceFingerprint {
+		t.Fatal("friction-notes source change did not change the fingerprint")
+	}
+}
+
+func TestLoadReservesFrictionToolNameForSubagents(t *testing.T) {
+	root := agent(t, "portable")
+	write(t, filepath.Join(root, "subagents", "record-friction", "instructions.md"), instructions("Record friction."))
+	if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "conflicts with a tool") {
+		t.Fatalf("reserved friction subagent was accepted: %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidFrictionNotesFrontmatter(t *testing.T) {
+	for name, frontmatter := range map[string]string{
+		"non-boolean": "description: Test agent.\nfriction-notes: yes",
+		"duplicate":   "description: Test agent.\nfriction-notes: true\nfriction-notes: false",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := agent(t, "portable")
+			write(t, filepath.Join(root, "instructions.md"), "---\n"+frontmatter+"\n---\n\nBe concise.\n")
+			if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "friction-notes") {
+				t.Fatalf("invalid friction-notes was accepted: %v", err)
+			}
+		})
 	}
 }
 

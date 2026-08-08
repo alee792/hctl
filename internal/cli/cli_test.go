@@ -120,7 +120,7 @@ func TestRunJSONLAutoAppliesAndScrubsDiscordToken(t *testing.T) {
 
 func TestApplyPrintsSafeCompatibilityWarning(t *testing.T) {
 	root := t.TempDir()
-	writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Test agent.\nfriction-notes: true\n---\n\nBe concise.\n", 0o644)
 	writeCLIFile(t, filepath.Join(root, "skills", "echo", "SKILL.md"), "---\nname: echo\ndescription: Repeat safely.\nargument-hint: '[text]'\n---\n\nUse echo.\n", 0o644)
 	harness := filepath.Join(t.TempDir(), "codex")
 	writeCLIFile(t, harness, "#!/bin/sh\necho 'codex-cli 0.144.1'\n", 0o755)
@@ -136,7 +136,7 @@ func TestApplyPrintsSafeCompatibilityWarning(t *testing.T) {
 	if got := stderr.String(); !strings.Contains(got, `warning: skills/echo/SKILL.md: field "argument-hint":`) || !strings.Contains(got, "copied unchanged but may have no effect for codex") {
 		t.Fatalf("warning output = %q", got)
 	}
-	if !strings.Contains(output.String(), "applied agent=") {
+	if !strings.Contains(output.String(), "applied agent=") || !strings.Contains(output.String(), "managed tools=echo,record-friction") {
 		t.Fatalf("apply output = %q", output.String())
 	}
 }

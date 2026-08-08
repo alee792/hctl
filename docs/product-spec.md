@@ -105,8 +105,12 @@ my-agent/
 
 The directory name supplies the agent name, normalized to lowercase words with
 hyphens. `instructions.md` is required and contains YAML frontmatter with one
-plain `description` plus a non-empty Markdown body. Generated always-on
-instructions contain the body, not the frontmatter.
+plain `description`, an optional Boolean `friction-notes`, and a non-empty
+Markdown body. Generated always-on instructions contain the body, not the
+frontmatter. Friction notes are disabled when the field is absent or false;
+`friction-notes: true` opts the project into the local friction inbox described
+under the managed tool boundary. Changing the field changes the source
+fingerprint like any other `instructions.md` edit.
 
 Authored source remains bounded by implementation-owned safety ceilings rather
 than ordinary-use quotas. Counts are intentionally high; aggregate file and
@@ -748,11 +752,41 @@ management remain outside the MVP.
 
 ## Managed tool boundary
 
-The MVP exposes one bounded, read-only `echo` tool, the optional anonymous
-GitHub connection's three read-only tools, and conventionally authored
-TypeScript, Python, and Go tools through one stdio MCP server in both harnesses.
-Inputs and outputs are schema-validated. Audit output contains a safe request
-identifier, tool name, and lifecycle outcome, never tool arguments or output.
+The MVP exposes one bounded, read-only `echo` tool, the optional local
+`record-friction` built-in, the optional anonymous GitHub connection's three
+read-only tools, and conventionally authored TypeScript, Python, and Go tools
+through one stdio MCP server in both harnesses. Inputs and outputs are
+schema-validated. Audit output contains a safe request identifier, tool name,
+and lifecycle outcome, never tool arguments or output.
+
+`record-friction` is advertised only when root instructions opt in with
+`friction-notes: true`. It remains available to read-only channel sessions
+because it changes neither agent source nor workspace state. The tool accepts
+one non-empty UTF-8 `note` of at most 1,024 bytes and returns only whether it
+was recorded. Generated guidance directs the agent to finish the primary task,
+record at most one note only after concrete material friction that could help a
+human improve the agent project or hctl integration, and omit routine errors,
+causal guesses, proposed fixes, generic advice, sensitive data, transcripts,
+logs, and tool output. A store-specific failure returns `recorded: false`; the
+agent must not retry it, mention it, or change the user-facing result.
+
+Friction records are private local hctl state outside both agent source and the
+selected workspace. They use one exclusive owner-only JSON file per note under
+`~/Library/Application Support/hctl/state/friction/agents/AGENT_ID/` on macOS,
+`${XDG_STATE_HOME:-~/.local/state}/hctl/friction/agents/AGENT_ID/` on Linux,
+and the user configuration root under `hctl/state/friction/agents/AGENT_ID/`
+elsewhere. The existing path-derived agent ID prevents collisions between
+same-named local sources. Each record contains an identifier, UTC timestamp,
+agent ID and name, exact source fingerprint, hctl version, selected native
+harness, and the note. It contains no workspace identity or model-supplied
+provenance. A per-agent limit of 256 records never overwrites or silently
+evicts state.
+
+This inbox is write-only to models and is not telemetry, long-term memory,
+evidence, evaluation, a proposal, or a harness-improvement loop. Hctl does not
+automatically read, transmit, cluster, score, convert, or apply notes. A remote
+or container host remains ephemeral unless its local state is mounted or
+preserved outside hctl; no remote durability is inferred or provided.
 
 One long-lived process per authored language serves inspection and calls for
 the MCP session. Tool calls are serialized in the current MVP. A call that

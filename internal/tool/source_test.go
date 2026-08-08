@@ -46,6 +46,20 @@ func TestDiscoverRejectsDuplicateAndMissingNativeLock(t *testing.T) {
 	}
 }
 
+func TestDiscoverRejectsHctlBuiltInNames(t *testing.T) {
+	for _, name := range []string{"echo", "record-friction"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			write(t, root, "tools/"+name+".py", "description = 'reserved'\n")
+			write(t, root, "pyproject.toml", "[project]\n")
+			write(t, root, "uv.lock", "version = 1\n")
+			if _, err := Discover(root); err == nil || !strings.Contains(err.Error(), "reserved by hctl") {
+				t.Fatalf("reserved tool name was accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestDiscoverAllowsEmptyToolsDirectory(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "tools"), 0o755); err != nil {

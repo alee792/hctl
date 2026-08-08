@@ -17,7 +17,12 @@ import (
 	"time"
 
 	"hctl/internal/dispatch"
+	"hctl/internal/harness"
+	"hctl/internal/integration"
+	"hctl/internal/interaction"
+	"hctl/internal/project"
 	"hctl/internal/schedule"
+	"hctl/internal/setup"
 	"hctl/internal/version"
 )
 
@@ -113,6 +118,429 @@ func TestIntegrationPackageCLIJourneyIsExplicitAndContentFree(t *testing.T) {
 	}
 	if err := runIntegration([]string{"remove", "cli-fixture"}, io.Discard, &stderr); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestApplySelectsInstalledGitHubNativeMCPWithoutReadingPAT(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	const fakeValue = "conspicuous-cli-fake-pat"
+	t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", fakeValue)
+	packageRoot := t.TempDir()
+	payload := []byte("#!/bin/sh\nexit 0\n")
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "github-mcp-server", "version": "1.8.0", "name": "GitHub fixture", "description": "Credential-free GitHub fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://github.com/github/github-mcp-server", "revision": "v1.8.0"},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary",
+			"source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID}, "executable": "github-mcp-server",
+			"arguments": []string{"stdio"}, "working_directory": ".", "environment": map[string]string{},
+			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
+			"harnesses": []any{
+				map[string]any{"name": "claude", "startup": "optional", "trust": "native-project"},
+				map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"},
+			},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(packageRoot, "integration.json"), string(manifest)+"\n", 0o600)
+	writeCLIFile(t, filepath.Join(packageRoot, "payload", "github-mcp-server"), string(payload), 0o600)
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+
+	source := filepath.Join(t.TempDir(), "github-agent")
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Inspect GitHub through discovered tools.\n", 0o644)
+	harness := filepath.Join(t.TempDir(), "codex")
+	writeCLIFile(t, harness, "#!/bin/sh\necho 'codex-cli 0.144.1'\n", 0o755)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"apply", source, "--harness", "codex", "--command", harness}, strings.NewReader(""), &output, &stderr, self); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "native server=github startup=optional trust=native-project") || !strings.Contains(got, "value=not-read") || !strings.Contains(got, "managed tools=echo") || strings.Contains(got, "github__") || strings.Contains(got, fakeValue) {
+		t.Fatalf("apply output = %q", got)
+	}
+	config := readCLIFile(t, filepath.Join(source, ".codex", "config.toml"))
+	if !strings.Contains(config, `[mcp_servers."github"]`) || !strings.Contains(config, `env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]`) || strings.Contains(config, fakeValue) {
+		t.Fatalf("generated native config = %q", config)
+	}
+
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", false); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	err = Run([]string{"apply", source, "--workspace", workspace, "--harness", "codex", "--command", harness}, strings.NewReader(""), io.Discard, io.Discard, self)
+	if err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("disabled package apply error = %v", err)
+	}
+	if entries, readErr := os.ReadDir(workspace); readErr != nil || len(entries) != 0 {
+		t.Fatalf("failed offline selection mutated workspace: %v, %v", entries, readErr)
+	}
+}
+
+func TestScheduledOpenRevalidatesCurrentGitHubPackageState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := writeCLIGitHubPackage(t, "1.8.0", []byte("#!/bin/sh\n# first\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "scheduled-github-agent")
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Scheduled GitHub agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "schedules", "probe.md"), "---\ncron: '* * * * *'\n---\n\nProbe GitHub.\n", 0o644)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, err := resolveProjectNativeMCP(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.ApplyWithNativeMCP(p, self, servers); err != nil {
+		t.Fatal(err)
+	}
+	underlying := &countingOpenDriver{}
+	driver := &currentSetupDriver{Driver: underlying, project: p, self: self, diagnostics: io.Discard}
+
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", false); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.Open(context.Background(), harness.OpenRequest{Root: source}); err == nil || session != nil || underlying.opens != 0 || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("disabled scheduled open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove(context.Background(), "github-mcp-server"); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.Open(context.Background(), harness.OpenRequest{Root: source}); err == nil || session != nil || underlying.opens != 0 || !strings.Contains(err.Error(), "not installed") {
+		t.Fatalf("removed scheduled open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	second := writeCLIGitHubPackage(t, "1.8.1", []byte("#!/bin/sh\n# second\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: second, Trust: integration.TrustOperator, UpdatePackageID: "github-mcp-server"}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := driver.Open(context.Background(), harness.OpenRequest{Root: source})
+	if err != nil || session == nil || underlying.opens != 1 {
+		t.Fatalf("updated scheduled open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	if config := readCLIFile(t, filepath.Join(source, ".codex", "config.toml")); !strings.Contains(config, current.Executable) {
+		t.Fatalf("scheduled open retained stale executable: %s", config)
+	}
+	if err := os.Chmod(current.Executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(current.Executable, []byte("corrupt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.Open(context.Background(), harness.OpenRequest{Root: source}); err == nil || session != nil || underlying.opens != 1 || !strings.Contains(err.Error(), "cache is corrupt") {
+		t.Fatalf("corrupt scheduled open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+}
+
+func TestDelayedChannelOpenAndReopenUseCurrentGitHubPackage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := writeCLIGitHubPackage(t, "1.8.0", []byte("#!/bin/sh\n# channel-first\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "channel-github-agent")
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Channel GitHub agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "channels", "discord.md"), "---\nmode: ambient\n---\n\nParticipate when useful.\n", 0o644)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, err := resolveProjectNativeMCP(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.ApplyWithNativeMCP(p, self, servers); err != nil {
+		t.Fatal(err)
+	}
+	underlying := &countingOpenDriver{}
+	driver := &currentSetupDriver{Driver: underlying, project: p, self: self, diagnostics: io.Discard}
+
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", false); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.OpenProject(context.Background(), p, harness.OpenRequest{Root: source, Policy: harness.PolicyReadOnly}); err == nil || session != nil || underlying.opens != 0 {
+		t.Fatalf("delayed disabled channel open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", true); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.OpenProject(context.Background(), p, harness.OpenRequest{Root: source, Policy: harness.PolicyReadOnly}); err != nil || session == nil || underlying.opens != 1 {
+		t.Fatalf("enabled channel open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	second := writeCLIGitHubPackage(t, "1.8.1", []byte("#!/bin/sh\n# channel-second\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: second, Trust: integration.TrustOperator, UpdatePackageID: "github-mcp-server"}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.OpenProject(context.Background(), p, harness.OpenRequest{Root: source, ResumeID: "after-hibernation", Policy: harness.PolicyReadOnly}); err != nil || session == nil || underlying.opens != 2 {
+		t.Fatalf("channel reopen = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	if config := readCLIFile(t, filepath.Join(source, ".codex", "config.toml")); !strings.Contains(config, current.Executable) {
+		t.Fatalf("channel reopen retained stale executable: %s", config)
+	}
+	if err := os.Chmod(current.Executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(current.Executable, []byte("corrupt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.OpenProject(context.Background(), p, harness.OpenRequest{Root: source, ResumeID: "second-reopen", Policy: harness.PolicyReadOnly}); err == nil || session != nil || underlying.opens != 2 {
+		t.Fatalf("corrupt channel reopen = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+}
+
+func TestGuardedWritableChannelOpenPreservesWritableSetup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageRoot := writeCLIGitHubPackage(t, "1.8.0", []byte("#!/bin/sh\n# writable-channel\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "writable-channel-agent")
+	writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Writable channel agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(root, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+	writeCLIFile(t, filepath.Join(root, "channels", "discord.md"), "---\nmode: ambient\n---\n\nParticipate when useful.\n", 0o644)
+	p, err := project.Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, err := resolveProjectNativeMCP(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.ApplyWritableChannelWithNativeMCP(p, self, servers); err != nil {
+		t.Fatal(err)
+	}
+	underlying := &countingContinuationDriver{}
+	driver := newCurrentSetupDriver(underlying, p, self, io.Discard)
+	guarded := driver.(interface {
+		OpenProject(context.Context, *project.Project, harness.OpenRequest) (harness.Session, error)
+	})
+	request := harness.OpenRequest{Root: root, Policy: harness.PolicyWorkspaceWrite}
+	for attempt := 1; attempt <= 2; attempt++ {
+		session, err := guarded.OpenProject(context.Background(), p, request)
+		if err != nil || session == nil || underlying.opens != attempt {
+			t.Fatalf("writable guarded open %d = session %#v, opens %d, error %v", attempt, session, underlying.opens, err)
+		}
+		if err := setup.VerifyWritableChannel(p); err != nil {
+			t.Fatalf("writable setup after guarded open %d: %v", attempt, err)
+		}
+	}
+	continuation := driver.(interface {
+		ContinueProjectTurn(context.Context, *project.Project, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
+	})
+	result := continuation.ContinueProjectTurn(context.Background(), p, request, "persisted-session", interaction.ContinuationIntent{}, func(harness.Event) {})
+	if result.Effect != interaction.EffectSucceeded || underlying.continuations != 1 {
+		t.Fatalf("writable guarded continuation = %+v, starts %d", result, underlying.continuations)
+	}
+	if err := setup.VerifyWritableChannel(p); err != nil {
+		t.Fatalf("writable setup after guarded continuation: %v", err)
+	}
+	if instructions := readCLIFile(t, filepath.Join(root, "AGENTS.md")); !strings.Contains(instructions, "already has workspace-write access") || strings.Contains(instructions, "enforced read-only") {
+		t.Fatalf("guard downgraded writable instructions: %s", instructions)
+	}
+	if record := readCLIFile(t, filepath.Join(root, ".hctl", "apply", "codex.json")); !strings.Contains(record, `"channel_writable": true`) {
+		t.Fatalf("guard downgraded writable apply record: %s", record)
+	}
+}
+
+func TestParkedContinuationsRevalidateCurrentGitHubPackage(t *testing.T) {
+	for _, harnessName := range []string{"codex", "claude"} {
+		t.Run(harnessName, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			store, err := integration.NewDefaultStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := writeCLIGitHubPackage(t, "1.8.0", []byte("#!/bin/sh\n# parked-first\nexit 0\n"))
+			if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Join(t.TempDir(), harnessName+"-parked-agent")
+			writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Parked continuation agent.\n---\n\nBe concise.\n", 0o644)
+			writeCLIFile(t, filepath.Join(root, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+			p, err := project.Load(root, harnessName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			servers, err := resolveProjectNativeMCP(context.Background(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := setup.ApplyWithNativeMCP(p, self, servers); err != nil {
+				t.Fatal(err)
+			}
+
+			starts := 0
+			var diagnostics bytes.Buffer
+			var invoke func() interaction.ContinuationResult
+			if harnessName == "codex" {
+				underlying := &countingContinuationDriver{}
+				driver := newCurrentSetupDriver(underlying, p, self, &diagnostics).(harness.ContinuationTurnDriver)
+				invoke = func() interaction.ContinuationResult {
+					result := driver.ContinueTurn(context.Background(), harness.OpenRequest{Root: root, Policy: harness.PolicyReadOnly}, "persisted-session", interaction.ContinuationIntent{}, func(harness.Event) {})
+					starts = underlying.continuations
+					return result
+				}
+			} else {
+				underlying := &countingDeferredDriver{}
+				driver := newCurrentSetupDriver(underlying, p, self, &diagnostics).(harness.NativeDeferredToolDriver)
+				invoke = func() interaction.ContinuationResult {
+					result := driver.ResumeDeferredTool(context.Background(), harness.OpenRequest{Root: root, Policy: harness.PolicyReadOnly}, "persisted-session", interaction.ContinuationIntent{}, func(harness.Event) {})
+					starts = underlying.continuations
+					return result
+				}
+			}
+
+			if err := store.SetEnabled(context.Background(), "github-mcp-server", false); err != nil {
+				t.Fatal(err)
+			}
+			if result := invoke(); result.Effect != interaction.EffectFailed || starts != 0 || !strings.Contains(diagnostics.String(), "disabled") {
+				t.Fatalf("disabled parked continuation = %+v, starts %d", result, starts)
+			}
+			diagnostics.Reset()
+			if err := store.SetEnabled(context.Background(), "github-mcp-server", true); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Remove(context.Background(), "github-mcp-server"); err != nil {
+				t.Fatal(err)
+			}
+			if result := invoke(); result.Effect != interaction.EffectFailed || starts != 0 || !strings.Contains(diagnostics.String(), "not installed") {
+				t.Fatalf("removed parked continuation = %+v, starts %d", result, starts)
+			}
+			diagnostics.Reset()
+			if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
+				t.Fatal(err)
+			}
+			second := writeCLIGitHubPackage(t, "1.8.1", []byte("#!/bin/sh\n# parked-second\nexit 0\n"))
+			if _, err := store.Install(context.Background(), integration.InstallOptions{Source: second, Trust: integration.TrustOperator, UpdatePackageID: "github-mcp-server"}); err != nil {
+				t.Fatal(err)
+			}
+			current, err := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result := invoke(); result.Effect != interaction.EffectSucceeded || starts != 1 {
+				t.Fatalf("updated parked continuation = %+v, starts %d", result, starts)
+			}
+			diagnostics.Reset()
+			configPath := filepath.Join(root, ".codex", "config.toml")
+			if harnessName == "claude" {
+				configPath = filepath.Join(root, ".mcp.json")
+			}
+			if config := readCLIFile(t, configPath); !strings.Contains(config, current.Executable) {
+				t.Fatalf("parked continuation retained stale executable: %s", config)
+			}
+			if err := os.Chmod(current.Executable, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(current.Executable, []byte("corrupt"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if result := invoke(); result.Effect != interaction.EffectFailed || starts != 1 || !strings.Contains(diagnostics.String(), "cache is corrupt") {
+				t.Fatalf("corrupt parked continuation = %+v, starts %d", result, starts)
+			}
+		})
+	}
+}
+
+func TestCurrentSetupOpenHonorsCallerCancellation(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "cancelled-agent")
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Cancelled setup agent.\n---\n\nBe concise.\n", 0o644)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	underlying := &countingOpenDriver{}
+	driver := &currentSetupDriver{Driver: underlying, project: p, self: "/usr/bin/true", diagnostics: io.Discard}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	deadline, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	for name, ctx := range map[string]context.Context{"cancelled": cancelled, "deadline": deadline} {
+		t.Run(name, func(t *testing.T) {
+			session, err := driver.Open(ctx, harness.OpenRequest{Root: source})
+			if err == nil || session != nil || underlying.opens != 0 || !errors.Is(err, ctx.Err()) {
+				t.Fatalf("canceled setup open = session %#v, opens %d, error %v", session, underlying.opens, err)
+			}
+		})
+	}
+	if entries, err := os.ReadDir(source); err != nil || len(entries) != 1 {
+		t.Fatalf("canceled preparation mutated workspace: %v, %v", entries, err)
 	}
 }
 
@@ -429,7 +857,7 @@ func TestScheduleRunCancellationStopsHarnessVerification(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- runScheduleClockContext(ctx, []string{source, "--workspace", workspace, "--harness", "claude", "--command", command}, io.Discard, &stderr, nil)
+		done <- runScheduleClockContext(ctx, []string{source, "--workspace", workspace, "--harness", "claude", "--command", command}, io.Discard, &stderr, "", nil)
 	}()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -612,7 +1040,7 @@ done
 			var output lockedBuffer
 			done := make(chan error, 1)
 			go func() {
-				done <- runScheduleClockContext(ctx, []string{source, "--workspace", workspace, "--harness", harnessName, "--command", command}, &output, &stderr, clock)
+				done <- runScheduleClockContext(ctx, []string{source, "--workspace", workspace, "--harness", harnessName, "--command", command}, &output, &stderr, "", clock)
 			}()
 			clock.wake(t, start.Add(time.Minute))
 			deadline := time.Now().Add(2 * time.Second)
@@ -640,3 +1068,83 @@ func writeCLIFile(t *testing.T, path, content string, mode os.FileMode) {
 		t.Fatal(err)
 	}
 }
+
+func readCLIFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func writeCLIGitHubPackage(t *testing.T, packageVersion string, payload []byte) string {
+	t.Helper()
+	root := t.TempDir()
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "github-mcp-server", "version": packageVersion, "name": "GitHub fixture", "description": "Credential-free scheduled fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://github.com/github/github-mcp-server", "revision": "v" + packageVersion},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary", "source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID}, "executable": "github-mcp-server", "arguments": []string{"stdio"}, "working_directory": ".", "environment": map[string]string{},
+			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
+			"harnesses": []any{
+				map[string]any{"name": "claude", "startup": "optional", "trust": "native-project"},
+				map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"},
+			},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "integration.json"), string(manifest)+"\n", 0o600)
+	writeCLIFile(t, filepath.Join(root, "payload", "github-mcp-server"), string(payload), 0o600)
+	return root
+}
+
+type countingOpenDriver struct{ opens int }
+
+func (d *countingOpenDriver) Name() string                 { return "codex" }
+func (d *countingOpenDriver) Executable() string           { return "/usr/bin/true" }
+func (d *countingOpenDriver) Verify(context.Context) error { return nil }
+func (d *countingOpenDriver) Open(context.Context, harness.OpenRequest) (harness.Session, error) {
+	d.opens++
+	return countingSession{}, nil
+}
+
+type countingContinuationDriver struct {
+	countingOpenDriver
+	continuations int
+}
+
+func (d *countingContinuationDriver) ContinueTurn(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult {
+	d.continuations++
+	return interaction.ContinuationResult{Effect: interaction.EffectSucceeded, OriginOutcome: "completed"}
+}
+
+type countingDeferredDriver struct {
+	countingOpenDriver
+	continuations int
+}
+
+func (d *countingDeferredDriver) ResumeDeferredTool(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult {
+	d.continuations++
+	return interaction.ContinuationResult{Effect: interaction.EffectSucceeded, OriginOutcome: "completed"}
+}
+
+type countingSession struct{}
+
+func (countingSession) InitialEvents() []harness.Event { return nil }
+func (countingSession) RunTurn(context.Context, harness.Input, func(harness.Event)) (harness.TurnResult, error) {
+	return harness.TurnResult{Status: "completed"}, nil
+}
+func (countingSession) Close() error { return nil }
+func (countingSession) Abort()       {}

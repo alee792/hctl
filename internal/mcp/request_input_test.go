@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"hctl/internal/connection/github"
 	"hctl/internal/harness"
 	"hctl/internal/harness/claude"
 	"hctl/internal/interaction"
@@ -44,7 +43,7 @@ func TestRequestInputCapabilityGatingAndRedaction(t *testing.T) {
 			if test.bridge != nil {
 				bridge = test.bridge
 			}
-			if err := serveRequestsWithInput(p, nil, github.NewClient(nil), bridge, strings.NewReader(input), &output, &audit); err != nil {
+			if err := serveRequestsWithInput(p, nil, bridge, strings.NewReader(input), &output, &audit); err != nil {
 				t.Fatal(err)
 			}
 			responses := decodeLines(t, output.String())
@@ -81,7 +80,7 @@ func TestClaudeDeferredBrokerEnvironmentCannotAdvertiseOrExecuteWithoutOwner(t *
 		t.Fatal(err)
 	}
 	params := json.RawMessage(`{"name":"channel.request_input","arguments":` + string(arguments) + `}`)
-	if result, _, _, err := callManagedWithInput(p, nil, github.NewClient(nil), nil, json.RawMessage(`8`), params, io.Discard); err == nil || result != nil {
+	if result, _, _, err := callManagedWithInput(p, nil, nil, json.RawMessage(`8`), params, io.Discard); err == nil || result != nil {
 		t.Fatalf("unowned broker result = %#v, %v", result, err)
 	}
 }
@@ -95,7 +94,7 @@ func TestRequestInputRejectsSchemaAndUnavailableFallbackBeforeBridge(t *testing.
 		`{"name":"channel.request_input","arguments":{"schema_version":1,"kind":"confirm","prompt":"Proceed?","policy":{"expires_after_seconds":60,"cancellation":"allowed"},"field":{"id":"ok","kind":"confirm","label":"Proceed","required":true}}}`,
 	}
 	for _, params := range inputs {
-		result, _, _, err := callManagedWithInput(p, nil, github.NewClient(nil), bridge, json.RawMessage(`1`), json.RawMessage(params), io.Discard)
+		result, _, _, err := callManagedWithInput(p, nil, bridge, json.RawMessage(`1`), json.RawMessage(params), io.Discard)
 		if err == nil || result != nil {
 			t.Fatalf("invalid call result=%#v err=%v", result, err)
 		}
@@ -117,7 +116,7 @@ func TestRequestInputAuditCorrelationExcludesSemanticBytesAndDispositionIsBounde
 			t.Fatal(err)
 		}
 		params := json.RawMessage(`{"name":"channel.request_input","arguments":` + string(arguments) + `}`)
-		result, requestID, _, err := callManagedWithInput(p, nil, github.NewClient(nil), bridge, json.RawMessage(`7`), params, io.Discard)
+		result, requestID, _, err := callManagedWithInput(p, nil, bridge, json.RawMessage(`7`), params, io.Discard)
 		if err != nil || result["structuredContent"].(map[string]any)["disposition"] != "deferred" {
 			t.Fatalf("request result=%#v err=%v", result, err)
 		}
@@ -130,7 +129,7 @@ func TestRequestInputAuditCorrelationExcludesSemanticBytesAndDispositionIsBounde
 	bridge.disposition = harness.RequestInputDisposition("private_customer_name")
 	arguments, _ := json.Marshal(request)
 	params := json.RawMessage(`{"name":"channel.request_input","arguments":` + string(arguments) + `}`)
-	if result, _, _, err := callManagedWithInput(p, nil, github.NewClient(nil), bridge, json.RawMessage(`8`), params, io.Discard); err == nil || result != nil {
+	if result, _, _, err := callManagedWithInput(p, nil, bridge, json.RawMessage(`8`), params, io.Discard); err == nil || result != nil {
 		t.Fatalf("unbounded strategy disposition result=%#v err=%v", result, err)
 	}
 }

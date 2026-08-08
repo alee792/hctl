@@ -3,12 +3,16 @@ package stage
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"hctl/internal/integration"
 	"hctl/internal/project"
 	"hctl/internal/rootfs"
 )
@@ -119,6 +123,89 @@ func TestCreateStagesToolFreeAgentDeterministically(t *testing.T) {
 			t.Fatal("manifest must not hash itself")
 		}
 	}
+}
+
+func TestCreateSelectivelyStagesGitHubNativeMCPClosure(t *testing.T) {
+	const fakeValue = "conspicuous-stage-fake-pat"
+	t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", fakeValue)
+	source := filepath.Join(t.TempDir(), "github-agent")
+	writeTestFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: GitHub staged test agent.\n---\n\nBe concise.\n", 0o644)
+	writeTestFile(t, filepath.Join(source, "connections", "github.md"), "Inspect GitHub using discovered native tools.\n", 0o644)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := integration.NewStore(t.TempDir(), nil)
+	packageRoot := testGitHubPackage(t)
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	hctl := filepath.Join(bin, "hctl")
+	harness := filepath.Join(bin, "codex")
+	writeTestFile(t, hctl, "#!/bin/sh\nexit 0\n", 0o755)
+	writeTestFile(t, harness, "#!/bin/sh\necho 'codex-cli 1.2.3'\n", 0o755)
+	output := filepath.Join(t.TempDir(), "staged")
+	if _, err := Create(context.Background(), Request{Project: p, Output: output, HCTLExecutable: hctl, HarnessExecutable: harness, HarnessVersion: "1.2.3", IntegrationStore: store}); err != nil {
+		t.Fatal(err)
+	}
+	config := readTestFile(t, filepath.Join(output, "workspace", ".codex", "config.toml"))
+	for _, fragment := range []string{`[mcp_servers."github"]`, `/opt/hctl/integrations/github-mcp-server/`, `args = ["stdio"]`, `env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]`} {
+		if !bytes.Contains(config, []byte(fragment)) {
+			t.Fatalf("staged config omitted %q: %s", fragment, config)
+		}
+	}
+	if bytes.Contains(config, []byte(fakeValue)) {
+		t.Fatal("staged config retained the resolved ambient value")
+	}
+	matches, err := filepath.Glob(filepath.Join(output, "opt", "hctl", "integrations", "github-mcp-server", "*", runtime.GOOS+"-"+runtime.GOARCH, "github-mcp-server"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("selective GitHub closure = %v, %v", matches, err)
+	}
+	if err := filepath.Walk(output, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr == nil && bytes.Contains(data, []byte(fakeValue)) {
+			t.Fatalf("resolved ambient value entered staged file %s", path)
+		}
+		return readErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testGitHubPackage(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	payload := []byte("#!/bin/sh\nexit 0\n")
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "github-mcp-server", "version": "1.8.0", "name": "Fake GitHub MCP", "description": "Credential-free native MCP fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://github.com/github/github-mcp-server", "revision": "v1.8.0"},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary",
+			"source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID}, "executable": "github-mcp-server",
+			"arguments": []string{"stdio"}, "working_directory": ".", "environment": map[string]string{},
+			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
+			"harnesses":            []any{map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"}},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(root, "integration.json"), string(manifest)+"\n", 0o600)
+	writeTestFile(t, filepath.Join(root, "payload", "github-mcp-server"), string(payload), 0o600)
+	return root
 }
 
 func TestCreateRejectsUnsafeOutputWithoutPartialArtifact(t *testing.T) {

@@ -1,9 +1,14 @@
 package setup
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -12,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"hctl/internal/integration"
 	"hctl/internal/project"
 	"hctl/internal/rootfs"
 )
@@ -129,6 +135,310 @@ func TestGeneratedInstructionsIncludeFrictionGuidanceOnlyWhenEnabled(t *testing.
 				}
 			}
 		})
+	}
+}
+
+func TestGitHubConnectionGeneratesExactNativeUnmanagedConfiguration(t *testing.T) {
+	const fakeValue = "conspicuous-fake-pat-marker"
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			root := testAgent(t)
+			write(t, filepath.Join(root, "connections", "github.md"), "Inspect GitHub issues through discovered native tools.\n")
+			p, err := project.Load(root, harness)
+			if err != nil {
+				t.Fatal(err)
+			}
+			descriptor := testNativeMCPDescriptor(t, harness)
+			t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", fakeValue)
+			if _, err := ApplyWithNativeMCP(p, "/opt/hctl/bin/hctl", []integration.NativeMCPLaunchDescriptor{descriptor}); err != nil {
+				t.Fatal(err)
+			}
+			instructionsPath := filepath.Join(root, "AGENTS.md")
+			configPath := filepath.Join(root, ".codex", "config.toml")
+			if harness == "claude" {
+				instructionsPath = filepath.Join(root, "CLAUDE.md")
+				configPath = filepath.Join(root, ".mcp.json")
+			}
+			instructions := read(t, instructionsPath)
+			for _, fragment := range []string{"Inspect GitHub issues", "discovered tools", "native and unmanaged", "does not filter, confirm, broker, or audit"} {
+				if !strings.Contains(instructions, fragment) {
+					t.Fatalf("generated instructions omit %q: %s", fragment, instructions)
+				}
+			}
+			config := read(t, configPath)
+			if strings.Contains(config, fakeValue) {
+				t.Fatal("resolved ambient value entered generated native configuration")
+			}
+			if harness == "claude" {
+				for _, fragment := range []string{`"github"`, `"command": "/usr/bin/env"`, `"-C"`, descriptor.WorkingDirectory, descriptor.Command, `"stdio"`} {
+					if !strings.Contains(config, fragment) {
+						t.Fatalf("Claude native config omitted %q: %s", fragment, config)
+					}
+				}
+				if strings.Contains(config, `"GITHUB_PERSONAL_ACCESS_TOKEN"`) {
+					t.Fatal("Claude config should inherit the launch environment without an env entry")
+				}
+			} else {
+				for _, fragment := range []string{`[mcp_servers."github"]`, `command = "` + descriptor.Command + `"`, `args = ["stdio"]`, `cwd = "` + descriptor.WorkingDirectory + `"`, `enabled = true`, `required = false`, `default_tools_approval_mode = "prompt"`, `env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]`} {
+					if !strings.Contains(config, fragment) {
+						t.Fatalf("Codex native config omitted %q: %s", fragment, config)
+					}
+				}
+			}
+			for _, path := range []string{configPath, instructionsPath, filepath.Join(root, ".hctl", "apply", harness+".json")} {
+				if strings.Contains(read(t, path), fakeValue) {
+					t.Fatalf("resolved ambient value entered retained file %s", path)
+				}
+			}
+		})
+	}
+}
+
+func TestGitHubNativeMCPRejectsCollisionsBeforeMutation(t *testing.T) {
+	root := testAgent(t)
+	write(t, filepath.Join(root, "connections", "github.md"), "Use GitHub.\n")
+	pluginRoot := filepath.Join(root, "plugins", "collision")
+	write(t, filepath.Join(pluginRoot, "plugin.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"collision"}`)
+	write(t, filepath.Join(pluginRoot, "mcp.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"github":{"type":"stdio","command":"server"}}}`)
+	p, err := project.Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ApplyWithNativeMCP(p, "/opt/hctl/bin/hctl", []integration.NativeMCPLaunchDescriptor{testNativeMCPDescriptor(t, "codex")})
+	if err == nil || !strings.Contains(err.Error(), `server "github" collides`) {
+		t.Fatalf("collision error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".codex", "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("collision mutated native config: %v", err)
+	}
+}
+
+func TestGeneratedGitHubNativeMCPLaunchesCredentialFreeFixture(t *testing.T) {
+	const fakeValue = "conspicuous-native-fixture-marker"
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			root := testAgent(t)
+			write(t, filepath.Join(root, "connections", "github.md"), "Use discovered GitHub tools.\n")
+			p, err := project.Load(root, harness)
+			if err != nil {
+				t.Fatal(err)
+			}
+			descriptor, packageRoot, storeRoot := testInstalledNativeMCPDescriptor(t, harness)
+			if _, err := ApplyWithNativeMCP(p, "/opt/hctl/bin/hctl", []integration.NativeMCPLaunchDescriptor{descriptor}); err != nil {
+				t.Fatal(err)
+			}
+			harnessExecutable := testNativeConfigHarness(t, harness)
+			approvalEnv := func(project, server, tool string) []string {
+				if harness == "claude" {
+					return []string{"FAKE_CLAUDE_PROJECT_SERVER_APPROVAL=" + server}
+				}
+				return []string{
+					"FAKE_CODEX_PROJECT_TRUST=" + project,
+					"FAKE_CODEX_SERVER_APPROVAL=" + server,
+					"FAKE_CODEX_TOOL_APPROVAL=" + tool,
+				}
+			}
+			run := func(value string, approvals []string, runtimeEnv ...string) (string, string, error) {
+				process := exec.Command(harnessExecutable)
+				process.Env = append([]string{
+					"PATH=" + os.Getenv("PATH"), "FAKE_WORKSPACE=" + root,
+					"GITHUB_PERSONAL_ACCESS_TOKEN=" + value,
+				}, approvals...)
+				process.Env = append(process.Env, runtimeEnv...)
+				var stdout, stderr bytes.Buffer
+				process.Stdout = &stdout
+				process.Stderr = &stderr
+				err := process.Run()
+				return stdout.String(), stderr.String(), err
+			}
+			approved := approvalEnv("approved", "approved", "approved")
+			stdout, stderr, err := run(fakeValue, approved)
+			if err != nil || stderr != "" {
+				t.Fatalf("native fixture launch = stdout %q, stderr %q, error %v", stdout, stderr, err)
+			}
+			for _, fragment := range []string{`"name":"fixture_read"`, `"ok":true`} {
+				if !strings.Contains(stdout, fragment) {
+					t.Fatalf("native discovery/call omitted %q: %s", fragment, stdout)
+				}
+			}
+			if strings.Contains(stdout, fakeValue) {
+				t.Fatal("native protocol output exposed the ambient value")
+			}
+
+			for _, value := range []string{"", "explicitly-invalid-fake-value"} {
+				stdout, stderr, err := run(value, approved)
+				if err != nil || stdout != "" || !strings.Contains(stderr, "github optional startup failed") || (!strings.Contains(stderr, "authentication required") && !strings.Contains(stderr, "authentication rejected")) || strings.Contains(stderr, fakeValue) {
+					t.Fatalf("bounded authentication failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
+				}
+			}
+			if harness == "claude" {
+				if stdout, stderr, err := run(fakeValue, approvalEnv("approved", "missing", "approved")); err == nil || stdout != "" || !strings.Contains(stderr, "Claude project MCP server approval required") {
+					t.Fatalf("Claude project-server approval failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
+				}
+			} else {
+				for name, approvals := range map[string][]string{
+					"project trust":   approvalEnv("missing", "approved", "approved"),
+					"server approval": approvalEnv("approved", "missing", "approved"),
+					"tool approval":   approvalEnv("approved", "approved", "missing"),
+				} {
+					t.Run(name, func(t *testing.T) {
+						stdout, stderr, err := run(fakeValue, approvals)
+						if err == nil || stdout != "" || !strings.Contains(stderr, "Codex "+name+" required") {
+							t.Fatalf("%s failure = stdout %q, stderr %q, error %v", name, stdout, stderr, err)
+						}
+					})
+				}
+			}
+			for name, runtimeEnv := range map[string]string{
+				"protocol version": "FAKE_MCP_PROTOCOL_VERSION=2099-01-01",
+				"server version":   "FAKE_MCP_SERVER_VERSION=999.0.0",
+			} {
+				t.Run("unsupported "+name, func(t *testing.T) {
+					stdout, stderr, err := run(fakeValue, approved, runtimeEnv)
+					if err != nil || stdout != "" || !strings.Contains(stderr, "github optional startup failed: unsupported MCP "+name) || strings.Contains(stderr, fakeValue) {
+						t.Fatalf("unsupported %s failure = stdout %q, stderr %q, error %v", name, stdout, stderr, err)
+					}
+				})
+			}
+			for _, evidenceRoot := range []string{packageRoot, storeRoot, root} {
+				assertTreeOmits(t, evidenceRoot, fakeValue)
+			}
+		})
+	}
+}
+
+func testInstalledNativeMCPDescriptor(t *testing.T, harness string) (integration.NativeMCPLaunchDescriptor, string, string) {
+	t.Helper()
+	packageRoot := t.TempDir()
+	payload := []byte(`#!/bin/sh
+if [ -z "${GITHUB_PERSONAL_ACCESS_TOKEN-}" ]; then
+  echo 'authentication required' >&2
+  exit 20
+fi
+if [ "$GITHUB_PERSONAL_ACCESS_TOKEN" = "explicitly-invalid-fake-value" ]; then
+  echo 'authentication rejected' >&2
+  exit 21
+fi
+IFS= read -r initialize
+IFS= read -r list
+IFS= read -r call
+protocol_version=${FAKE_MCP_PROTOCOL_VERSION-2025-06-18}
+server_version=${FAKE_MCP_SERVER_VERSION-1.8.0-fixture}
+printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"$protocol_version\",\"serverInfo\":{\"name\":\"github-mcp-server\",\"version\":\"$server_version\"}}}"
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fixture_read"}]}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"structuredContent":{"ok":true}}}'
+`)
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "github-mcp-server", "version": "1.8.0", "name": "Fake GitHub MCP", "description": "Credential-free native MCP fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://github.com/github/github-mcp-server", "revision": "v1.8.0"},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary",
+			"source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID}, "executable": "github-mcp-server",
+			"arguments": []string{"stdio"}, "working_directory": ".", "environment": map[string]string{},
+			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
+			"harnesses": []any{
+				map[string]any{"name": "claude", "startup": "optional", "trust": "native-project"},
+				map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"},
+			},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(packageRoot, "integration.json"), string(manifest)+"\n")
+	write(t, filepath.Join(packageRoot, "payload", "github-mcp-server"), string(payload))
+	storeRoot := t.TempDir()
+	store := integration.NewStore(storeRoot, nil)
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := resolved.LaunchDescriptor(harness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return descriptor, packageRoot, storeRoot
+}
+
+func testNativeConfigHarness(t *testing.T, harness string) string {
+	t.Helper()
+	executable := filepath.Join(t.TempDir(), harness)
+	trust := `#!/bin/sh
+set -eu
+`
+	var parse string
+	if harness == "claude" {
+		trust += `[ "${FAKE_CLAUDE_PROJECT_SERVER_APPROVAL-}" = approved ] || { echo 'Claude project MCP server approval required' >&2; exit 30; }
+`
+		parse = `config="$FAKE_WORKSPACE/.mcp.json"
+grep -F '"github": {' "$config" >/dev/null
+grep -F '"command": "/usr/bin/env"' "$config" >/dev/null
+cwd=$(awk '/"github": \{/{github=1} github && /"args": \[/{args=1; next} args {line=$0; gsub(/^[[:space:]]*"|",?[[:space:]]*$/, "", line); n++; if(n==2){print line; exit}}' "$config")
+server=$(awk '/"github": \{/{github=1} github && /"args": \[/{args=1; next} args {line=$0; gsub(/^[[:space:]]*"|",?[[:space:]]*$/, "", line); n++; if(n==4){print line; exit}}' "$config")
+grep -F '"stdio"' "$config" >/dev/null
+`
+	} else {
+		trust += `[ "${FAKE_CODEX_PROJECT_TRUST-}" = approved ] || { echo 'Codex project trust required' >&2; exit 30; }
+[ "${FAKE_CODEX_SERVER_APPROVAL-}" = approved ] || { echo 'Codex server approval required' >&2; exit 31; }
+[ "${FAKE_CODEX_TOOL_APPROVAL-}" = approved ] || { echo 'Codex tool approval required' >&2; exit 32; }
+`
+		parse = `config="$FAKE_WORKSPACE/.codex/config.toml"
+grep -F '[mcp_servers."github"]' "$config" >/dev/null
+grep -F 'enabled = true' "$config" >/dev/null
+grep -F 'required = false' "$config" >/dev/null
+grep -F 'default_tools_approval_mode = "prompt"' "$config" >/dev/null
+grep -F 'env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]' "$config" >/dev/null
+server=$(awk '/^\[mcp_servers\."github"\]$/{github=1; next} github && /^command = /{line=$0; sub(/^command = "/, "", line); sub(/"$/, "", line); print line; exit}' "$config")
+cwd=$(awk '/^\[mcp_servers\."github"\]$/{github=1; next} github && /^cwd = /{line=$0; sub(/^cwd = "/, "", line); sub(/"$/, "", line); print line; exit}' "$config")
+grep -F 'args = ["stdio"]' "$config" >/dev/null
+`
+	}
+	run := `failure=$(mktemp)
+trap 'rm -f "$failure"' EXIT
+set +e
+output=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fixture_read","arguments":{}}}' | /usr/bin/env -C "$cwd" -- "$server" stdio 2>"$failure")
+status=$?
+set -e
+if [ "$status" -ne 0 ]; then
+  printf 'github optional startup failed: %s\n' "$(cat "$failure")" >&2
+  exit 0
+fi
+printf '%s\n' "$output" | grep -F '"protocolVersion":"2025-06-18"' >/dev/null || { echo 'github optional startup failed: unsupported MCP protocol version' >&2; exit 0; }
+printf '%s\n' "$output" | grep -F '"version":"1.8.0-fixture"' >/dev/null || { echo 'github optional startup failed: unsupported MCP server version' >&2; exit 0; }
+printf '%s\n' "$output"
+`
+	write(t, executable, trust+parse+run)
+	if err := os.Chmod(executable, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return executable
+}
+
+func assertTreeOmits(t *testing.T, root, value string) {
+	t.Helper()
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr == nil && bytes.Contains(data, []byte(value)) {
+			t.Fatalf("resolved environment value entered %s", path)
+		}
+		return readErr
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -518,6 +828,26 @@ func TestPluginMCPServersGenerateNativeUnmanagedConfiguration(t *testing.T) {
 				t.Fatalf("missing plugin data did not stale setup: %v", err)
 			}
 		})
+	}
+}
+
+func testNativeMCPDescriptor(t *testing.T, harness string) integration.NativeMCPLaunchDescriptor {
+	t.Helper()
+	root := t.TempDir()
+	executable := filepath.Join(root, "github-mcp-server")
+	write(t, executable, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(executable, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return integration.NativeMCPLaunchDescriptor{
+		ServerName:       "github",
+		Command:          executable,
+		Arguments:        []string{"stdio"},
+		WorkingDirectory: root,
+		RequiredEnvironment: []integration.EnvironmentRequirement{{
+			Name: "GITHUB_PERSONAL_ACCESS_TOKEN", Description: "Ambient authentication required at runtime.",
+		}},
+		Target: integration.NativeHarnessTarget{Name: harness, Startup: integration.StartupOptional, Trust: integration.TrustNativeProject},
 	}
 }
 
@@ -939,7 +1269,7 @@ func TestMaintainerCodeReviewSkillProjectsWithProvenance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Apply(p, "/opt/hctl/bin/hctl"); err != nil {
+			if _, err := ApplyWithNativeMCP(p, "/opt/hctl/bin/hctl", []integration.NativeMCPLaunchDescriptor{testNativeMCPDescriptor(t, harness)}); err != nil {
 				t.Fatal(err)
 			}
 			prefix := ".claude/skills"

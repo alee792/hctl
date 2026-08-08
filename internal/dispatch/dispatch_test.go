@@ -124,6 +124,19 @@ func TestDispatcherRunsHarnessAndStateInSelectedWorkspace(t *testing.T) {
 	}
 }
 
+func TestDispatcherOpensThroughCurrentProjectGuard(t *testing.T) {
+	p := testProject(t)
+	driver := &projectAwareDriver{}
+	request := harness.OpenRequest{Root: p.WorkspaceRoot, Policy: harness.PolicyReadOnly}
+	session, err := openProjectSession(context.Background(), p, driver, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session == nil || driver.openedProject != p || driver.openedRoot != p.WorkspaceRoot || driver.policy != harness.PolicyReadOnly {
+		t.Fatalf("guarded open = session %#v, project %#v, root %q, policy %q", session, driver.openedProject, driver.openedRoot, driver.policy)
+	}
+}
+
 func TestDispatcherValidatesProtocolBeforeOpeningWorkspaceState(t *testing.T) {
 	p := &project.Project{WorkspaceRoot: filepath.Join(t.TempDir(), "missing")}
 	submissions := make(chan Submission)
@@ -246,6 +259,16 @@ type fakeDriver struct {
 	openedRoot string
 	policy     harness.ExecutionPolicy
 	mu         sync.Mutex
+}
+
+type projectAwareDriver struct {
+	fakeDriver
+	openedProject *project.Project
+}
+
+func (d *projectAwareDriver) OpenProject(ctx context.Context, p *project.Project, request harness.OpenRequest) (harness.Session, error) {
+	d.openedProject = p
+	return d.Open(ctx, request)
 }
 
 func (d *fakeDriver) Name() string                 { return "claude" }

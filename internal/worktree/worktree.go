@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"hctl/internal/integration"
 	"hctl/internal/project"
 	"hctl/internal/secureenv"
 	"hctl/internal/setup"
@@ -30,6 +31,11 @@ type Inspection struct {
 	Reason string
 }
 
+// NativeMCPResolver returns current offline-verified native process metadata
+// for a relocated project. It is capability-generic and resolves no ambient
+// environment value.
+type NativeMCPResolver func(context.Context, *project.Project) ([]integration.NativeMCPLaunchDescriptor, error)
+
 type Manager struct {
 	mu         sync.Mutex
 	base       *project.Project
@@ -37,9 +43,14 @@ type Manager struct {
 	repo       string
 	common     string
 	parent     string
+	nativeMCP  NativeMCPResolver
 }
 
 func New(ctx context.Context, base *project.Project, executable string) (*Manager, error) {
+	return NewWithNativeMCP(ctx, base, executable, nil)
+}
+
+func NewWithNativeMCP(ctx context.Context, base *project.Project, executable string, nativeMCP NativeMCPResolver) (*Manager, error) {
 	if base == nil || executable == "" || !filepath.IsAbs(executable) {
 		return nil, errors.New("writable worktrees require a project and hctl executable")
 	}
@@ -60,7 +71,7 @@ func New(ctx context.Context, base *project.Project, executable string) (*Manage
 		return nil, errors.New("cannot resolve selected Git checkout ownership")
 	}
 	parent := filepath.Join(filepath.Dir(repo), "."+filepath.Base(repo)+".hctl-worktrees")
-	return &Manager{base: base, executable: executable, repo: repo, common: common, parent: parent}, nil
+	return &Manager{base: base, executable: executable, repo: repo, common: common, parent: parent, nativeMCP: nativeMCP}, nil
 }
 
 func (m *Manager) Provision(ctx context.Context, conversation string) (*project.Project, Assignment, error) {
@@ -286,7 +297,17 @@ func (m *Manager) prepare(ctx context.Context, assignment Assignment) (*project.
 	if err != nil {
 		return nil, err
 	}
-	if err := setup.VerifyWritableChannel(p); err == nil {
+	var nativeMCP []integration.NativeMCPLaunchDescriptor
+	if m.nativeMCP != nil {
+		nativeMCP, err = m.nativeMCP(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := setup.ValidateNativeMCP(p, nativeMCP); err != nil {
+		return nil, err
+	}
+	if err := setup.VerifyWritableChannel(p); err == nil && len(nativeMCP) == 0 {
 		return p, nil
 	}
 	prepareCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -294,7 +315,7 @@ func (m *Manager) prepare(ctx context.Context, assignment Assignment) (*project.
 	if err := tool.Prepare(prepareCtx, p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools); err != nil {
 		return nil, err
 	}
-	if _, err := setup.ApplyWritableChannel(p, m.executable); err != nil {
+	if _, err := setup.ApplyWritableChannelWithNativeMCP(p, m.executable, nativeMCP); err != nil {
 		return nil, err
 	}
 	return p, nil

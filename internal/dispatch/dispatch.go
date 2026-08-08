@@ -297,7 +297,7 @@ dispatchLoop:
 					}
 					snapshot.sessionID = ""
 				}
-				process, err = driver.Open(ctx, harness.OpenRequest{Root: p.WorkspaceRoot, ResumeID: snapshot.sessionID, Policy: policy, ManagedRequestInput: requestInputs != nil})
+				process, err = openProjectSession(ctx, p, driver, harness.OpenRequest{Root: p.WorkspaceRoot, ResumeID: snapshot.sessionID, Policy: policy, ManagedRequestInput: requestInputs != nil})
 				if err != nil {
 					if options.taskDeadline {
 						if terminalErr := store.terminalizeTask(ref, snapshot.firstID, "failed"); terminalErr != nil {
@@ -594,6 +594,17 @@ dispatchLoop:
 			}
 		}
 	}
+}
+
+type projectSessionDriver interface {
+	OpenProject(context.Context, *project.Project, harness.OpenRequest) (harness.Session, error)
+}
+
+func openProjectSession(ctx context.Context, p *project.Project, driver harness.Driver, request harness.OpenRequest) (harness.Session, error) {
+	if current, ok := driver.(projectSessionDriver); ok {
+		return current.OpenProject(ctx, p, request)
+	}
+	return driver.Open(ctx, request)
 }
 
 func closeHarness(process harness.Session, timeout time.Duration, timers timerFactory) error {

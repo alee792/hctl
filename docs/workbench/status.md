@@ -370,9 +370,40 @@ hctl's store keeps its no-redirect policy and gains no vendor code. The direct
 Codex image prepares and verifies the Linux package before publication, while
 credential-free tests prove exact installed-path resolution, offline reuse,
 concurrency, interruption, corruption, unsupported-platform rejection,
-descriptor drift, and selective staging or omission. Source-to-Claude/Codex
-generation and native runtime proof remain #67. The currently shipped
-anonymous managed GitHub code has not yet been removed.
+descriptor drift, and selective staging or omission. Authored
+`connections/github.md` now selects that exact installed capability during
+offline apply. Claude receives the verified server through its native
+`/usr/bin/env -C` project entry; Codex receives the verified executable, root,
+optional startup, prompt approval, and ambient variable name through its
+native project table. Exact plugin-name collisions fail before mutation, and
+staging copies only the selected package artifact to canonical final paths.
+Credential-free generation and staging tests use a conspicuous fake value to
+prove that only the environment-variable name enters native configuration or
+retained evidence. Agents without the connection neither resolve nor stage the
+package. The superseded anonymous managed GitHub client and tool definitions
+have been removed; the managed server, authored tools, channel input, and
+plugin-native MCP behavior remain unchanged. Full local/headless maintainer
+journey evidence remains #71 and the documented operator journey remains #72.
+Every hctl-owned scheduled or channel session open, channel reopen, and native
+continuation process start re-resolves and verifies current offline package
+state before opening the harness, so disablement, removal, updates, or
+corruption cannot reuse stale native configuration. The caller's cancellation
+or deadline governs that resolution and preparation, and a failed guard never
+starts the native process. The guard preserves ordinary read-only setup or the
+already-resolved relocated workspace-write setup instead of changing its
+policy. Writable Discord conversation promotion and reuse carry the same
+capability-generic resolver into the relocated worktree rather than dropping
+its GitHub entry. A package-state failure while resolving a parked writable
+continuation is retained in the operator audit and manager diagnostics, but
+never enters Discord dispatch content or starts the stale native process.
+The synchronous audit receives every such failure while in-memory manager
+evidence retains only a fixed recent tail, so repeated retries cannot grow
+runtime state without bound. The audit sink is installed before durable
+worktree reconciliation, so startup diagnostics are also emitted completely
+and in order before the same retained-tail bound is applied.
+Credential-free harness fixtures separately prove Claude's one-time
+project-server approval, Codex project/server/tool approval, and bounded
+unsupported MCP protocol or server-version diagnostics.
 
 ADR 0032 and the dependency-free `hctl/channeladapter` module now define the
 second closed capability and its version-1 process protocol. Package metadata

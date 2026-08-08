@@ -21,6 +21,8 @@ var (
 
 const DefaultIdleTimeout = 15 * time.Minute
 
+const maxManagerDiagnostics = 32
+
 type Lifecycle string
 
 const (
@@ -66,6 +68,7 @@ type Manager struct {
 	closeOnce           sync.Once
 	continueWG          sync.WaitGroup
 	diagnostics         []string
+	diagnosticSink      func(string)
 	requestInputFactory func(string) RequestInputHandler
 	interactionReady    func(string) bool
 	expiryStops         map[string]chan struct{}
@@ -96,6 +99,21 @@ func (m *Manager) ConfigureInteractionReady(ready func(string) bool) error {
 		return errors.New("interaction readiness must be configured before channel admission")
 	}
 	m.interactionReady = ready
+	return nil
+}
+
+// ConfigureDiagnosticSink binds safe operator diagnostics before admission.
+// Runtime failures sent here must never be routed through dispatch events.
+func (m *Manager) ConfigureDiagnosticSink(sink func(string)) error {
+	if sink == nil {
+		return errors.New("managed diagnostic sink is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || len(m.workers) != 0 || m.diagnosticSink != nil {
+		return errors.New("managed diagnostic sink must be configured before channel admission")
+	}
+	m.diagnosticSink = sink
 	return nil
 }
 
@@ -194,6 +212,12 @@ func newManagerConfigured(ctx context.Context, p *project.Project, driver harnes
 		store: store, ctx: managerCtx, cancel: cancel,
 		workers: map[string]*managedConversation{}, elevating: map[string]bool{}, continuing: map[string]Lifecycle{}, resumeQueued: map[string]bool{}, expiryStops: map[string]chan struct{}{}, done: make(chan struct{}), stopped: make(chan struct{}),
 	}
+	if configure != nil {
+		if err := configure(manager); err != nil {
+			manager.Close()
+			return nil, err
+		}
+	}
 	if err := manager.reconcileWorkspaces(managerCtx); err != nil {
 		cancel()
 		return nil, err
@@ -215,12 +239,6 @@ func newManagerConfigured(ctx context.Context, p *project.Project, driver harnes
 		}
 		if pending, ok, loadErr := coordinator.Pending(); loadErr == nil && ok && (pending.Phase == interaction.PhaseRequested || pending.Phase == interaction.PhaseRendered) {
 			expiries = append(expiries, interactionExpiry{conversation: conversation, expiresAt: pending.ExpiresAt})
-		}
-	}
-	if configure != nil {
-		if err := configure(manager); err != nil {
-			manager.Close()
-			return nil, err
 		}
 	}
 	for _, expiry := range expiries {
@@ -665,22 +683,42 @@ type managerContinuation struct {
 	conversation string
 }
 
+type projectContinuationTurnDriver interface {
+	ContinueProjectTurn(context.Context, *project.Project, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
+}
+
+type projectDeferredToolDriver interface {
+	ResumeProjectDeferredTool(context.Context, *project.Project, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
+}
+
 func (c *managerContinuation) Resume(ctx context.Context, intent interaction.ContinuationIntent) interaction.ContinuationResult {
 	m := c.manager
-	var continueTurn func(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
+	var continueTurn func(context.Context, *project.Project, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
 	switch intent.Mode {
 	case interaction.ContinuationTurn:
 		driver, ok := m.driver.(harness.ContinuationTurnDriver)
 		if !ok {
 			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
 		}
-		continueTurn = driver.ContinueTurn
+		if current, ok := m.driver.(projectContinuationTurnDriver); ok {
+			continueTurn = current.ContinueProjectTurn
+		} else {
+			continueTurn = func(ctx context.Context, _ *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+				return driver.ContinueTurn(ctx, request, sessionID, intent, emit)
+			}
+		}
 	case interaction.ContinuationNativeDeferredTool:
 		driver, ok := m.driver.(harness.NativeDeferredToolDriver)
 		if !ok || intent.ContinuationKey == "" {
 			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
 		}
-		continueTurn = driver.ResumeDeferredTool
+		if current, ok := m.driver.(projectDeferredToolDriver); ok {
+			continueTurn = current.ResumeProjectDeferredTool
+		} else {
+			continueTurn = func(ctx context.Context, _ *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+				return driver.ResumeDeferredTool(ctx, request, sessionID, intent, emit)
+			}
+		}
 	default:
 		return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
 	}
@@ -699,6 +737,7 @@ func (c *managerContinuation) Resume(ctx context.Context, intent interaction.Con
 		}
 		p, err = m.workspaces.Resolve(ctx, c.conversation, worktree.Assignment{Root: snapshot.workspace, Branch: snapshot.branch})
 		if err != nil {
+			m.recordDiagnostic(fmt.Sprintf("native continuation workspace resolution failed: %v", err))
 			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
 		}
 		policy = harness.PolicyWorkspaceWrite
@@ -741,7 +780,7 @@ func (c *managerContinuation) Resume(ctx context.Context, intent interaction.Con
 		m.mu.Unlock()
 	}()
 	emitErr := error(nil)
-	result := continueTurn(turnCtx, harness.OpenRequest{Root: p.WorkspaceRoot, Policy: policy}, snapshot.sessionID, intent, func(event harness.Event) {
+	result := continueTurn(turnCtx, p, harness.OpenRequest{Root: p.WorkspaceRoot, Policy: policy}, snapshot.sessionID, intent, func(event harness.Event) {
 		if emitErr == nil {
 			emitErr = m.emit(c.conversation, fromHarness(event, intent.InputID))
 			if emitErr != nil {
@@ -808,6 +847,21 @@ func (m *Manager) Diagnostics() []string {
 	return append([]string(nil), m.diagnostics...)
 }
 
+func (m *Manager) recordDiagnostic(message string) {
+	m.mu.Lock()
+	if len(m.diagnostics) < maxManagerDiagnostics {
+		m.diagnostics = append(m.diagnostics, message)
+	} else {
+		copy(m.diagnostics, m.diagnostics[1:])
+		m.diagnostics[len(m.diagnostics)-1] = message
+	}
+	sink := m.diagnosticSink
+	m.mu.Unlock()
+	if sink != nil {
+		sink(message)
+	}
+}
+
 func (m *Manager) reconcileWorkspaces(ctx context.Context) error {
 	reconciler, ok := m.workspaces.(WorkspaceReconciler)
 	if !ok {
@@ -829,23 +883,23 @@ func (m *Manager) reconcileWorkspaces(ctx context.Context) error {
 			if inspectErr != nil {
 				detail += "; ownership also could not be verified: " + inspectErr.Error()
 			}
-			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved: %s; repair durable ownership locally", record.assignment.Root, detail))
+			m.recordDiagnostic(fmt.Sprintf("worktree %s preserved: %s; repair durable ownership locally", record.assignment.Root, detail))
 			continue
 		}
 		if record.retiring {
 			if err := reconciler.Retire(ctx, record.conversation, record.assignment); err != nil {
-				m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved after interrupted cleanup: %v; repair the exact target and restart hctl", record.assignment.Root, err))
+				m.recordDiagnostic(fmt.Sprintf("worktree %s preserved after interrupted cleanup: %v; repair the exact target and restart hctl", record.assignment.Root, err))
 				continue
 			}
 			if err := m.store.clearRetiredWorkspace(ref, record.assignment); err != nil {
 				return err
 			}
-			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s retirement completed after interrupted cleanup", record.assignment.Root))
+			m.recordDiagnostic(fmt.Sprintf("worktree %s retirement completed after interrupted cleanup", record.assignment.Root))
 			continue
 		}
 		inspection, err := reconciler.Inspect(ctx, record.conversation, record.assignment)
 		if err != nil {
-			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved because ownership could not be verified: %v; repair it locally before this conversation can resume", record.assignment.Root, err))
+			m.recordDiagnostic(fmt.Sprintf("worktree %s preserved because ownership could not be verified: %v; repair it locally before this conversation can resume", record.assignment.Root, err))
 			continue
 		}
 		reason := inspection.Reason
@@ -856,20 +910,20 @@ func (m *Manager) reconcileWorkspaces(ctx context.Context) error {
 			reason = "uncertain recovered work"
 		}
 		if record.busy || record.uncertain || !inspection.Clean || !inspection.Merged {
-			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s preserved: %s", record.assignment.Root, reason))
+			m.recordDiagnostic(fmt.Sprintf("worktree %s preserved: %s", record.assignment.Root, reason))
 			continue
 		}
 		if err := m.store.markWorkspaceRetiring(ref); err != nil {
 			return err
 		}
 		if err := reconciler.Retire(ctx, record.conversation, record.assignment); err != nil {
-			m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s cleanup was interrupted: %v; durable ownership was preserved for retry", record.assignment.Root, err))
+			m.recordDiagnostic(fmt.Sprintf("worktree %s cleanup was interrupted: %v; durable ownership was preserved for retry", record.assignment.Root, err))
 			continue
 		}
 		if err := m.store.clearRetiredWorkspace(ref, record.assignment); err != nil {
 			return err
 		}
-		m.diagnostics = append(m.diagnostics, fmt.Sprintf("worktree %s retired after verifying it was inactive, clean, and merged", record.assignment.Root))
+		m.recordDiagnostic(fmt.Sprintf("worktree %s retired after verifying it was inactive, clean, and merged", record.assignment.Root))
 	}
 	return nil
 }

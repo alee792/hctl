@@ -18,13 +18,13 @@ import (
 
 	"hctl/internal/channel/discord"
 	"hctl/internal/channelconfig"
-	"hctl/internal/connection/github"
 	"hctl/internal/credential"
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
 	"hctl/internal/harness/claude"
 	"hctl/internal/harness/codex"
 	"hctl/internal/integration"
+	"hctl/internal/interaction"
 	"hctl/internal/mcp"
 	"hctl/internal/project"
 	"hctl/internal/rootfs"
@@ -72,7 +72,7 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 	case "channel":
 		return runChannel(args[1:], input, output, stderr)
 	case "schedule":
-		return runSchedule(args[1:], output, stderr)
+		return runSchedule(args[1:], output, stderr, self)
 	case "mcp":
 		return runMCP(args[1:], input, output, stderr)
 	case "hook":
@@ -254,14 +254,14 @@ func runHook(args []string, input io.Reader, output io.Writer) error {
 	return claude.RunDeferredHook(input, output, os.Getenv(claude.DeferredBrokerEnv))
 }
 
-func runSchedule(args []string, output, stderr io.Writer) error {
+func runSchedule(args []string, output, stderr io.Writer, self string) error {
 	const usage = "Usage:\n  hctl schedule trigger AGENT NAME [--workspace DIR] --harness <claude|codex> --input-id ID [--command PATH] [--timeout DURATION] [--turn-timeout DURATION]\n  hctl schedule run AGENT [--workspace DIR] --harness <claude|codex> [--command PATH] [--turn-timeout DURATION] [--max-active-turns N]\n"
 	if len(args) > 0 && isHelp(args[len(args)-1]) {
 		_, err := io.WriteString(output, usage)
 		return err
 	}
 	if len(args) >= 1 && args[0] == "run" {
-		return runScheduleClock(args[1:], output, stderr)
+		return runScheduleClock(args[1:], output, stderr, self)
 	}
 	if len(args) < 3 || args[0] != "trigger" {
 		return errors.New("usage: hctl schedule trigger AGENT NAME --harness <claude|codex> --input-id ID")
@@ -293,9 +293,6 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := setup.Verify(p); err != nil {
-		return err
-	}
 	driver, err := newDriver(*harnessName, *command)
 	if err != nil {
 		return err
@@ -305,7 +302,11 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 	if err := driver.Verify(ctx); err != nil {
 		return err
 	}
-	result, triggerErr := schedule.TriggerWithTurnTimeout(ctx, p, driver, args[2], *inputID, *turnTimeout)
+	if err := ensureApplied(p, self, stderr); err != nil {
+		return err
+	}
+	currentDriver := newCurrentSetupDriver(driver, p, self, stderr)
+	result, triggerErr := schedule.TriggerWithTurnTimeout(ctx, p, currentDriver, args[2], *inputID, *turnTimeout)
 	if result.Status != "" {
 		if _, err := fmt.Fprintf(output, "schedule=%q input_id=%q status=%s duplicate=%t", result.Name, result.InputID, result.Status, result.Duplicate); err != nil {
 			return err
@@ -338,13 +339,13 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 	return nil
 }
 
-func runScheduleClock(args []string, output, stderr io.Writer) error {
+func runScheduleClock(args []string, output, stderr io.Writer, self string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runScheduleClockContext(ctx, args, output, stderr, nil)
+	return runScheduleClockContext(ctx, args, output, stderr, self, nil)
 }
 
-func runScheduleClockContext(ctx context.Context, args []string, output, stderr io.Writer, clock schedule.Clock) error {
+func runScheduleClockContext(ctx context.Context, args []string, output, stderr io.Writer, self string, clock schedule.Clock) error {
 	if len(args) == 0 {
 		return errors.New("usage: hctl schedule run AGENT --harness <claude|codex>")
 	}
@@ -374,9 +375,6 @@ func runScheduleClockContext(ctx context.Context, args []string, output, stderr 
 	if len(p.Schedules) == 0 {
 		return errors.New("agent project defines no schedules")
 	}
-	if err := setup.Verify(p); err != nil {
-		return err
-	}
 	driver, err := newDriver(*harnessName, *command)
 	if err != nil {
 		return err
@@ -386,12 +384,16 @@ func runScheduleClockContext(ctx context.Context, args []string, output, stderr 
 	if err := driver.Verify(verifyCtx); err != nil {
 		return err
 	}
+	if err := ensureApplied(p, self, stderr); err != nil {
+		return err
+	}
 	lock, err := schedule.AcquireRuntimeLock(p)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	runtime, err := dispatch.NewTaskRuntime(p, driver, *turnTimeout, *maxActive)
+	currentDriver := newCurrentSetupDriver(driver, p, self, stderr)
+	runtime, err := dispatch.NewTaskRuntime(p, currentDriver, *turnTimeout, *maxActive)
 	if err != nil {
 		return err
 	}
@@ -414,6 +416,93 @@ func runScheduleClockContext(ctx context.Context, args []string, output, stderr 
 		return err
 	}
 	return schedule.RunForeground(ctx, p.Schedules, runtime, schedule.RunnerOptions{Clock: clock, Emit: emit})
+}
+
+type currentSetupDriver struct {
+	harness.Driver
+	project     *project.Project
+	self        string
+	diagnostics io.Writer
+}
+
+type currentContinuationDriver struct {
+	*currentSetupDriver
+	continuation harness.ContinuationTurnDriver
+}
+
+func (d *currentContinuationDriver) ContinueTurn(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	return d.ContinueProjectTurn(ctx, d.project, request, sessionID, intent, emit)
+}
+
+func (d *currentContinuationDriver) ContinueProjectTurn(ctx context.Context, p *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	if err := ensureAppliedForPolicyContext(ctx, p, d.self, d.diagnostics, request.Policy); err != nil {
+		return d.failedContinuation(err)
+	}
+	return d.continuation.ContinueTurn(ctx, request, sessionID, intent, emit)
+}
+
+type currentDeferredDriver struct {
+	*currentSetupDriver
+	deferred harness.NativeDeferredToolDriver
+}
+
+func (d *currentDeferredDriver) ResumeDeferredTool(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	return d.ResumeProjectDeferredTool(ctx, d.project, request, sessionID, intent, emit)
+}
+
+func (d *currentDeferredDriver) ResumeProjectDeferredTool(ctx context.Context, p *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	if err := ensureAppliedForPolicyContext(ctx, p, d.self, d.diagnostics, request.Policy); err != nil {
+		return d.failedContinuation(err)
+	}
+	return d.deferred.ResumeDeferredTool(ctx, request, sessionID, intent, emit)
+}
+
+type currentContinuationDeferredDriver struct {
+	*currentContinuationDriver
+	deferred harness.NativeDeferredToolDriver
+}
+
+func (d *currentContinuationDeferredDriver) ResumeDeferredTool(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	return d.ResumeProjectDeferredTool(ctx, d.project, request, sessionID, intent, emit)
+}
+
+func (d *currentContinuationDeferredDriver) ResumeProjectDeferredTool(ctx context.Context, p *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	if err := ensureAppliedForPolicyContext(ctx, p, d.self, d.diagnostics, request.Policy); err != nil {
+		return d.failedContinuation(err)
+	}
+	return d.deferred.ResumeDeferredTool(ctx, request, sessionID, intent, emit)
+}
+
+func newCurrentSetupDriver(driver harness.Driver, p *project.Project, self string, diagnostics io.Writer) harness.Driver {
+	current := &currentSetupDriver{Driver: driver, project: p, self: self, diagnostics: diagnostics}
+	continuation, hasContinuation := driver.(harness.ContinuationTurnDriver)
+	deferred, hasDeferred := driver.(harness.NativeDeferredToolDriver)
+	switch {
+	case hasContinuation && hasDeferred:
+		return &currentContinuationDeferredDriver{currentContinuationDriver: &currentContinuationDriver{currentSetupDriver: current, continuation: continuation}, deferred: deferred}
+	case hasContinuation:
+		return &currentContinuationDriver{currentSetupDriver: current, continuation: continuation}
+	case hasDeferred:
+		return &currentDeferredDriver{currentSetupDriver: current, deferred: deferred}
+	default:
+		return current
+	}
+}
+
+func (d *currentSetupDriver) Open(ctx context.Context, request harness.OpenRequest) (harness.Session, error) {
+	return d.OpenProject(ctx, d.project, request)
+}
+
+func (d *currentSetupDriver) failedContinuation(err error) interaction.ContinuationResult {
+	_, _ = fmt.Fprintf(d.diagnostics, "native continuation setup failed: %v\n", err)
+	return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+}
+
+func (d *currentSetupDriver) OpenProject(ctx context.Context, p *project.Project, request harness.OpenRequest) (harness.Session, error) {
+	if err := ensureAppliedForPolicyContext(ctx, p, d.self, d.diagnostics, request.Policy); err != nil {
+		return nil, err
+	}
+	return d.Driver.Open(ctx, request)
 }
 
 func runChannel(args []string, input io.Reader, output, stderr io.Writer) error {
@@ -516,6 +605,13 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if err := driver.Verify(context.Background()); err != nil {
 		return err
 	}
+	nativeMCP, err := resolveProjectNativeMCP(context.Background(), p)
+	if err != nil {
+		return err
+	}
+	if err := setup.ValidateNativeMCP(p, nativeMCP); err != nil {
+		return err
+	}
 	prepareContext, cancelPrepare := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancelPrepare()
 	if err := tool.Prepare(prepareContext, p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools); err != nil {
@@ -525,7 +621,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if err != nil {
 		return err
 	}
-	result, err := setup.Apply(p, self)
+	result, err := setup.ApplyWithNativeMCP(p, self, nativeMCP)
 	if err != nil {
 		return err
 	}
@@ -546,20 +642,26 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if p.FrictionNotes {
 		toolNames = append(toolNames, "record-friction")
 	}
-	if p.GitHubConnection != nil {
-		toolNames = append(toolNames, github.GetRepository, github.ListIssues, github.GetIssue)
-	}
 	for _, source := range p.Tools.Sources {
 		toolNames = append(toolNames, source.Name)
 	}
 	if _, err := fmt.Fprintf(output, "managed tools=%s via MCP; native harness tools allowed and unmanaged\n", strings.Join(toolNames, ",")); err != nil {
 		return err
 	}
+	if p.GitHubConnection != nil {
+		if _, err := fmt.Fprintln(output, "native server=github startup=optional trust=native-project environment=GITHUB_PERSONAL_ACCESS_TOKEN value=not-read; calls and effects unmanaged"); err != nil {
+			return err
+		}
+	}
 	if _, err := fmt.Fprintf(output, "next: cd %s && %s\n", p.WorkspaceRoot, driver.Name()); err != nil {
 		return err
 	}
 	if driver.Name() == "codex" {
-		if _, err := fmt.Fprintln(output, "note: Codex loads project .codex configuration after you trust the project"); err != nil {
+		if _, err := fmt.Fprintln(output, "note: Codex loads project .codex configuration after you trust the project; Codex owns native server and tool approval"); err != nil {
+			return err
+		}
+	} else if p.GitHubConnection != nil {
+		if _, err := fmt.Fprintln(output, "note: Claude owns the one-time project MCP server approval"); err != nil {
 			return err
 		}
 	}
@@ -606,7 +708,14 @@ func runStage(args []string, output, stderr io.Writer, self string) error {
 	if err != nil {
 		return err
 	}
-	result, err := stage.Create(ctx, stage.Request{Project: p, Output: *outputPath, HCTLExecutable: executable, HarnessExecutable: driver.Executable(), HarnessVersion: version})
+	var integrationStore *integration.Store
+	if p.GitHubConnection != nil {
+		integrationStore, err = integration.NewDefaultStore()
+		if err != nil {
+			return err
+		}
+	}
+	result, err := stage.Create(ctx, stage.Request{Project: p, Output: *outputPath, HCTLExecutable: executable, HarnessExecutable: driver.Executable(), HarnessVersion: version, IntegrationStore: integrationStore})
 	if err != nil {
 		return err
 	}
@@ -699,7 +808,8 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 	if err != nil {
 		return err
 	}
-	runtime, err := discord.New(p, driver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, MaxResident: *maxResident, MaxActive: *maxActive, Audit: stderr, Executable: hctlExecutable})
+	currentDriver := newCurrentSetupDriver(driver, p, self, stderr)
+	runtime, err := discord.New(p, currentDriver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, MaxResident: *maxResident, MaxActive: *maxActive, Audit: stderr, Executable: hctlExecutable, NativeMCP: resolveProjectNativeMCP})
 	if err != nil {
 		return err
 	}
@@ -709,10 +819,32 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 }
 
 func ensureApplied(p *project.Project, self string, stderr io.Writer) error {
-	if err := setup.Verify(p); err == nil {
+	return ensureAppliedContext(context.Background(), p, self, stderr)
+}
+
+func ensureAppliedContext(ctx context.Context, p *project.Project, self string, stderr io.Writer) error {
+	return ensureAppliedForPolicyContext(ctx, p, self, stderr, harness.PolicyDefault)
+}
+
+func ensureAppliedForPolicyContext(ctx context.Context, p *project.Project, self string, stderr io.Writer, policy harness.ExecutionPolicy) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	nativeMCP, err := resolveProjectNativeMCP(ctx, p)
+	if err != nil {
+		return err
+	}
+	if err := setup.ValidateNativeMCP(p, nativeMCP); err != nil {
+		return err
+	}
+	verify := setup.Verify
+	if policy == harness.PolicyWorkspaceWrite {
+		verify = setup.VerifyWritableChannel
+	}
+	if err := verify(p); err == nil && len(nativeMCP) == 0 {
 		return nil
 	}
-	prepareContext, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	prepareContext, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if err := tool.Prepare(prepareContext, p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools); err != nil {
 		return err
@@ -721,7 +853,12 @@ func ensureApplied(p *project.Project, self string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	result, err := setup.Apply(p, executable)
+	var result setup.Result
+	if policy == harness.PolicyWorkspaceWrite {
+		result, err = setup.ApplyWritableChannelWithNativeMCP(p, executable, nativeMCP)
+	} else {
+		result, err = setup.ApplyWithNativeMCP(p, executable, nativeMCP)
+	}
 	if err != nil {
 		return err
 	}
@@ -730,6 +867,25 @@ func ensureApplied(p *project.Project, self string, stderr io.Writer) error {
 	}
 	_, _ = fmt.Fprintf(stderr, "auto-applied agent=%s harness=%s fingerprint=%s\n", p.Name, p.Harness, p.SourceFingerprint)
 	return nil
+}
+
+func resolveProjectNativeMCP(ctx context.Context, p *project.Project) ([]integration.NativeMCPLaunchDescriptor, error) {
+	if p.GitHubConnection == nil {
+		return nil, nil
+	}
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := store.ResolveNativeMCP(ctx, "github-mcp-server", "github")
+	if err != nil {
+		return nil, err
+	}
+	descriptor, err := resolved.LaunchDescriptor(p.Harness)
+	if err != nil {
+		return nil, err
+	}
+	return []integration.NativeMCPLaunchDescriptor{descriptor}, nil
 }
 
 func setupDiscord(source, requestedProfile, path string, config channelconfig.Config, input io.Reader, output io.Writer) error {

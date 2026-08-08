@@ -6,13 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"hctl/internal/connection/github"
 	"hctl/internal/harness"
 	"hctl/internal/project"
 	"hctl/internal/setup"
@@ -70,7 +68,7 @@ func TestFrictionToolIsOptInAndNonInterfering(t *testing.T) {
 		t.Fatal(err)
 	}
 	var disabledOutput bytes.Buffer
-	if err := serveRequestsWithFriction(p, nil, github.NewClient(nil), &stubFrictionRecorder{}, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`+"\n"), &disabledOutput, io.Discard); err != nil {
+	if err := serveRequestsWithFriction(p, nil, &stubFrictionRecorder{}, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`+"\n"), &disabledOutput, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	disabledTools := decodeLines(t, disabledOutput.String())[0]["result"].(map[string]any)["tools"].([]any)
@@ -92,7 +90,7 @@ func TestFrictionToolIsOptInAndNonInterfering(t *testing.T) {
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"still usable"}}}`,
 	}, "\n") + "\n"
 	var output, audit bytes.Buffer
-	if err := serveRequestsWithFriction(p, nil, github.NewClient(nil), recorder, strings.NewReader(input), &output, &audit); err != nil {
+	if err := serveRequestsWithFriction(p, nil, recorder, strings.NewReader(input), &output, &audit); err != nil {
 		t.Fatal(err)
 	}
 	responses := decodeLines(t, output.String())
@@ -120,7 +118,7 @@ func TestFrictionToolRejectsInvalidInputWithoutCallingStore(t *testing.T) {
 	p := &project.Project{AgentID: "test@0123456789ab", Name: "test", SourceFingerprint: "source", Harness: "claude", FrictionNotes: true}
 	recorder := &stubFrictionRecorder{recorded: true}
 	params := json.RawMessage(`{"name":"record-friction","arguments":{"note":"   ","cause":"guess"}}`)
-	result, _, _, err := callManagedWithInputAndFriction(p, nil, github.NewClient(nil), nil, recorder, json.RawMessage(`1`), params, io.Discard)
+	result, _, _, err := callManagedWithInputAndFriction(p, nil, nil, recorder, json.RawMessage(`1`), params, io.Discard)
 	if err == nil || result != nil || recorder.calls != 0 {
 		t.Fatalf("invalid friction call = result %#v, calls %d, error %v", result, recorder.calls, err)
 	}
@@ -146,7 +144,7 @@ func TestReadOnlyChannelPolicyRejectsAuthoredManagedTools(t *testing.T) {
 	}, "\n") + "\n"
 	opened := 0
 	var output bytes.Buffer
-	if err := serveWithRuntime(root, root, "claude", strings.NewReader(input), &output, io.Discard, github.NewClient(nil), func(context.Context, *project.Project) (managedRuntime, error) {
+	if err := serveWithRuntime(root, root, "claude", strings.NewReader(input), &output, io.Discard, func(context.Context, *project.Project) (managedRuntime, error) {
 		opened++
 		return nil, errors.New("authored runtime started")
 	}); err != nil {
@@ -162,13 +160,13 @@ func TestReadOnlyChannelPolicyRejectsAuthoredManagedTools(t *testing.T) {
 
 	params := json.RawMessage(`{"name":"write-file","arguments":{"path":"changed.txt"}}`)
 	var audit bytes.Buffer
-	_, _, toolName, err := callManaged(&project.Project{AgentID: "test-agent"}, nil, github.NewClient(nil), json.RawMessage(`1`), params, &audit)
+	_, _, toolName, err := callManaged(&project.Project{AgentID: "test-agent"}, nil, json.RawMessage(`1`), params, &audit)
 	if err == nil || !strings.Contains(err.Error(), "unavailable in a read-only channel session") || toolName != "write-file" {
 		t.Fatalf("read-only authored call = tool %q error %v", toolName, err)
 	}
 }
 
-func TestGitHubConnectionUsesSameManagedSurfaceForBothHarnesses(t *testing.T) {
+func TestGitHubConnectionIsAbsentFromManagedSurfaceForBothHarnesses(t *testing.T) {
 	for _, harness := range []string{"claude", "codex"} {
 		t.Run(harness, func(t *testing.T) {
 			root := testAgent(t)
@@ -182,63 +180,25 @@ func TestGitHubConnectionUsesSameManagedSurfaceForBothHarnesses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			self, err := os.Executable()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := setup.Apply(p, self); err != nil {
-				t.Fatal(err)
-			}
-
-			calls := 0
-			client := github.NewClient(&http.Client{Transport: mcpRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-				calls++
-				if request.Header.Get("Authorization") != "" {
-					t.Fatal("managed GitHub request included authorization")
-				}
-				if calls == 1 {
-					return mcpResponse(http.StatusInternalServerError, "sensitive upstream failure"), nil
-				}
-				return mcpResponse(http.StatusOK, `{"full_name":"acme/widgets","description":null,"html_url":"https://github.com/acme/widgets","default_branch":"main","archived":false,"fork":false,"open_issues_count":1,"updated_at":"2026-08-06T00:00:00Z"}`), nil
-			})})
 			input := strings.Join([]string{
 				`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
 				`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"github__get-repository","arguments":{"owner":"acme","repo":"widgets"}}}`,
-				`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"github__get-repository","arguments":{"owner":"acme","repo":"widgets"}}}`,
 			}, "\n") + "\n"
 			var output, audit bytes.Buffer
-			if err := serve(root, root, harness, strings.NewReader(input), &output, &audit, client); err != nil {
+			if err := serveRequestsWithFriction(p, nil, &stubFrictionRecorder{}, strings.NewReader(input), &output, &audit); err != nil {
 				t.Fatal(err)
 			}
 			responses := decodeLines(t, output.String())
 			tools := responses[0]["result"].(map[string]any)["tools"].([]any)
-			gotNames := make([]string, len(tools))
-			for index, tool := range tools {
-				definition := tool.(map[string]any)
-				gotNames[index] = definition["name"].(string)
-				if index > 0 && !strings.Contains(definition["description"].(string), "Search public GitHub project context.") {
-					t.Fatalf("connection description missing from %#v", definition)
-				}
+			if len(tools) != 1 || tools[0].(map[string]any)["name"] != "echo" {
+				t.Fatalf("managed tools retained superseded GitHub surface: %#v", tools)
 			}
-			wantNames := []string{"echo", github.GetRepository, github.ListIssues, github.GetIssue}
-			if strings.Join(gotNames, ",") != strings.Join(wantNames, ",") {
-				t.Fatalf("managed tools = %v, want %v", gotNames, wantNames)
-			}
-			if responses[1]["result"].(map[string]any)["isError"] != true || responses[2]["result"].(map[string]any)["isError"] != false {
-				t.Fatalf("failed call did not leave MCP service usable: %#v", responses)
-			}
-			if calls != 2 {
-				t.Fatalf("GitHub calls = %d, want 2", calls)
-			}
-			log := audit.String()
-			if strings.Contains(log, "acme") || strings.Contains(log, "widgets") || strings.Contains(log, "sensitive") || !strings.Contains(log, "tool=github__get-repository") {
-				t.Fatalf("unsafe or incomplete audit = %q", log)
+			if responses[1]["result"].(map[string]any)["isError"] != true || !strings.Contains(responses[1]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string), "invalid managed tool call") {
+				t.Fatalf("superseded managed GitHub call was accepted: %#v", responses[1])
 			}
 		})
 	}
 }
-
-type mcpRoundTripFunc func(*http.Request) (*http.Response, error)
 
 type stubFrictionRecorder struct {
 	recorded bool
@@ -250,14 +210,6 @@ func (recorder *stubFrictionRecorder) Record(_ *project.Project, note string) bo
 	recorder.calls++
 	recorder.note = note
 	return recorder.recorded
-}
-
-func (function mcpRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
-	return function(request)
-}
-
-func mcpResponse(status int, body string) *http.Response {
-	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 }
 
 func testAgent(t *testing.T) string {

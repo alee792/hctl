@@ -23,6 +23,7 @@ import (
 	"hctl/internal/harness"
 	"hctl/internal/interaction"
 	"hctl/internal/project"
+	"hctl/internal/worktree"
 )
 
 const (
@@ -47,6 +48,7 @@ type Config struct {
 	MaxActive   int
 	Audit       io.Writer
 	Executable  string
+	NativeMCP   worktree.NativeMCPResolver
 }
 
 type channelController interface {
@@ -215,7 +217,7 @@ func (r *Runtime) startController() error {
 	}
 	channelController, err := controller.New(r.ctx, controller.Config{
 		Project: r.project, Driver: r.driver, TurnTimeout: r.config.TurnTimeout, IdleTimeout: r.config.IdleTimeout,
-		MaxResident: r.config.MaxResident, MaxActive: r.config.MaxActive, Executable: r.config.Executable,
+		MaxResident: r.config.MaxResident, MaxActive: r.config.MaxActive, Executable: r.config.Executable, NativeMCP: r.config.NativeMCP,
 		Audit: r.config.Audit, AuditPrefix: "Discord",
 		Interactions:    r,
 		InitialSurfaces: []controller.InitialSurface{{SurfaceID: r.config.Runtime.AllowedChannelID, ConversationID: conversationID(r.config.Runtime.ApplicationID, r.config.Runtime.AllowedChannelID)}},

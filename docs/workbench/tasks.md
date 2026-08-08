@@ -17,24 +17,28 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### [GitHub #76](https://github.com/alee792/hctl/issues/76) — Install and selectively prepare process-isolated integration packages
+### Verify integration epics [#74](https://github.com/alee792/hctl/issues/74), [#64](https://github.com/alee792/hctl/issues/64), and [#81](https://github.com/alee792/hctl/issues/81)
 
-Implement the capability-agnostic install, owner-controlled shared cache,
-offline lookup, lifecycle CLI, and selective preparation boundary over the
-merged package contract.
+After #85 merges, verify that each epic accurately links its merged
+implementation evidence and completion criteria, then close or update it to
+match tracker reality. Do not infer completion from an open pull request.
 
-## Ordered next
+## Pending merge evidence
 
-Follow the dependency graph below. Tasks on the same frontier may run
-concurrently only in isolated worktrees with explicit ownership; every task
-must adapt to its merged predecessors.
+### [GitHub #85](https://github.com/alee792/hctl/issues/85) — Complete the Discord extraction and remove vendor dependencies from hctl core
 
-1. After #75: #76, #65, and #82.
-2. After #65 and #76: #66. After #76 and #82: #83.
-3. After #65 and #66: #67. After #82 and #83: #84.
-4. After #67: #71. After #84: #85.
-5. After #71: #72.
-6. After all implementation issues: verify epics #74, #64, and #81.
+**Candidate outcome:** Delete the retired in-process Discord transport and root
+credential implementation, move all remaining vendor-profile ownership to the
+separate adapter, remove DiscordGo, WebSocket, keyring, and Discord-only
+transitives from the root module, and enforce the boundary against root source,
+import metadata, and binary metadata. Preserve the installed
+setup/status/remove/run journey through the external process host.
+
+**Candidate evidence:** The issue branch adds an agent-bound immutable staged
+adapter descriptor, positive Discord and negative Discord-free selective
+closure proof, exact installed CLI operation-mode proof, external Claude and
+Codex conversation coverage, and separate official-adapter build/package tests.
+Merge commit and final gate evidence remain pending the issue pull request.
 
 ## Completed
 

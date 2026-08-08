@@ -23,10 +23,9 @@ dependencies and responsibility. It is not an operating-system sandbox and it
 does not hide a credential from a trusted adapter or another process running as
 the same user.
 
-This record defines the contract used by the Discord extraction. The generic
-host now implements it and production channel routing selects the installed
-external adapter. The old in-process implementation remains only as rollback
-code until the separate dependency-removal delivery.
+This record defines the contract used by the completed Discord extraction. The
+generic host implements it and production channel routing selects the installed
+external adapter. Hctl core contains no in-process Discord implementation.
 
 ## Package capability
 
@@ -311,12 +310,11 @@ seam.
   malformed/oversized failure without credentials or a vendor SDK.
 - A second no-op fixture uses the same protocol without Discord imports,
   showing that the seam is capability-shaped rather than vendor-shaped.
-- Discord extraction can preserve the literal
+- Discord extraction preserves the literal
   `channels/discord.md` setup/status/remove/run journey while moving SDK and
   credential ownership out of hctl's root module.
-- Production does not fall back to the retained in-process Discord adapter.
-  Its code remains temporarily for rollback and is removed by the separate
-  dependency-cutover delivery.
+- Production has no in-process Discord adapter or vendor dependency to fall
+  back to; rollback requires a previous complete hctl binary.
 - TCP transports, public sockets, dynamic libraries, arbitrary plugins,
   brokered credentials, hosted adapters, remote channel protocols, and a
   universal integration runtime remain out of scope.

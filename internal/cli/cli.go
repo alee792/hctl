@@ -68,7 +68,7 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 	case "run":
 		return runAgent(args[1:], input, output, stderr, self)
 	case "channel":
-		return runChannel(args[1:], input, output, stderr)
+		return runChannel(args[1:], input, output, stderr, self)
 	case "schedule":
 		return runSchedule(args[1:], output, stderr, self)
 	case "mcp":
@@ -503,13 +503,13 @@ func (d *currentSetupDriver) OpenProject(ctx context.Context, p *project.Project
 	return d.Driver.Open(ctx, request)
 }
 
-func runChannel(args []string, input io.Reader, output, stderr io.Writer) error {
+func runChannel(args []string, input io.Reader, output, stderr io.Writer, self string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runChannelContext(ctx, args, input, output, stderr)
+	return runChannelContext(ctx, args, input, output, stderr, self)
 }
 
-func runChannelContext(ctx context.Context, args []string, input io.Reader, output, stderr io.Writer) error {
+func runChannelContext(ctx context.Context, args []string, input io.Reader, output, stderr io.Writer, self string) error {
 	if len(args) < 3 || args[1] != "discord" || (args[0] != "setup" && args[0] != "status" && args[0] != "remove") {
 		return errors.New("usage: hctl channel <setup|status|remove> discord AGENT [--profile NAME] [--config PATH]")
 	}
@@ -531,13 +531,9 @@ func runChannelContext(ctx context.Context, args []string, input io.Reader, outp
 	if err != nil {
 		return err
 	}
-	store, err := integration.NewDefaultStore()
+	_, resolved, err := resolveChannelAdapter(ctx, p, self)
 	if err != nil {
 		return err
-	}
-	resolved, err := store.ResolveChannelAdapter(ctx, "discord")
-	if err != nil {
-		return discordAdapterRemedy(err, args[2])
 	}
 	mode := map[string]integration.ChannelAdapterMode{"setup": integration.ChannelAdapterSetup, "status": integration.ChannelAdapterStatus, "remove": integration.ChannelAdapterRemove}[args[0]]
 	launch, err := resolved.LaunchDescriptor(mode, profile)
@@ -645,7 +641,14 @@ func discordAdapterRemedy(err error, agent string) error {
 	return fmt.Errorf("discord channel adapter is unavailable: %w; install and enable the exact hctl-discord package, then run hctl channel setup discord %s", err, agent)
 }
 
-func resolveChannelAdapter(ctx context.Context, p *project.Project) (*integration.Store, integration.ChannelAdapterResolution, error) {
+func resolveChannelAdapter(ctx context.Context, p *project.Project, self string) (*integration.Store, integration.ChannelAdapterResolution, error) {
+	if path := stagedChannelAdapterPath(self); path != "" {
+		resolved, err := integration.LoadStagedChannelAdapter(path, p.AgentID, p.SourceFingerprint, "discord")
+		if err != nil {
+			return nil, integration.ChannelAdapterResolution{}, err
+		}
+		return nil, resolved, nil
+	}
 	store, err := integration.NewDefaultStore()
 	if err != nil {
 		return nil, integration.ChannelAdapterResolution{}, err
@@ -657,18 +660,24 @@ func resolveChannelAdapter(ctx context.Context, p *project.Project) (*integratio
 	return store, resolved, nil
 }
 
-func recordChannelConsumption(ctx context.Context, p *project.Project) error {
+func recordChannelConsumption(ctx context.Context, p *project.Project, self string) error {
 	if p.DiscordChannel == nil {
 		return nil
 	}
-	store, resolved, err := resolveChannelAdapter(ctx, p)
+	store, resolved, err := resolveChannelAdapter(ctx, p, self)
 	if err != nil {
 		return err
+	}
+	if store == nil {
+		return nil
 	}
 	return store.RecordConsumption(ctx, resolved.Selection.PackageID, p.AgentID, p.Name, []string{resolved.Selection.Capability.ID})
 }
 
 func verifyChannelConsumption(ctx context.Context, store *integration.Store, resolved integration.ChannelAdapterResolution, p *project.Project) error {
+	if store == nil {
+		return nil
+	}
 	consumers, err := store.Consumers(ctx, resolved.Selection.PackageID)
 	if err != nil {
 		return err
@@ -679,6 +688,35 @@ func verifyChannelConsumption(ctx context.Context, store *integration.Store, res
 		}
 	}
 	return errors.New("channel-adapter generated state is stale or missing; run hctl apply again before hctl run")
+}
+
+// stagedChannelAdapterPath honors the generated descriptor only when it is at
+// the fixed location adjacent to the running staged hctl binary. An ambient
+// value cannot redirect a normal direct installation to arbitrary code.
+func stagedChannelAdapterPath(self string) string {
+	configured := os.Getenv(integration.StagedChannelAdapterEnvironment)
+	if configured == "" {
+		return ""
+	}
+	executable, err := resolvedSelf(self)
+	if err != nil {
+		return ""
+	}
+	expected, err := filepath.Abs(filepath.Join(filepath.Dir(executable), "..", "integrations", "channel-adapter.json"))
+	if err != nil {
+		return ""
+	}
+	configured, err = filepath.Abs(configured)
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(configured); err == nil {
+		configured = resolved
+	}
+	if filepath.Clean(configured) != filepath.Clean(expected) {
+		return ""
+	}
+	return expected
 }
 
 func runMCP(args []string, input io.Reader, output, stderr io.Writer) error {
@@ -724,7 +762,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if p.DiscordChannel != nil {
 		resolveContext, cancelResolve := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancelResolve()
-		if _, _, err := resolveChannelAdapter(resolveContext, p); err != nil {
+		if _, _, err := resolveChannelAdapter(resolveContext, p, self); err != nil {
 			return err
 		}
 	}
@@ -757,7 +795,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	}
 	recordContext, cancelRecord := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelRecord()
-	if err := recordChannelConsumption(recordContext, p); err != nil {
+	if err := recordChannelConsumption(recordContext, p, self); err != nil {
 		return err
 	}
 	for _, diagnostic := range result.Diagnostics {
@@ -844,7 +882,7 @@ func runStage(args []string, output, stderr io.Writer, self string) error {
 		return err
 	}
 	var integrationStore *integration.Store
-	if p.GitHubConnection != nil {
+	if p.GitHubConnection != nil || p.DiscordChannel != nil {
 		integrationStore, err = integration.NewDefaultStore()
 		if err != nil {
 			return err
@@ -929,7 +967,7 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 	}
 	resolveCtx, cancelResolve := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelResolve()
-	store, resolved, err := resolveChannelAdapter(resolveCtx, p)
+	store, resolved, err := resolveChannelAdapter(resolveCtx, p, self)
 	if err != nil {
 		return err
 	}
@@ -1000,7 +1038,7 @@ func ensureAppliedForPolicyContext(ctx context.Context, p *project.Project, self
 	}
 	recordContext, cancelRecord := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelRecord()
-	if err := recordChannelConsumption(recordContext, p); err != nil {
+	if err := recordChannelConsumption(recordContext, p, self); err != nil {
 		return err
 	}
 	for _, diagnostic := range result.Diagnostics {

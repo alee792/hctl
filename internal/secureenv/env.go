@@ -19,6 +19,7 @@ func Child() []string {
 
 func privateRuntimeEntry(entry string) bool {
 	return strings.HasPrefix(entry, "HCTL_DISCORD_TOKEN=") ||
+		strings.HasPrefix(entry, "HCTL_CHANNEL_ADAPTER_DESCRIPTOR=") ||
 		strings.HasPrefix(entry, "HCTL_CLAUDE_DEFERRED_BROKER=")
 }
 

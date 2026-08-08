@@ -619,6 +619,103 @@ func TestDiscordChannelJourneyRequiresInstalledAdapterWithoutSourceMutation(t *t
 	}
 }
 
+func TestInstalledDiscordAdapterSetupStatusRemoveJourneyUsesExactModes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "operations.log")
+	t.Setenv("HCTL_OPERATION_LOG", logPath)
+	t.Setenv("HCTL_DISCORD_TOKEN", "fake-adapter-only-token")
+	// A direct hctl invocation must ignore an arbitrary ambient descriptor
+	// path and continue to use the operator-installed shared store.
+	attackerDescriptor := filepath.Join(t.TempDir(), "channel-adapter.json")
+	writeCLIFile(t, attackerDescriptor, "{}\n", 0o600)
+	t.Setenv(integration.StagedChannelAdapterEnvironment, attackerDescriptor)
+	payload := []byte(`#!/bin/sh
+operation=$1
+profile=$3
+token=absent
+[ -n "${HCTL_DISCORD_TOKEN-}" ] && token=present
+printf '%s profile=%s token=%s descriptor=%s\n' "$operation" "$profile" "$token" "${HCTL_CHANNEL_ADAPTER_DESCRIPTOR-unset}" >> "$HCTL_OPERATION_LOG"
+status=ready
+[ "$operation" = remove ] && status=removed
+printf '{"schema_version":1,"operation":"%s","profile_id":"%s","status":"%s","identity":"fixture-bot"}\n' "$operation" "$profile" "$status"
+`)
+	installCLIChannelAdapterPayload(t, store, payload)
+	source := t.TempDir()
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Installed adapter journey.\n---\n\nBe concise.\n", 0o644)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output, stderr bytes.Buffer
+	for _, operation := range []string{"setup", "status", "remove"} {
+		output.Reset()
+		if err := Run([]string{"channel", operation, "discord", source}, strings.NewReader(""), &output, &stderr, self); err != nil {
+			t.Fatalf("channel %s: %v; stderr=%s", operation, err, stderr.String())
+		}
+		if !strings.Contains(output.String(), "operation="+operation+" profile=default") {
+			t.Fatalf("channel %s output = %q", operation, output.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(source, "channels", "discord.md")); err != nil {
+		t.Fatalf("setup did not create portable channel source: %v", err)
+	}
+	log := readCLIFile(t, logPath)
+	for _, operation := range []string{"setup", "status", "remove"} {
+		if !strings.Contains(log, operation+" profile=default token=present descriptor=unset") {
+			t.Fatalf("exact %s adapter mode or environment boundary missing:\n%s", operation, log)
+		}
+	}
+	if strings.Contains(log, "fake-adapter-only-token") || strings.Contains(log, attackerDescriptor) {
+		t.Fatalf("adapter operation evidence retained sensitive or redirecting value: %s", log)
+	}
+}
+
+func TestStagedDiscordAdapterResolutionIsAgentBoundAndOffline(t *testing.T) {
+	source := t.TempDir()
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Staged adapter resolution.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "channels", "discord.md"), "---\nmode: ambient\n---\n\nParticipate when useful.\n", 0o644)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := integration.NewStore(t.TempDir(), nil)
+	installCLIChannelAdapter(t, store)
+	resolved, err := store.ResolveChannelAdapter(context.Background(), "discord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagedRoot := t.TempDir()
+	artifacts, err := store.StageArtifacts(context.Background(), resolved.Selection.PackageID, []string{resolved.Selection.Artifact.ID}, stagedRoot)
+	if err != nil || len(artifacts) != 1 {
+		t.Fatalf("StageArtifacts() = %#v, %v", artifacts, err)
+	}
+	descriptorData, err := integration.EncodeStagedChannelAdapter(p.AgentID, p.SourceFingerprint, resolved, artifacts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor := filepath.Join(stagedRoot, "opt", "hctl", "integrations", "channel-adapter.json")
+	writeCLIFile(t, descriptor, string(descriptorData), 0o444)
+	self := filepath.Join(stagedRoot, "opt", "hctl", "bin", "hctl")
+	writeCLIFile(t, self, "#!/bin/sh\nexit 0\n", 0o755)
+	t.Setenv(integration.StagedChannelAdapterEnvironment, descriptor)
+	if err := store.SetEnabled(context.Background(), resolved.Selection.PackageID, false); err != nil {
+		t.Fatal(err)
+	}
+	selectedStore, staged, err := resolveChannelAdapter(context.Background(), p, self)
+	if err != nil || selectedStore != nil || staged.Selection.ManifestSHA256 != resolved.Selection.ManifestSHA256 {
+		t.Fatalf("staged resolve = store=%v resolution=%#v error=%v", selectedStore, staged, err)
+	}
+	if _, err := integration.LoadStagedChannelAdapter(descriptor, p.AgentID, strings.Repeat("f", 64), "discord"); err == nil || !strings.Contains(err.Error(), "does not match this agent") {
+		t.Fatalf("stale staged source error = %v", err)
+	}
+}
+
 func TestAdapterProfileSelectionPreservesAgentBindingAndLegacyFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1425,7 +1522,11 @@ func writeCLIGitHubPackage(t *testing.T, packageVersion string, payload []byte) 
 
 func installCLIChannelAdapter(t *testing.T, store *integration.Store) {
 	t.Helper()
-	payload := []byte("#!/bin/sh\nexit 0\n")
+	installCLIChannelAdapterPayload(t, store, []byte("#!/bin/sh\nexit 0\n"))
+}
+
+func installCLIChannelAdapterPayload(t *testing.T, store *integration.Store, payload []byte) {
+	t.Helper()
 	digest := sha256.Sum256(payload)
 	checksum := hex.EncodeToString(digest[:])
 	artifactID := runtime.GOOS + "-" + runtime.GOARCH

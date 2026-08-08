@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -195,6 +196,85 @@ func TestCreateSelectivelyStagesGitHubNativeMCPClosure(t *testing.T) {
 	}
 }
 
+func TestCreateSelectivelyStagesDiscordAdapterAndOmitsItWithoutChannel(t *testing.T) {
+	const fakeToken = "conspicuous-stage-fake-discord-token"
+	t.Setenv("HCTL_DISCORD_TOKEN", fakeToken)
+	source := filepath.Join(t.TempDir(), "discord-agent")
+	writeTestFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Discord staged test agent.\n---\n\nBe concise.\n", 0o644)
+	writeTestFile(t, filepath.Join(source, "channels", "discord.md"), "---\nmode: ambient\n---\n\nParticipate in review work.\n", 0o644)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := integration.NewStore(t.TempDir(), nil)
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: testDiscordPackage(t), Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	hctl := filepath.Join(bin, "hctl")
+	harness := filepath.Join(bin, "codex")
+	writeTestFile(t, hctl, "#!/bin/sh\nexit 0\n", 0o755)
+	writeTestFile(t, harness, "#!/bin/sh\necho 'codex-cli 1.2.3'\n", 0o755)
+	output := filepath.Join(t.TempDir(), "staged")
+	created, err := Create(context.Background(), Request{Project: p, Output: output, HCTLExecutable: hctl, HarnessExecutable: harness, HarnessVersion: "1.2.3", IntegrationStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor := filepath.Join(output, "opt", "hctl", "integrations", "channel-adapter.json")
+	if created.Manifest.Agent.ID == p.AgentID {
+		t.Fatal("staged agent identity did not relocate to the canonical runtime source")
+	}
+	resolved, err := integration.LoadStagedChannelAdapter(descriptor, created.Manifest.Agent.ID, created.Manifest.Agent.SourceFingerprint, "discord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := resolved.LaunchDescriptor(integration.ChannelAdapterRuntime, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(launch.Command, launch.Arguments...)
+	command.Dir = launch.WorkingDirectory
+	result, err := command.Output()
+	if err != nil || string(result) != "adapter:run --stdio" {
+		t.Fatalf("staged adapter launch = %q, %v", result, err)
+	}
+	entrypoint := readTestFile(t, filepath.Join(output, "opt", "hctl", "bin", "agent-entrypoint"))
+	if !bytes.Contains(entrypoint, []byte("export "+integration.StagedChannelAdapterEnvironment+"=/opt/hctl/integrations/channel-adapter.json")) {
+		t.Fatalf("Discord staged entrypoint omitted adapter descriptor: %s", entrypoint)
+	}
+	if err := filepath.Walk(output, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr == nil && bytes.Contains(data, []byte(fakeToken)) {
+			t.Fatalf("Discord credential entered staged file %s", path)
+		}
+		return readErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.RemoveAll(filepath.Join(source, "channels")); err != nil {
+		t.Fatal(err)
+	}
+	withoutDiscord, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutOutput := filepath.Join(t.TempDir(), "staged-without-discord")
+	if _, err := Create(context.Background(), Request{Project: withoutDiscord, Output: withoutOutput, HCTLExecutable: hctl, HarnessExecutable: harness, HarnessVersion: "1.2.3", IntegrationStore: store}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(withoutOutput, "opt", "hctl", "integrations")); !os.IsNotExist(err) {
+		t.Fatalf("Discord-free counterpart staged integration artifacts: %v", err)
+	}
+	withoutEntrypoint := readTestFile(t, filepath.Join(withoutOutput, "opt", "hctl", "bin", "agent-entrypoint"))
+	if bytes.Contains(withoutEntrypoint, []byte(integration.StagedChannelAdapterEnvironment)) {
+		t.Fatalf("Discord-free entrypoint retained staged adapter locator: %s", withoutEntrypoint)
+	}
+}
+
 func testGitHubPackage(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -232,6 +312,37 @@ func testGitHubPackage(t *testing.T) string {
 	}
 	writeTestFile(t, filepath.Join(root, "integration.json"), string(manifest)+"\n", 0o600)
 	writeTestFile(t, filepath.Join(root, "payload", "github-mcp-server"), string(payload), 0o600)
+	return root
+}
+
+func testDiscordPackage(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	payload := []byte("#!/bin/sh\nprintf 'adapter:%s' \"$*\"\n")
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "hctl-discord", "version": "1.0.0", "name": "Fake Discord adapter", "description": "Credential-free staged channel fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://example.invalid/hctl-discord", "revision": "fixture-v1"},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary",
+			"source": map[string]any{"kind": "package", "path": "payload/hctl-discord"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "bin/hctl-discord", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "channel-adapter", "version": 1, "id": "discord", "channel_kind": "discord", "artifacts": []string{artifactID}, "executable": "bin/hctl-discord",
+			"runtime": map[string]any{"arguments": []string{"run", "--stdio"}}, "setup": map[string]any{"arguments": []string{"setup"}}, "status": map[string]any{"arguments": []string{"status"}}, "remove": map[string]any{"arguments": []string{"remove"}},
+			"protocol": map[string]any{"minimum": 1, "before": 2}, "profile_selector": "opaque-id-v1", "features": []string{"typing", "replies", "edits", "reactions", "attachments", "interactive-components", "text-fallback"},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(root, "integration.json"), string(manifest)+"\n", 0o600)
+	writeTestFile(t, filepath.Join(root, "payload", "hctl-discord"), string(payload), 0o600)
 	return root
 }
 

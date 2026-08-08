@@ -7,10 +7,11 @@ import (
 
 func TestChildRemovesDiscordToken(t *testing.T) {
 	t.Setenv("HCTL_DISCORD_TOKEN", "do-not-inherit")
+	t.Setenv("HCTL_CHANNEL_ADAPTER_DESCRIPTOR", "/opt/hctl/integrations/channel-adapter.json")
 	t.Setenv("HCTL_SAFE_TEST", "retained")
 	t.Setenv("HCTL_CLAUDE_DEFERRED_BROKER", "private-broker")
 	joined := strings.Join(Child(), "\n")
-	if strings.Contains(joined, "do-not-inherit") || strings.Contains(joined, "private-broker") || !strings.Contains(joined, "HCTL_SAFE_TEST=retained") {
+	if strings.Contains(joined, "do-not-inherit") || strings.Contains(joined, "CHANNEL_ADAPTER_DESCRIPTOR") || strings.Contains(joined, "private-broker") || !strings.Contains(joined, "HCTL_SAFE_TEST=retained") {
 		t.Fatalf("sanitized environment = %q", joined)
 	}
 }

@@ -472,8 +472,14 @@ credential-redacted stderr, signal-aware operation process-tree cancellation,
 real-terminal foreground ownership and restoration, startup pipe backpressure,
 pending recovery responses behind replay, literal overlapping conversations,
 MaxResident=1 native thread resume, non-evicting reply-target saturation,
-interprocess-safe selection updates, and bounded forced cleanup. #85 removes
-the retained old code and Discord-only root dependencies.
+interprocess-safe selection updates, and bounded forced cleanup. The final
+cutover removed the retired in-process transport and credential packages,
+pruned root-owned vendor profile parsing to legacy selector names, and removed
+DiscordGo, WebSocket, keyring, and their Discord-only transitive requirements
+from the root module. A focused root `go.mod`, production-import, ordinary-test
+import, and binary metadata guard prevents those dependencies or the official
+adapter module from re-entering hctl core. The separate adapter package build
+runs only in an explicitly tagged cross-module acceptance gate.
 
 The transition continues to honor an explicit profile, the established
 profile-selection environment value, a generic owner-only per-agent/channel
@@ -481,8 +487,20 @@ selector written by successful setup, and legacy per-agent/default selector
 names without reading legacy Discord profile contents. Successful remove
 clears only its matching generic binding. Missing consumption
 evidence after an install/update has one deterministic remedy: reapply. A
-previous binary remains the rollback path until #85; the new host never
-silently routes production traffic back into the old implementation.
+previous complete binary is the only rollback path; the new host cannot route
+production traffic to an in-process implementation because none remains.
+
+Selective staging now carries a Discord adapter only for an agent that authors
+`channels/discord.md`. It copies the exact current-platform package closure and
+one immutable non-secret descriptor bound to agent, source, manifest,
+capability, and executable identities. The staged entrypoint selects that
+adjacent descriptor; arbitrary ambient paths cannot redirect a direct hctl
+invocation. A Discord-free counterpart contains no adapter directory or
+locator. Credential-free evidence launches the staged fake adapter offline,
+proves the exact installed setup/status/remove CLI modes, and drives external
+Claude and Codex conversations while preserving token and diagnostic
+redaction. The official adapter remains separately built, tested, licensed,
+packaged, installed, verified, and staged from its own Go module.
 
 The package CLI now requires explicit operator
 trust for local directory/archive installation and exact selected updates,

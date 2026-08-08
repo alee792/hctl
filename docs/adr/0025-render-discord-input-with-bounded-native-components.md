@@ -6,12 +6,15 @@
   [ADR 0022](0022-gate-managed-channel-input-at-the-dispatcher.md),
   [ADR 0023](0023-continue-codex-input-in-a-new-turn.md), and
   [ADR 0024](0024-resume-claude-channel-input-with-native-tool-deferral.md)
+- Adapter ownership extracted by:
+  [ADR 0033](0033-package-discord-as-an-external-channel-adapter.md)
 
 ## Decision
 
-The built-in Discord adapter implements the transport-neutral
-`interaction.Renderer` seam. It advertises top-level request kinds separately
-from field kinds that can appear inside a native form. The first adapter renders
+The hctl process host implements the transport-neutral `interaction.Renderer`
+seam and projects each render intent into the bounded semantic channel-adapter
+protocol. The external `hctl-discord` adapter advertises top-level request kinds
+separately from field kinds that can appear inside a native form. It renders
 confirmations, non-freeform choices, text, and text-only forms of at most five
 fields. Confirmations and small single choices use buttons, larger or multiple
 choices use string selects, and text or text-only forms use an Answer button
@@ -50,14 +53,15 @@ scheduled only after that attempt. An acknowledgement failure does not roll
 back or repeat the answer. The Answer button only opens a modal and is not a
 final answer.
 
-DiscordGo remains at v0.29 and this implementation uses its stable action row,
-button, string select, modal, and text input structures. Raw Discord callback
-payloads and tokens never enter dispatcher state, model input, or audit.
+DiscordGo remains at v0.29 inside the separate adapter module, which uses its
+stable action row, button, string select, modal, and text input structures. Raw
+Discord callback payloads and tokens never cross the protocol into dispatcher
+state, model input, or audit.
 
 ## Consequences
 
-- Another channel can implement the same renderer and answer interface without
-  importing Discord types or reproducing the durable lifecycle.
+- Another channel adapter can use the same semantic protocol without importing
+  Discord types or reproducing the durable lifecycle.
 - The semantic contract stays intentionally smaller than Block Kit, A2UI, or
   arbitrary model-authored layouts.
 - Delivery-pending guild interactions are reconstructable on restart. DM

@@ -17,30 +17,38 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### Verify integration epics [#74](https://github.com/alee792/hctl/issues/74), [#64](https://github.com/alee792/hctl/issues/64), and [#81](https://github.com/alee792/hctl/issues/81)
+No agent-ready work remains in the process-isolated integration initiative.
 
-After #85 merges, verify that each epic accurately links its merged
-implementation evidence and completion criteria, then close or update it to
-match tracker reality. Do not infer completion from an open pull request.
+## Ready for human
 
-## Pending merge evidence
+### [GitHub #81](https://github.com/alee792/hctl/issues/81) — Run the authorized live external-Discord acceptance
+
+The package, protocol, orchestration, dependency cutover, credential-free
+regressions, and Linux image evidence are merged. The epic remains open only
+because its literal completion criteria require a separately authorized live
+pass against the external `hctl-discord` executable. Follow the external-adapter
+[live procedure](discord-live-acceptance.md#external-adapter-live-procedure)
+with a temporary least-privilege bot credential and retain only bounded
+redacted evidence.
+
+## Completed
 
 ### [GitHub #85](https://github.com/alee792/hctl/issues/85) — Complete the Discord extraction and remove vendor dependencies from hctl core
 
-**Candidate outcome:** Delete the retired in-process Discord transport and root
-credential implementation, move all remaining vendor-profile ownership to the
-separate adapter, remove DiscordGo, WebSocket, keyring, and Discord-only
-transitives from the root module, and enforce the boundary against root source,
-import metadata, and binary metadata. Preserve the installed
+**Outcome:** Deleted the retired in-process Discord transport and root
+credential implementation, moved all remaining vendor-profile ownership to the
+separate adapter, removed DiscordGo, WebSocket, keyring, and Discord-only
+transitives from the root module, and enforced the boundary against root source,
+import metadata, and binary metadata. Preserved the installed
 setup/status/remove/run journey through the external process host.
 
-**Candidate evidence:** The issue branch adds an agent-bound immutable staged
-adapter descriptor, positive Discord and negative Discord-free selective
-closure proof, exact installed CLI operation-mode proof, external Claude and
-Codex conversation coverage, and separate official-adapter build/package tests.
-Merge commit and final gate evidence remain pending the issue pull request.
-
-## Completed
+**Evidence:** Merged [PR #104](https://github.com/alee792/hctl/pull/104) adds an
+agent-bound immutable staged adapter descriptor, positive Discord and negative
+Discord-free selective closure proof, exact installed CLI operation-mode proof, external Claude and
+Codex conversation coverage, separate official-adapter build/package tests,
+and root dependency guards. Full repository and Linux image checks passed.
+The final audit closed package epic #74 and native GitHub epic #64; Discord
+epic #81 is accurately `ready-for-human` for its remaining live-only evidence.
 
 ### [GitHub #82](https://github.com/alee792/hctl/issues/82) — Define the versioned external channel-adapter capability and process protocol
 

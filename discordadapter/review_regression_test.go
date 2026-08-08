@@ -3,6 +3,7 @@ package discordadapter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -52,6 +53,24 @@ func TestNegotiatedFeatureAndSemanticLimitsAreEnforced(t *testing.T) {
 	}
 	if sent, _, _, _ := discord.snapshot(); len(sent) != 0 {
 		t.Fatal("negotiated rejection reached Discord")
+	}
+}
+
+func TestDirectSurfaceAdmissionRequiresDurableProfilePublication(t *testing.T) {
+	profiles := &memoryProfiles{profiles: map[string]Profile{"default": fixtureProfile()}, putErr: errors.New("save failed")}
+	dependencies := fixtureDependencies(&fakeDiscord{})
+	dependencies.Profiles = profiles
+	runtime, err := NewRuntime(io.Discard, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.profileID, runtime.profile = "default", fixtureProfile()
+	if runtime.rememberDirectSurface("777") || runtime.profileSnapshot().DirectChannelID != "" {
+		t.Fatal("failed direct-route persistence admitted the surface")
+	}
+	profiles.putErr = nil
+	if !runtime.rememberDirectSurface("777") || runtime.profileSnapshot().DirectChannelID != "777" {
+		t.Fatal("persisted direct route was not admitted")
 	}
 }
 
@@ -298,13 +317,13 @@ func TestInteractionStateHonorsOutstandingLimitAndExpires(t *testing.T) {
 	runtime.writer.setBounds(initialize.Limits.MaxFrameBytes, 1)
 	runtime.profile, runtime.client = fixtureProfile(), discord
 	first := confirmRequest()
-	if err := runtime.renderInteraction("host.interaction.1", first); err != nil {
-		t.Fatal(err)
+	if receipt := runtime.renderInteraction("host.interaction.1", first); receipt.Disposition != channeladapter.EffectExact {
+		t.Fatalf("first interaction receipt = %#v", receipt)
 	}
 	second := confirmRequest()
 	second.InteractionID = "interaction.2"
-	if err := runtime.renderInteraction("host.interaction.2", second); err == nil || !strings.Contains(err.Error(), "capacity") {
-		t.Fatalf("interaction capacity error = %v", err)
+	if receipt := runtime.renderInteraction("host.interaction.2", second); receipt.Disposition != channeladapter.EffectFailed || receipt.Failure.Code != "interaction_capacity" {
+		t.Fatalf("interaction capacity receipt = %#v", receipt)
 	}
 	runtime.mu.Lock()
 	interactions, handles := len(runtime.interactions), len(runtime.handles)
@@ -318,8 +337,8 @@ func TestInteractionStateHonorsOutstandingLimitAndExpires(t *testing.T) {
 		defer runtime.mu.Unlock()
 		return len(runtime.interactions) == 0 && len(runtime.handles) == 0
 	})
-	if err := runtime.renderInteraction("host.interaction.2", second); err != nil {
-		t.Fatalf("interaction admission after expiry = %v", err)
+	if receipt := runtime.renderInteraction("host.interaction.2", second); receipt.Disposition != channeladapter.EffectExact {
+		t.Fatalf("interaction admission after expiry = %#v", receipt)
 	}
 }
 
@@ -436,7 +455,7 @@ func TestReadyAndResumedBothReplayStablePendingEvents(t *testing.T) {
 	runtime, _ := NewRuntime(&output, fixtureDependencies(discord))
 	runtime.installHandlers(discord)
 	runtime.connectionTry = 1
-	eventID, err := runtime.writer.sendEvent("inbound:stable", channeladapter.InboundMessage{SourceID: "stable", Route: channeladapter.Route{Handle: "555"}, Message: channeladapter.MessageRef{Handle: "700"}, Author: channeladapter.Author{Handle: "333"}, Text: "pending"}, "")
+	eventID, err := runtime.writer.sendEvent("inbound:stable", channeladapter.InboundMessage{SourceID: "stable", Route: channeladapter.Route{Handle: "555"}, ConversationID: "discord-stable", SurfaceKind: channeladapter.SurfaceShared, SurfaceKey: strings.Repeat("a", 64), PrincipalKey: strings.Repeat("b", 64), Message: channeladapter.MessageRef{Handle: "700"}, Author: channeladapter.Author{Handle: "333"}, Text: "pending"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

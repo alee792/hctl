@@ -461,8 +461,13 @@ apply-time consumption, supervises bounded operation and runtime modes, and
 bridges normalized messages, controls, replies, interactions, dispositions,
 replay, reconnect, and shutdown into the existing controller. Production no
 longer falls back to the in-process adapter. Credential-free installed-package
-acceptance proves a complete apply, external handshake, durable turn, reply,
-replay, token-isolated harness environment, and graceful cleanup. #85 removes
+acceptance proves a complete apply, external handshake, two independently
+queued conversations, resident-pressure hibernation and resume, durable turns,
+replies, replay, token-isolated harness environments, and graceful cleanup.
+External-process regressions also prove semantic direct/shared identity,
+status/reset, interaction answer and cancellation, exact render receipt,
+delivered-interaction restore, ambiguous no-retry delivery, child failure,
+negotiated bounds, credential-redacted stderr, and bounded forced cleanup. #85 removes
 the retained old code and Discord-only root dependencies.
 
 The transition continues to honor an explicit profile, the established

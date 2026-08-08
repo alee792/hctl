@@ -417,7 +417,9 @@ adapter automatically. Missing, disabled, incompatible, ambiguous, or stale
 selection fails with an install, enable, setup, or reapply remedy and never
 falls back to the retained in-process code. The adapter serves the authorized
 user in one guild channel and DM. Each surface has
-independent durable dispatcher state. A transport-neutral channel controller
+independent durable dispatcher state. It is explicitly direct or shared and
+core receives only its stable conversation id plus hashed owner keys; vendor
+ids and payloads remain outside core. A transport-neutral channel controller
 owns surface registration, pending-turn correlation, complete-response
 buffering and control-result handling, typing readiness, terminal
 classification, status/reset delegation, and dispatcher lifecycle. The Discord
@@ -912,7 +914,9 @@ and non-secret profile data.
 Frames contain only closed semantic messages: opaque route/message/author
 handles, normalized inbound text and attachment descriptors, authorized
 status/reset requests and redacted results, activity and reply/edit/reaction
-intents, the existing bounded interactive request and normalized answer,
+intents, the existing bounded interactive request, an
+exact/ambiguous/failed render receipt, recovery-only restore, and normalized
+answer,
 attachment transfer authorization and bounded base64 chunks, exact/ambiguous/
 failed dispositions, connection lifecycle, classified diagnostics, event
 acknowledgement, and shutdown. Vendor payloads and SDK objects, credentials,
@@ -928,6 +932,8 @@ queue to 64 frames and 8 MiB, retained stderr to 64 KiB, and a
 setup/status/remove result to 16 KiB. Negotiation may lower those values.
 Ordinary commands and deliveries have 30-second deadlines, attachments 60
 seconds, and graceful shutdown five seconds before forced tree cleanup.
+The narrowed frame ceiling applies to reads and writes, and the narrowed
+outstanding ceiling bounds correlations and retained route/event state.
 
 An adapter keeps an event id and exact bytes stable until hctl acknowledges a
 durable acceptance, duplicate, or rejection. Exact same-content replay is
@@ -938,6 +944,15 @@ results, disconnects, deadlines, and post-write child exits are ambiguous and
 use the controller's existing uncertain/no-retry behavior. Malformed,
 oversized, unknown, wrong-direction, or uncorrelated protocol data terminates
 only the owning adapter runtime.
+
+At startup, the adapter advertises its bounded stable surfaces before the
+controller is constructed. Hctl reattaches durable interaction state before
+adapter replay: pending renders are issued once, while previously delivered
+interactions are restored without posting duplicate vendor UI. Shutdown stops
+admission, retires interaction UI, asks the adapter to drain, then applies
+independently bounded process-tree and controller cleanup. Retained stderr is
+capped, credential-redacted, control-cleaned, and protocol-shaped output is
+suppressed before terminating only that adapter runtime.
 
 Setup, status, and remove use exact package modes. Secret entry and credential
 storage occur inside the trusted adapter using its inherited operator terminal

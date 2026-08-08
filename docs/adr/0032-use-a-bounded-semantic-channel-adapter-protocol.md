@@ -93,6 +93,14 @@ adapter sends one correlated `ready` that can narrow those features and limits.
 No vendor connection is admitted to the controller before this exchange
 completes.
 
+`ready` may also declare the adapter's bounded startup surfaces so hctl can
+reattach durable work before accepting replay. Every surface carries an opaque
+route, a stable transport-neutral conversation id, an explicit `direct` or
+`shared` participation kind, and two lowercase SHA-256 owner keys. Later
+messages and controls repeat that semantic identity; changing it or reusing one
+conversation id for another route is fatal. Vendor ids and authorization
+material remain adapter-owned.
+
 Every frame has protocol version, a bounded stable frame id, a closed kind, an
 optional kind-governed correlation id, and exactly one strictly decoded
 payload. The version-1 union contains:
@@ -105,6 +113,8 @@ Adapter to hctl:
   decoding remains adapter-owned while hctl retains lifecycle ownership;
 - normalized interactive answer or cancellation tied to an hctl-issued
   request and stable semantic field/option ids;
+- an exact, ambiguous, or failed interaction-render receipt correlated to the
+  stable hctl interaction id;
 - exact, ambiguous, or failed delivery/attachment disposition;
 - connection states `connecting`, `ready`, `reconnecting`, `degraded`, and
   `closed`;
@@ -121,7 +131,8 @@ Hctl to adapter:
 - semantic reply/delivery intent tied to an opaque route and optional message
   reference;
 - the existing bounded confirm, choose-one, choose-many, text, date/time, or
-  form interaction and a separate cancellation;
+  form interaction, a recovery-only restore intent, and a separate
+  cancellation;
 - bounded attachment fetch or in-band delivery chunks with an explicit
   transfer id and maximum; and
 - shutdown.
@@ -140,6 +151,11 @@ answer, prompt, fallback, field, option, and text ceilings. Hctl remains the
 authority that validates and normalizes answers against the durable original
 request. The adapter cannot change cancellation, expiry, continuation,
 authorization, or ownership state.
+An exact render receipt marks the durable interaction delivered. An ambiguous
+or missing receipt is never retried. On restart, hctl publishes startup
+surfaces to the controller first, then restores already-delivered interactions
+without creating another vendor message and renders only work still durably
+pending; adapter input replay begins afterward.
 
 ## Credentials and authority
 
@@ -186,6 +202,13 @@ attachment transfers 60 seconds, and graceful shutdown five seconds followed
 by at most two seconds for forced tree cleanup. The process host may impose a
 smaller operation-specific deadline.
 
+The negotiated frame ceiling is installed on both decoder and encoder. The
+negotiated semantic text and attachment ceilings apply in their respective
+directions, while `max_outstanding` bounds live correlations, retained event
+receipts, remembered reply targets, startup surfaces, and newly admitted
+surfaces. Admission waits only to its operation deadline and never creates an
+unbounded goroutine or map.
+
 Neither side may silently drop, reorder, merge, or overwrite a semantic frame.
 When its bounded queue is full it stops admission and applies pipe
 backpressure. Failure to make progress before the applicable deadline is fatal
@@ -222,8 +245,13 @@ closed protocol version.
 
 A child exit before `ready` is startup failure. After readiness, non-effecting
 pending commands fail; a fully written pending effect is ambiguous as above.
-Hctl sends shutdown, stops new admission, drains already classified frames,
-then kills the complete process tree after the deadline. Adapter reconnect
+Hctl stops new admission, cancels adapter-owned interaction UI, sends shutdown,
+and then kills the complete process tree after the five-second deadline. Reap
+after a forced kill is independently bounded by two seconds, and controller
+cleanup has its own bounded drain so a stuck controller cannot retain the
+adapter process. Adapter stderr is capped at 64 KiB, strips unsafe controls,
+redacts inherited credential values, and suppresses protocol-shaped content
+instead of retaining it before terminating that adapter runtime. Adapter reconnect
 does not write dispatcher, session, worktree, capacity, or interaction state.
 Hctl's existing durable store remains the only writer.
 
@@ -256,8 +284,9 @@ seam.
 
 - A deterministic fake proves handshake, inbound input, reply, interaction
   answer, cancellation, status/reset delegation, reconnect, exact and ambiguous
-  delivery, attachments, shutdown, and malformed/oversized failure without
-  credentials or a vendor SDK.
+  delivery, delivered-interaction restore, concurrent conversation
+  hibernation/resume, attachments, child failure, bounded shutdown, and
+  malformed/oversized failure without credentials or a vendor SDK.
 - A second no-op fixture uses the same protocol without Discord imports,
   showing that the seam is capability-shaped rather than vendor-shaped.
 - Discord extraction can preserve the literal

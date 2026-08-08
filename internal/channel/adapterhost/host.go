@@ -63,6 +63,7 @@ type frameDecoder interface {
 }
 type frameEncoder interface {
 	Write(channeladapter.Envelope, channeladapter.Direction) error
+	SetMaxFrameBytes(int) error
 }
 type channelController interface {
 	Submit(context.Context, controller.Inbound) (dispatch.SubmissionResult, error)
@@ -70,20 +71,26 @@ type channelController interface {
 	Reset(string, string) error
 	AcceptInteraction(string, string, interaction.AnswerAttempt) (interaction.AnswerDisposition, error)
 	ContinueInteraction(string) error
+	PendingInteraction(string, string) (interaction.PendingInteraction, bool, error)
+	RenderInteraction(string, string) (bool, error)
 	Done() <-chan struct{}
 	Err() error
 	Close()
 }
 
 type Runtime struct {
-	config     Config
-	process    processHandle
-	decoder    frameDecoder
-	encoder    frameEncoder
-	controller channelController
-	features   []channeladapter.Feature
+	config      Config
+	process     processHandle
+	decoder     frameDecoder
+	encoder     frameEncoder
+	controller  channelController
+	features    []channeladapter.Feature
+	limits      channeladapter.Limits
+	surfaces    map[string]channeladapter.Surface
+	outstanding chan struct{}
+	closing     atomic.Bool
 
-	writeMu      sync.Mutex
+	writeGate    chan struct{}
 	next         atomic.Uint64
 	mu           sync.Mutex
 	pending      map[string]chan channeladapter.Envelope
@@ -94,14 +101,18 @@ type Runtime struct {
 	eventOrder   []string
 	err          error
 	done         chan struct{}
+	recoveryDone chan struct{}
 	closeOnce    sync.Once
 }
 
 type target struct {
 	route   channeladapter.Route
-	message channeladapter.MessageRef
+	message *channeladapter.MessageRef
 }
-type interactionTarget struct{ surface, conversation string }
+type interactionTarget struct {
+	interactionID, surface, conversation string
+	cancel                               context.CancelFunc
+}
 type eventReceipt struct{ digest string }
 type synchronizedWriter struct {
 	mu     sync.Mutex
@@ -162,11 +173,12 @@ func New(config Config) (*Runtime, error) {
 			return controller.New(ctx, config, delivery)
 		}
 	}
-	return &Runtime{config: config, pending: map[string]chan channeladapter.Envelope{}, interactions: map[string]interactionTarget{}, targets: map[string]target{}, events: map[string]eventReceipt{}, done: make(chan struct{})}, nil
+	return &Runtime{config: config, writeGate: make(chan struct{}, 1), pending: map[string]chan channeladapter.Envelope{}, interactions: map[string]interactionTarget{}, targets: map[string]target{}, surfaces: map[string]channeladapter.Surface{}, events: map[string]eventReceipt{}, done: make(chan struct{}), recoveryDone: make(chan struct{})}, nil
 }
 
 func (runtime *Runtime) Run(ctx context.Context) error {
-	stderr := &boundedWriter{remaining: channeladapter.MaxStderrBytes, writer: io.Discard}
+	stderr := newDiagnosticWriter(runtime.config.Audit, runtime.config.Environment)
+	stderr.onProtocolViolation = func() { runtime.fail(errors.New("channel-adapter emitted protocol-shaped stderr")) }
 	process, err := runtime.config.launchProcess(runtime.config.Launch, runtime.config.Environment, stderr)
 	if err != nil {
 		return err
@@ -182,7 +194,7 @@ func (runtime *Runtime) Run(ctx context.Context) error {
 		TurnTimeout: runtime.config.TurnTimeout, IdleTimeout: runtime.config.IdleTimeout,
 		MaxResident: runtime.config.MaxResident, MaxActive: runtime.config.MaxActive,
 		Executable: runtime.config.Executable, Audit: runtime.config.Audit,
-		AuditPrefix: "Channel adapter", Interactions: runtime,
+		AuditPrefix: "Channel adapter", Interactions: runtime, InitialSurfaces: runtime.initialSurfaces(),
 	}, runtime)
 	if err != nil {
 		runtime.forceClose()
@@ -190,6 +202,11 @@ func (runtime *Runtime) Run(ctx context.Context) error {
 	}
 	runtime.controller = controlled
 	go runtime.readLoop()
+	if err := runtime.recoverInteractions(ctx); err != nil {
+		runtime.Close()
+		return err
+	}
+	close(runtime.recoveryDone)
 	_, _ = fmt.Fprintf(runtime.config.Audit, "Channel adapter connected kind=%s profile=%s package=%s\n", runtime.config.Launch.ChannelKind, runtime.config.ProfileID, runtime.config.Launch.PackageID)
 	select {
 	case <-ctx.Done():
@@ -248,8 +265,27 @@ func (runtime *Runtime) handshake(ctx context.Context) error {
 	if err := runtime.decoder.SetMaxFrameBytes(ready.Limits.MaxFrameBytes); err != nil {
 		return err
 	}
+	if err := runtime.encoder.SetMaxFrameBytes(ready.Limits.MaxFrameBytes); err != nil {
+		return err
+	}
 	runtime.features = append([]channeladapter.Feature(nil), ready.Features...)
+	runtime.limits = ready.Limits
+	runtime.outstanding = make(chan struct{}, ready.Limits.MaxOutstanding)
+	for _, surface := range ready.Surfaces {
+		runtime.surfaces[surface.Route.Handle] = surface
+	}
 	return nil
+}
+
+func (runtime *Runtime) initialSurfaces() []controller.InitialSurface {
+	result := make([]controller.InitialSurface, 0, len(runtime.surfaces))
+	for _, surface := range runtime.surfaces {
+		result = append(result, controller.InitialSurface{SurfaceID: surface.Route.Handle, ConversationID: surface.ConversationID})
+	}
+	slices.SortFunc(result, func(left, right controller.InitialSurface) int {
+		return strings.Compare(left.SurfaceID, right.SurfaceID)
+	})
+	return result
 }
 
 func narrowLimits(value channeladapter.Limits) channeladapter.Limits {
@@ -289,25 +325,70 @@ func (runtime *Runtime) readWithTimeout(ctx context.Context, timeout time.Durati
 }
 
 func (runtime *Runtime) readLoop() {
-	for {
-		frame, err := runtime.decoder.Read(channeladapter.FromAdapter)
-		if err != nil {
-			runtime.fail(errors.New("channel-adapter protocol failed"))
-			return
+	type decoded struct {
+		frame channeladapter.Envelope
+		err   error
+	}
+	decodedFrames := make(chan decoded, 1)
+	stopDecode := make(chan struct{})
+	defer close(stopDecode)
+	go func() {
+		for {
+			frame, err := runtime.decoder.Read(channeladapter.FromAdapter)
+			select {
+			case decodedFrames <- decoded{frame: frame, err: err}:
+			case <-stopDecode:
+				return
+			}
+			if err != nil {
+				return
+			}
 		}
-		if runtime.routeResponse(frame) {
+	}()
+	recoveryDone := runtime.recoveryDone
+	recovered := recoveryDone == nil
+	deferred := make([]channeladapter.Envelope, 0)
+	for {
+		if recovered && len(deferred) > 0 {
+			frame := deferred[0]
+			deferred = deferred[1:]
+			if err := runtime.handle(frame); err != nil {
+				runtime.fail(err)
+				return
+			}
 			continue
 		}
-		if err := runtime.handle(frame); err != nil {
-			runtime.fail(err)
-			return
+		select {
+		case <-recoveryDone:
+			recovered = true
+			recoveryDone = nil
+		case result := <-decodedFrames:
+			if result.err != nil {
+				runtime.fail(errors.New("channel-adapter protocol failed"))
+				return
+			}
+			if runtime.routeResponse(result.frame) {
+				continue
+			}
+			if !recovered {
+				if len(deferred) >= runtime.limits.MaxOutstanding {
+					runtime.fail(errors.New("channel-adapter startup replay exceeded negotiated capacity"))
+					return
+				}
+				deferred = append(deferred, result.frame)
+				continue
+			}
+			if err := runtime.handle(result.frame); err != nil {
+				runtime.fail(err)
+				return
+			}
 		}
 	}
 }
 
 func (runtime *Runtime) routeResponse(frame channeladapter.Envelope) bool {
 	switch frame.Payload.(type) {
-	case *channeladapter.DeliveryResult, *channeladapter.AttachmentChunk, *channeladapter.AttachmentResult, *channeladapter.ShutdownComplete:
+	case *channeladapter.DeliveryResult, *channeladapter.InteractionReceipt, *channeladapter.AttachmentChunk, *channeladapter.AttachmentResult, *channeladapter.ShutdownComplete:
 	default:
 		return false
 	}
@@ -345,6 +426,16 @@ func (runtime *Runtime) handle(frame channeladapter.Envelope) error {
 }
 
 func (runtime *Runtime) inbound(frame channeladapter.Envelope, incoming channeladapter.InboundMessage) error {
+	if runtime.closing.Load() {
+		return errors.New("channel-adapter emitted input during shutdown")
+	}
+	if err := runtime.validateInboundLimits(incoming); err != nil {
+		return err
+	}
+	surface := channeladapter.Surface{Route: incoming.Route, ConversationID: incoming.ConversationID, Kind: incoming.SurfaceKind, SurfaceKey: incoming.SurfaceKey, PrincipalKey: incoming.PrincipalKey}
+	if err := runtime.registerSurface(surface); err != nil {
+		return err
+	}
 	duplicate, err := runtime.event(frame)
 	if err != nil {
 		return err
@@ -353,15 +444,16 @@ func (runtime *Runtime) inbound(frame channeladapter.Envelope, incoming channela
 		_, err = runtime.write(context.Background(), channeladapter.EventAck{Disposition: "duplicate"}, frame.ID, channeladapter.CommandTimeout)
 		return err
 	}
-	surface, conversation := incoming.Route.Handle, runtime.conversation(incoming.Route.Handle)
-	target := target{route: incoming.Route, message: incoming.Message}
+	surfaceID, conversation := incoming.Route.Handle, incoming.ConversationID
+	message := incoming.Message
+	target := target{route: incoming.Route, message: &message}
 	runtime.remember(incoming.SourceID, target)
 	attachments := make([]map[string]any, 0, len(incoming.Attachments))
 	for _, attachment := range incoming.Attachments {
 		attachments = append(attachments, map[string]any{"name": attachment.Name, "media_type": attachment.MediaType, "size": attachment.Size})
 	}
-	semantic, _ := json.Marshal(map[string]any{"channel": runtime.config.Launch.ChannelKind, "author": incoming.Author.Label, "text": incoming.Text, "attachments": attachments})
-	result, submitErr := runtime.controller.Submit(context.Background(), controller.Inbound{SurfaceID: surface, ConversationID: conversation, InputID: incoming.SourceID, Text: "Channel message (JSON):\n" + string(semantic), Target: target})
+	semantic, _ := json.Marshal(map[string]any{"channel": runtime.config.Launch.ChannelKind, "surface_kind": incoming.SurfaceKind, "direct": incoming.SurfaceKind == channeladapter.SurfaceDirect, "author": incoming.Author.Label, "text": incoming.Text, "attachments": attachments})
+	result, submitErr := runtime.controller.Submit(context.Background(), controller.Inbound{SurfaceID: surfaceID, ConversationID: conversation, InputID: incoming.SourceID, Text: "Channel message (JSON):\n" + string(semantic), Target: target})
 	if submitErr != nil {
 		_, _ = fmt.Fprintln(runtime.config.Audit, "Channel adapter admission status=rejected")
 	} else {
@@ -381,6 +473,13 @@ func (runtime *Runtime) inbound(frame channeladapter.Envelope, incoming channela
 }
 
 func (runtime *Runtime) control(frame channeladapter.Envelope, request channeladapter.ControlRequest) error {
+	if runtime.closing.Load() {
+		return errors.New("channel-adapter emitted control input during shutdown")
+	}
+	surface := channeladapter.Surface{Route: request.Route, ConversationID: request.ConversationID, Kind: request.SurfaceKind, SurfaceKey: request.SurfaceKey, PrincipalKey: request.PrincipalKey}
+	if err := runtime.registerSurface(surface); err != nil {
+		return err
+	}
 	duplicate, err := runtime.event(frame)
 	if err != nil {
 		return err
@@ -389,7 +488,7 @@ func (runtime *Runtime) control(frame channeladapter.Envelope, request channelad
 		_, err = runtime.write(context.Background(), channeladapter.EventAck{Disposition: "duplicate"}, frame.ID, channeladapter.CommandTimeout)
 		return err
 	}
-	conversation := runtime.conversation(request.Route.Handle)
+	conversation := request.ConversationID
 	result := channeladapter.ControlResult{Action: request.Action, Disposition: channeladapter.ControlExact}
 	if request.Action == channeladapter.ControlStatus {
 		status := runtime.controller.Status(conversation)
@@ -402,12 +501,53 @@ func (runtime *Runtime) control(frame channeladapter.Envelope, request channelad
 			result.Failure = channeladapter.Failure{Class: channeladapter.DiagnosticInternal, Code: "reset_failed"}
 		}
 	}
+	if request.Action == channeladapter.ControlReset && result.Disposition == channeladapter.ControlExact {
+		runtime.retireSurfaceInteractions(request.Route.Handle, true)
+	}
 	runtime.rememberEvent(frame)
 	if _, err := runtime.write(context.Background(), result, frame.ID, channeladapter.CommandTimeout); err != nil {
 		return err
 	}
 	_, err = runtime.write(context.Background(), channeladapter.EventAck{Disposition: "accepted"}, frame.ID, channeladapter.CommandTimeout)
 	return err
+}
+
+func (runtime *Runtime) validateInboundLimits(incoming channeladapter.InboundMessage) error {
+	if len([]byte(incoming.Text)) > runtime.limits.MaxTextBytes || len(incoming.Attachments) > runtime.limits.MaxAttachments {
+		return errors.New("channel-adapter inbound message exceeds negotiated limits")
+	}
+	var total int64
+	for _, attachment := range incoming.Attachments {
+		if attachment.Size > int64(runtime.limits.MaxAttachmentBytes) {
+			return errors.New("channel-adapter attachment exceeds negotiated limits")
+		}
+		total += attachment.Size
+		if total > int64(runtime.limits.MaxAttachmentBytes)*int64(runtime.limits.MaxAttachments) {
+			return errors.New("channel-adapter attachments exceed negotiated cumulative limits")
+		}
+	}
+	return nil
+}
+
+func (runtime *Runtime) registerSurface(surface channeladapter.Surface) error {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if existing, ok := runtime.surfaces[surface.Route.Handle]; ok {
+		if existing != surface {
+			return errors.New("channel-adapter changed stable surface identity")
+		}
+		return nil
+	}
+	if len(runtime.surfaces) >= runtime.limits.MaxOutstanding {
+		return errors.New("channel-adapter surface capacity exceeded negotiated limits")
+	}
+	for _, existing := range runtime.surfaces {
+		if existing.ConversationID == surface.ConversationID {
+			return errors.New("channel-adapter reused a conversation identity across surfaces")
+		}
+	}
+	runtime.surfaces[surface.Route.Handle] = surface
+	return nil
 }
 
 func (runtime *Runtime) interactionResult(frame channeladapter.Envelope, result channeladapter.InteractionResult) error {
@@ -425,6 +565,9 @@ func (runtime *Runtime) interactionResult(frame channeladapter.Envelope, result 
 	if !ok {
 		return errors.New("channel-adapter interaction result has unknown correlation")
 	}
+	if target.interactionID != result.InteractionID {
+		return errors.New("channel-adapter interaction answer changed stable identity")
+	}
 	answer := fromProtocolAnswer(result.Answer)
 	disposition, acceptErr := runtime.controller.AcceptInteraction(target.surface, target.conversation, interaction.AnswerAttempt{InteractionID: result.InteractionID, Answer: answer})
 	ack := "accepted"
@@ -433,12 +576,9 @@ func (runtime *Runtime) interactionResult(frame channeladapter.Envelope, result 
 	}
 	if acceptErr != nil {
 		ack = "rejected"
-	} else {
-		runtime.rememberEvent(frame)
-		runtime.mu.Lock()
-		delete(runtime.interactions, frame.CorrelationID)
-		runtime.mu.Unlock()
 	}
+	runtime.rememberEvent(frame)
+	runtime.retireInteraction(frame.CorrelationID, acceptErr != nil)
 	if _, err := runtime.write(context.Background(), channeladapter.EventAck{Disposition: ack}, frame.ID, channeladapter.CommandTimeout); err != nil {
 		return err
 	}
@@ -471,7 +611,7 @@ func (runtime *Runtime) rememberEvent(frame channeladapter.Envelope) {
 		runtime.events[frame.ID] = eventReceipt{digest: hex.EncodeToString(digestBytes[:])}
 		runtime.eventOrder = append(runtime.eventOrder, frame.ID)
 	}
-	for len(runtime.eventOrder) > channeladapter.MaxOutstanding {
+	for len(runtime.eventOrder) > runtime.limits.MaxOutstanding {
 		oldest := runtime.eventOrder[0]
 		runtime.eventOrder = runtime.eventOrder[1:]
 		delete(runtime.events, oldest)
@@ -482,48 +622,74 @@ func (runtime *Runtime) rememberEvent(frame channeladapter.Envelope) {
 func (runtime *Runtime) write(ctx context.Context, payload channeladapter.Payload, correlation string, timeout time.Duration) (string, error) {
 	id := fmt.Sprintf("host.%08x", runtime.next.Add(1))
 	envelope := channeladapter.Envelope{ProtocolVersion: channeladapter.ProtocolVersion, ID: id, CorrelationID: correlation, Payload: payload}
-	runtime.writeMu.Lock()
-	defer runtime.writeMu.Unlock()
+	if err := runtime.acquireWrite(ctx, timeout); err != nil {
+		return "", err
+	}
 	done := make(chan error, 1)
 	go func() { done <- runtime.encoder.Write(envelope, channeladapter.FromHost) }()
 	select {
 	case err := <-done:
+		runtime.releaseWrite()
 		return id, err
 	case <-ctx.Done():
+		if runtime.process != nil {
+			runtime.process.KillTree()
+		}
+		go func() { <-done; runtime.releaseWrite() }()
 		return "", ctx.Err()
 	case <-runtime.config.after(timeout):
 		if runtime.process != nil {
 			runtime.process.KillTree()
 		}
+		go func() { <-done; runtime.releaseWrite() }()
 		return "", errors.New("channel-adapter protocol write timed out")
 	}
 }
 
 func (runtime *Runtime) command(ctx context.Context, payload channeladapter.Payload, timeout time.Duration) (channeladapter.Envelope, error) {
 	id := fmt.Sprintf("host.%08x", runtime.next.Add(1))
+	return runtime.commandID(ctx, id, payload, timeout, false)
+}
+
+func (runtime *Runtime) commandID(ctx context.Context, id string, payload channeladapter.Payload, timeout time.Duration, reserved bool) (channeladapter.Envelope, error) {
+	if !reserved {
+		if err := runtime.acquireOutstanding(ctx, timeout); err != nil {
+			return channeladapter.Envelope{}, err
+		}
+		defer runtime.releaseOutstanding()
+	}
 	response := make(chan channeladapter.Envelope, 1)
 	runtime.mu.Lock()
+	if _, exists := runtime.pending[id]; exists {
+		runtime.mu.Unlock()
+		return channeladapter.Envelope{}, errors.New("channel-adapter correlation is already outstanding")
+	}
 	runtime.pending[id] = response
 	runtime.mu.Unlock()
 	defer func() { runtime.mu.Lock(); delete(runtime.pending, id); runtime.mu.Unlock() }()
 	envelope := channeladapter.Envelope{ProtocolVersion: channeladapter.ProtocolVersion, ID: id, Payload: payload}
-	runtime.writeMu.Lock()
+	if err := runtime.acquireWrite(ctx, timeout); err != nil {
+		return channeladapter.Envelope{}, err
+	}
 	done := make(chan error, 1)
 	go func() { done <- runtime.encoder.Write(envelope, channeladapter.FromHost) }()
 	select {
 	case err := <-done:
-		runtime.writeMu.Unlock()
+		runtime.releaseWrite()
 		if err != nil {
 			return channeladapter.Envelope{}, err
 		}
 	case <-ctx.Done():
-		runtime.writeMu.Unlock()
-		return channeladapter.Envelope{}, ctx.Err()
-	case <-runtime.config.after(timeout):
-		runtime.writeMu.Unlock()
 		if runtime.process != nil {
 			runtime.process.KillTree()
 		}
+		go func() { <-done; runtime.releaseWrite() }()
+		return channeladapter.Envelope{}, ctx.Err()
+	case <-runtime.config.after(timeout):
+		if runtime.process != nil {
+			runtime.process.KillTree()
+		}
+		go func() { <-done; runtime.releaseWrite() }()
 		return channeladapter.Envelope{}, errors.New("channel-adapter protocol write timed out")
 	}
 	select {
@@ -536,6 +702,45 @@ func (runtime *Runtime) command(ctx context.Context, payload channeladapter.Payl
 			runtime.process.KillTree()
 		}
 		return channeladapter.Envelope{}, errors.New("channel-adapter command timed out")
+	}
+}
+
+func (runtime *Runtime) acquireWrite(ctx context.Context, timeout time.Duration) error {
+	select {
+	case runtime.writeGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-runtime.config.after(timeout):
+		return errors.New("channel-adapter protocol write capacity timed out")
+	}
+}
+
+func (runtime *Runtime) releaseWrite() {
+	select {
+	case <-runtime.writeGate:
+	default:
+	}
+}
+
+func (runtime *Runtime) acquireOutstanding(ctx context.Context, timeout time.Duration) error {
+	if runtime.outstanding == nil {
+		return errors.New("channel-adapter negotiation is incomplete")
+	}
+	select {
+	case runtime.outstanding <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-runtime.config.after(timeout):
+		return errors.New("channel-adapter outstanding correlation capacity timed out")
+	}
+}
+
+func (runtime *Runtime) releaseOutstanding() {
+	select {
+	case <-runtime.outstanding:
+	default:
 	}
 }
 
@@ -562,9 +767,12 @@ func (runtime *Runtime) Deliver(outcome controller.Outcome) error {
 		parts[len(parts)-1] += "\n\n[output truncated]"
 	}
 	for index, text := range parts {
+		if len([]byte(text)) > runtime.limits.MaxTextBytes {
+			return errors.New("channel reply exceeds negotiated text limit")
+		}
 		delivery := channeladapter.Delivery{Action: channeladapter.DeliverySend, Route: target.route, Text: text}
-		if index == 0 {
-			delivery.ReplyTo = &target.message
+		if index == 0 && target.message != nil {
+			delivery.ReplyTo = target.message
 		}
 		frame, err := runtime.command(context.Background(), delivery, channeladapter.DeliveryTimeout)
 		if err != nil {
@@ -610,7 +818,10 @@ func (runtime *Runtime) Capabilities() interaction.Capabilities {
 	return interaction.Capabilities{Kinds: []interaction.Kind{interaction.KindConfirm, interaction.KindChooseOne, interaction.KindChooseMany, interaction.KindText, interaction.KindForm}, FormFieldKinds: []interaction.Kind{interaction.KindText}, MaxRequestBytes: interaction.MaxRequestBytes, MaxPromptBytes: 800, MaxFields: 5, MaxOptionsPerField: 25, MaxSelections: 25, MaxTotalOptions: 25, MaxLabelBytes: 45, MaxDescriptionBytes: 100, MaxValueBytes: interaction.MaxValueBytes, MaxTextRunes: interaction.MaxTextRunes, SupportsFreeform: false}
 }
 func (runtime *Runtime) Owner(surfaceID string) interaction.Owner {
-	return interaction.Owner{SurfaceKey: interaction.Digest("channel-surface\x00" + runtime.config.Launch.ChannelKind + "\x00" + runtime.config.ProfileID + "\x00" + surfaceID), PrincipalKey: interaction.Digest("channel-principal\x00" + runtime.config.Launch.ChannelKind + "\x00" + runtime.config.ProfileID)}
+	runtime.mu.Lock()
+	surface := runtime.surfaces[surfaceID]
+	runtime.mu.Unlock()
+	return interaction.Owner{SurfaceKey: surface.SurfaceKey, PrincipalKey: surface.PrincipalKey}
 }
 func (runtime *Runtime) RecoverTarget(surfaceID, inputID string) (any, bool) {
 	if surfaceID == "" || inputID == "" {
@@ -619,9 +830,17 @@ func (runtime *Runtime) RecoverTarget(surfaceID, inputID string) (any, bool) {
 	runtime.mu.Lock()
 	recovered, ok := runtime.targets[inputID]
 	runtime.mu.Unlock()
-	if !ok || recovered.route.Handle != surfaceID {
+	if ok && recovered.route.Handle == surfaceID {
+		return recovered, true
+	}
+	runtime.mu.Lock()
+	surface, exists := runtime.surfaces[surfaceID]
+	runtime.mu.Unlock()
+	if !exists {
 		return nil, false
 	}
+	recovered = target{route: surface.Route}
+	runtime.remember(inputID, recovered)
 	return recovered, true
 }
 func (runtime *Runtime) Render(ctx context.Context, intent interaction.RenderIntent) interaction.EffectOutcome {
@@ -631,37 +850,143 @@ func (runtime *Runtime) Render(ctx context.Context, intent interaction.RenderInt
 	if !ok {
 		return interaction.EffectFailed
 	}
-	request := toProtocolRequest(intent.Request)
-	id := fmt.Sprintf("host.%08x", runtime.next.Add(1))
+	return runtime.beginInteraction(ctx, intent.InteractionID, delivery, intent.Request, false, time.Duration(intent.Request.Policy.ExpiresAfterSeconds)*time.Second)
+}
+
+func (runtime *Runtime) beginInteraction(ctx context.Context, interactionID string, delivery target, request interaction.Request, restore bool, lifetime time.Duration) interaction.EffectOutcome {
+	if runtime.closing.Load() {
+		return interaction.EffectFailed
+	}
+	id := interactionFrameID(interactionID)
 	runtime.mu.Lock()
-	runtime.interactions[id] = interactionTarget{surface: delivery.route.Handle, conversation: runtime.conversation(delivery.route.Handle)}
-	runtime.mu.Unlock()
-	envelope := channeladapter.Envelope{ProtocolVersion: channeladapter.ProtocolVersion, ID: id, Payload: channeladapter.InteractionRequest{InteractionID: intent.InteractionID, Route: delivery.route, ReplyTo: delivery.message, Request: request}}
-	runtime.writeMu.Lock()
-	done := make(chan error, 1)
-	go func() { done <- runtime.encoder.Write(envelope, channeladapter.FromHost) }()
-	select {
-	case err := <-done:
-		runtime.writeMu.Unlock()
-		if err != nil {
-			return interaction.EffectUncertain
+	if existing, ok := runtime.interactions[id]; ok {
+		runtime.mu.Unlock()
+		if existing.interactionID == interactionID {
+			return interaction.EffectSucceeded
 		}
-		return interaction.EffectSucceeded
-	case <-ctx.Done():
-		runtime.writeMu.Unlock()
+		return interaction.EffectFailed
+	}
+	surface, ok := runtime.surfaces[delivery.route.Handle]
+	runtime.mu.Unlock()
+	if !ok || lifetime <= 0 {
+		return interaction.EffectFailed
+	}
+	if err := runtime.acquireOutstanding(ctx, channeladapter.DeliveryTimeout); err != nil {
 		return interaction.EffectUncertain
-	case <-runtime.config.after(channeladapter.DeliveryTimeout):
-		runtime.writeMu.Unlock()
-		if runtime.process != nil {
-			runtime.process.KillTree()
+	}
+	expiryContext, cancelExpiry := context.WithCancel(context.Background())
+	target := interactionTarget{interactionID: interactionID, surface: delivery.route.Handle, conversation: surface.ConversationID, cancel: cancelExpiry}
+	runtime.mu.Lock()
+	runtime.interactions[id] = target
+	runtime.mu.Unlock()
+	protocolRequest := toProtocolRequest(request)
+	remainingSeconds := int((lifetime + time.Second - 1) / time.Second)
+	protocolRequest.Policy.ExpiresAfterSeconds = max(60, remainingSeconds)
+	replyTo := channeladapter.MessageRef{}
+	if delivery.message != nil {
+		replyTo = *delivery.message
+	}
+	payload := channeladapter.InteractionRequest{InteractionID: interactionID, Route: delivery.route, ReplyTo: replyTo, Restore: restore, Request: protocolRequest}
+	frame, err := runtime.commandID(ctx, id, payload, channeladapter.DeliveryTimeout, true)
+	if err != nil {
+		runtime.retireInteraction(id, true)
+		return interaction.EffectUncertain
+	}
+	receipt, ok := frame.Payload.(*channeladapter.InteractionReceipt)
+	if !ok || receipt.InteractionID != interactionID {
+		runtime.retireInteraction(id, true)
+		return interaction.EffectUncertain
+	}
+	if receipt.Disposition != channeladapter.EffectExact {
+		runtime.retireInteraction(id, true)
+		if receipt.Disposition == channeladapter.EffectFailed {
+			return interaction.EffectFailed
 		}
 		return interaction.EffectUncertain
 	}
+	go func() {
+		select {
+		case <-runtime.config.after(lifetime):
+			runtime.retireInteraction(id, true)
+		case <-expiryContext.Done():
+		}
+	}()
+	return interaction.EffectSucceeded
 }
 
-func (runtime *Runtime) conversation(route string) string {
-	sum := sha256.Sum256([]byte(runtime.config.Launch.ChannelKind + "\x00" + runtime.config.ProfileID + "\x00" + route))
-	return "channel-" + hex.EncodeToString(sum[:12])
+func interactionFrameID(interactionID string) string {
+	digest := sha256.Sum256([]byte("channel-interaction\x00" + interactionID))
+	return "host.interaction." + hex.EncodeToString(digest[:16])
+}
+
+func (runtime *Runtime) retireInteraction(id string, emitCancel bool) {
+	runtime.retireInteractionContext(context.Background(), id, emitCancel)
+}
+
+func (runtime *Runtime) retireInteractionContext(ctx context.Context, id string, emitCancel bool) {
+	runtime.mu.Lock()
+	target, ok := runtime.interactions[id]
+	if ok {
+		delete(runtime.interactions, id)
+	}
+	runtime.mu.Unlock()
+	if !ok {
+		return
+	}
+	if target.cancel != nil {
+		target.cancel()
+	}
+	runtime.releaseOutstanding()
+	if emitCancel && runtime.encoder != nil {
+		_, _ = runtime.write(ctx, channeladapter.InteractionCancel{InteractionID: target.interactionID}, "", channeladapter.ForcedExitTimeout)
+	}
+}
+
+func (runtime *Runtime) retireSurfaceInteractions(surface string, emitCancel bool) {
+	runtime.mu.Lock()
+	ids := make([]string, 0)
+	for id, target := range runtime.interactions {
+		if target.surface == surface {
+			ids = append(ids, id)
+		}
+	}
+	runtime.mu.Unlock()
+	for _, id := range ids {
+		runtime.retireInteraction(id, emitCancel)
+	}
+}
+
+func (runtime *Runtime) recoverInteractions(ctx context.Context) error {
+	for _, initial := range runtime.initialSurfaces() {
+		pending, ok, err := runtime.controller.PendingInteraction(initial.SurfaceID, initial.ConversationID)
+		if err != nil && !errors.Is(err, dispatch.ErrRequestInputUnavailable) {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		if pending.Delivery == interaction.DeliveryPending {
+			if _, err := runtime.controller.RenderInteraction(initial.SurfaceID, initial.ConversationID); err != nil {
+				return err
+			}
+			continue
+		}
+		if pending.Delivery != interaction.DeliveryDelivered {
+			continue
+		}
+		recovered, found := runtime.RecoverTarget(initial.SurfaceID, pending.InputID)
+		if !found {
+			return errors.New("channel-adapter pending interaction target cannot be recovered")
+		}
+		lifetime := time.Until(pending.ExpiresAt)
+		if lifetime <= 0 {
+			continue
+		}
+		if outcome := runtime.beginInteraction(ctx, pending.InteractionID, recovered.(target), pending.Request, true, lifetime); outcome != interaction.EffectSucceeded {
+			return errors.New("channel-adapter pending interaction cannot be restored")
+		}
+	}
+	return nil
 }
 func (runtime *Runtime) remember(input string, value target) {
 	runtime.mu.Lock()
@@ -670,7 +995,7 @@ func (runtime *Runtime) remember(input string, value target) {
 		runtime.targetOrder = append(runtime.targetOrder, input)
 	}
 	runtime.targets[input] = value
-	for len(runtime.targetOrder) > channeladapter.MaxOutstanding {
+	for len(runtime.targetOrder) > runtime.limits.MaxOutstanding {
 		oldest := runtime.targetOrder[0]
 		runtime.targetOrder = runtime.targetOrder[1:]
 		delete(runtime.targets, oldest)
@@ -692,16 +1017,40 @@ func (runtime *Runtime) fail(err error) {
 }
 func (runtime *Runtime) Close() {
 	runtime.closeOnce.Do(func() {
-		if runtime.controller != nil {
-			runtime.controller.Close()
-		}
+		runtime.closing.Store(true)
 		ctx, cancel := context.WithTimeout(context.Background(), channeladapter.ShutdownTimeout)
-		defer cancel()
+		runtime.mu.Lock()
+		ids := make([]string, 0, len(runtime.interactions))
+		for id := range runtime.interactions {
+			ids = append(ids, id)
+		}
+		runtime.mu.Unlock()
+		for _, id := range ids {
+			runtime.retireInteractionContext(ctx, id, true)
+		}
 		if runtime.process != nil {
 			_, _ = runtime.command(ctx, channeladapter.Shutdown{Reason: "host_shutdown"}, channeladapter.ShutdownTimeout)
 			runtime.forceClose()
 		}
+		cancel()
+		runtime.closeControllerBounded()
 	})
+}
+
+func (runtime *Runtime) closeControllerBounded() {
+	if runtime.controller == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		runtime.controller.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-runtime.config.after(channeladapter.ForcedExitTimeout):
+		_, _ = fmt.Fprintln(runtime.config.Audit, "Channel adapter controller cleanup exceeded its bounded drain")
+	}
 }
 func (runtime *Runtime) forceClose() {
 	if runtime.process == nil {
@@ -714,7 +1063,11 @@ func (runtime *Runtime) forceClose() {
 		return
 	case <-runtime.config.after(channeladapter.ForcedExitTimeout):
 		runtime.process.KillTree()
-		<-runtime.process.Done()
+		select {
+		case <-runtime.process.Done():
+		case <-runtime.config.after(channeladapter.ForcedExitTimeout):
+			_, _ = fmt.Fprintln(runtime.config.Audit, "Channel adapter process tree was killed without a prompt reap")
+		}
 	}
 }
 

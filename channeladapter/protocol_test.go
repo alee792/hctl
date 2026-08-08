@@ -60,6 +60,23 @@ func TestDecoderCanNarrowRawFrameLimitAfterNegotiation(t *testing.T) {
 	}
 }
 
+func TestEncoderCanNarrowRawFrameLimitAfterNegotiation(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	encoder := NewEncoder(&output)
+	frame := Envelope{ProtocolVersion: 1, ID: "host.delivery.1", Payload: Delivery{Action: DeliverySend, Route: Route{Handle: "route_1"}, Text: strings.Repeat("x", 64)}}
+	encoded, err := MarshalFrame(frame, FromHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.SetMaxFrameBytes(len(encoded) - 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Write(frame, FromHost); err == nil || !strings.Contains(err.Error(), "frame exceeds") {
+		t.Fatalf("narrow encoder error = %v", err)
+	}
+}
+
 func TestInteractionValidationMatchesCanonicalBounds(t *testing.T) {
 	t.Parallel()
 	valid := func() SemanticInteractionRequest {
@@ -176,6 +193,7 @@ func TestTypedNilPayloadsFailWithoutPanicking(t *testing.T) {
 		(*Delivery)(nil),
 		(*DeliveryResult)(nil),
 		(*InteractionRequest)(nil),
+		(*InteractionReceipt)(nil),
 		(*InteractionCancel)(nil),
 		(*InteractionResult)(nil),
 		(*AttachmentFetch)(nil),
@@ -233,7 +251,7 @@ func TestOperationResultIsNonSecretAndClosed(t *testing.T) {
 
 func TestSemanticFramesRejectPathsAndInvalidInteractionShapes(t *testing.T) {
 	t.Parallel()
-	inbound := Envelope{ProtocolVersion: 1, ID: "adapter.inbound.1", Payload: InboundMessage{SourceID: "source.1", Route: Route{Handle: "route_1"}, Message: MessageRef{Handle: "message_1"}, Author: Author{Handle: "author_1"}, Attachments: []AttachmentDescriptor{{Handle: "attachment_1", Name: "../secret", Size: 1}}}}
+	inbound := Envelope{ProtocolVersion: 1, ID: "adapter.inbound.1", Payload: InboundMessage{SourceID: "source.1", Route: Route{Handle: "route_1"}, ConversationID: "conversation-1", SurfaceKind: SurfaceShared, SurfaceKey: strings.Repeat("a", 64), PrincipalKey: strings.Repeat("b", 64), Message: MessageRef{Handle: "message_1"}, Author: Author{Handle: "author_1"}, Attachments: []AttachmentDescriptor{{Handle: "attachment_1", Name: "../secret", Size: 1}}}}
 	if _, err := MarshalFrame(inbound, FromAdapter); err == nil || !strings.Contains(err.Error(), "path") {
 		t.Fatalf("path error = %v", err)
 	}
@@ -269,7 +287,7 @@ func TestDeliveryActionsStaySemanticAndClosed(t *testing.T) {
 
 func TestStatusAndResetRemainControllerOwnedSemanticControls(t *testing.T) {
 	t.Parallel()
-	request := Envelope{ProtocolVersion: 1, ID: "adapter.control.1", Payload: ControlRequest{SourceID: "source.status.1", Route: Route{Handle: "route_1"}, Message: MessageRef{Handle: "message_1"}, Action: ControlStatus}}
+	request := Envelope{ProtocolVersion: 1, ID: "adapter.control.1", Payload: ControlRequest{SourceID: "source.status.1", Route: Route{Handle: "route_1"}, ConversationID: "conversation-1", SurfaceKind: SurfaceShared, SurfaceKey: strings.Repeat("a", 64), PrincipalKey: strings.Repeat("b", 64), Message: MessageRef{Handle: "message_1"}, Action: ControlStatus}}
 	if _, err := MarshalFrame(request, FromAdapter); err != nil {
 		t.Fatal(err)
 	}
@@ -281,5 +299,23 @@ func TestStatusAndResetRemainControllerOwnedSemanticControls(t *testing.T) {
 	result.Payload = ControlResult{Action: ControlReset, Disposition: ControlBusy}
 	if _, err := MarshalFrame(result, FromHost); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSurfaceSemanticsAreClosedStableAndRestoreIsExplicit(t *testing.T) {
+	t.Parallel()
+	surface := Surface{Route: Route{Handle: "route_1"}, ConversationID: "conversation-1", Kind: SurfaceDirect, SurfaceKey: strings.Repeat("a", 64), PrincipalKey: strings.Repeat("b", 64)}
+	ready := Envelope{ProtocolVersion: 1, ID: "adapter.ready.1", CorrelationID: "host.initialize.1", Payload: Ready{ChannelKind: "fixture", Features: []Feature{}, Limits: Limits{MaxFrameBytes: MaxFrameBytes, MaxTextBytes: MaxTextBytes, MaxAttachments: MaxAttachments, MaxAttachmentBytes: MaxAttachmentBytes, MaxOutstanding: 1}, Surfaces: []Surface{surface}}}
+	if _, err := MarshalFrame(ready, FromAdapter); err != nil {
+		t.Fatal(err)
+	}
+	invalid := ready
+	invalid.Payload = Ready{ChannelKind: "fixture", Features: []Feature{}, Limits: ready.Payload.(Ready).Limits, Surfaces: []Surface{surface, surface}}
+	if _, err := MarshalFrame(invalid, FromAdapter); err == nil {
+		t.Fatal("duplicated startup surface accepted")
+	}
+	request := InteractionRequest{InteractionID: "interaction.1", Route: surface.Route, Restore: true, Request: SemanticInteractionRequest{SchemaVersion: 1, Kind: InteractionConfirm, Prompt: "Continue?", Policy: InteractionPolicy{ExpiresAfterSeconds: 60, Cancellation: CancellationAllowed}, Field: &Field{ID: "confirmation", Kind: InteractionConfirm, Label: "Continue", Required: true}}}
+	if _, err := MarshalFrame(Envelope{ProtocolVersion: 1, ID: "host.restore.1", Payload: request}, FromHost); err != nil {
+		t.Fatalf("restore without reply target: %v", err)
 	}
 }

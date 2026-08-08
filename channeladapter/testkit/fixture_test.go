@@ -122,16 +122,16 @@ func TestDeterministicFixtureCoversRuntimeJourney(t *testing.T) {
 	if err := encoder.Write(protocol.Envelope{ProtocolVersion: 1, ID: "host.interaction.1", Payload: protocol.InteractionRequest{InteractionID: "interaction.1", Route: protocol.Route{Handle: "route_1"}, ReplyTo: protocol.MessageRef{Handle: "message_1"}, Request: request}}, protocol.FromHost); err != nil {
 		t.Fatal(err)
 	}
+	receipt := readFrame(t, decoder)
+	if receipt.Payload.(*protocol.InteractionReceipt).Disposition != protocol.EffectExact {
+		t.Fatalf("interaction receipt = %#v", receipt)
+	}
 	answer := readFrame(t, decoder)
 	if answer.Payload.(*protocol.InteractionResult).Answer.Action != protocol.AnswerSubmit {
 		t.Fatalf("answer = %#v", answer)
 	}
 	if err := encoder.Write(protocol.Envelope{ProtocolVersion: 1, ID: "host.cancel.1", Payload: protocol.InteractionCancel{InteractionID: "interaction.2"}}, protocol.FromHost); err != nil {
 		t.Fatal(err)
-	}
-	cancel := readFrame(t, decoder)
-	if cancel.Payload.(*protocol.InteractionResult).Answer.Action != protocol.AnswerCancel {
-		t.Fatalf("cancel = %#v", cancel)
 	}
 	if err := encoder.Write(protocol.Envelope{ProtocolVersion: 1, ID: "host.fetch.1", Payload: protocol.AttachmentFetch{TransferID: "transfer.1", AttachmentHandle: "attachment_1", MaximumBytes: 1024}}, protocol.FromHost); err != nil {
 		t.Fatal(err)

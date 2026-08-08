@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,7 +24,7 @@ func RunOperation(ctx context.Context, launch Launch, environment []string, inpu
 	command.Env = append([]string(nil), environment...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Stdin = input
-	command.Stderr = &boundedWriter{remaining: channeladapter.MaxStderrBytes, writer: terminal}
+	command.Stderr = newDiagnosticWriter(terminal, environment)
 	var output boundedBuffer
 	output.maximum = channeladapter.MaxOperationResultBytes + 1
 	command.Stdout = &output
@@ -36,12 +39,10 @@ func RunOperation(ctx context.Context, launch Launch, environment []string, inpu
 	select {
 	case waitErr = <-done:
 	case <-ctx.Done():
-		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		<-done
+		killOperationTree(command, done, terminal)
 		return channeladapter.OperationResult{}, ctx.Err()
 	case <-timer.C:
-		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		<-done
+		killOperationTree(command, done, terminal)
 		return channeladapter.OperationResult{}, errors.New("channel-adapter operation timed out")
 	}
 	// A successful parent must not leave descendants in its private process
@@ -50,12 +51,26 @@ func RunOperation(ctx context.Context, launch Launch, environment []string, inpu
 	if waitErr != nil {
 		return channeladapter.OperationResult{}, errors.New("channel-adapter operation failed; run status or setup for the selected profile")
 	}
+	if output.overflow {
+		return channeladapter.OperationResult{}, errors.New("channel-adapter operation returned an invalid non-secret result")
+	}
 	data := bytes.TrimSpace(output.data)
 	result, err := channeladapter.DecodeOperationResult(data)
 	if err != nil {
 		return channeladapter.OperationResult{}, errors.New("channel-adapter operation returned an invalid non-secret result")
 	}
 	return result, nil
+}
+
+func killOperationTree(command *exec.Cmd, done <-chan error, diagnostic io.Writer) {
+	_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	timer := time.NewTimer(channeladapter.ForcedExitTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		_, _ = fmt.Fprintln(diagnostic, "channel-adapter operation tree was killed without a prompt reap")
+	}
 }
 
 type boundedBuffer struct {
@@ -75,19 +90,55 @@ func (buffer *boundedBuffer) Write(data []byte) (int, error) {
 	return original, nil
 }
 
-type boundedWriter struct {
-	remaining int
-	writer    io.Writer
+type diagnosticWriter struct {
+	mu                  sync.Mutex
+	remaining           int
+	writer              io.Writer
+	redactions          []string
+	onProtocolViolation func()
 }
 
-func (writer *boundedWriter) Write(data []byte) (int, error) {
+func newDiagnosticWriter(writer io.Writer, environment []string) *diagnosticWriter {
+	if writer == nil {
+		writer = io.Discard
+	}
+	var redactions []string
+	for _, entry := range environment {
+		key, value, found := strings.Cut(entry, "=")
+		upper := strings.ToUpper(key)
+		if found && value != "" && (strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD") || strings.Contains(upper, "CREDENTIAL")) {
+			redactions = append(redactions, value)
+		}
+	}
+	return &diagnosticWriter{remaining: channeladapter.MaxStderrBytes, writer: writer, redactions: redactions}
+}
+
+func (writer *diagnosticWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
 	original := len(data)
 	if len(data) > writer.remaining {
 		data = data[:max(writer.remaining, 0)]
 	}
 	writer.remaining -= len(data)
-	if len(data) > 0 && writer.writer != nil {
-		_, _ = writer.writer.Write(data)
+	if len(data) > 0 {
+		message := strings.ToValidUTF8(string(data), "�")
+		for _, secret := range writer.redactions {
+			message = strings.ReplaceAll(message, secret, "[redacted]")
+		}
+		if strings.Contains(message, `"protocol_version"`) && strings.Contains(message, `"payload"`) {
+			message = "[protocol-like stderr redacted]\n"
+			if writer.onProtocolViolation != nil {
+				writer.onProtocolViolation()
+			}
+		}
+		message = strings.Map(func(value rune) rune {
+			if value < 0x20 && value != '\n' && value != '\t' || value == 0x7f {
+				return ' '
+			}
+			return value
+		}, message)
+		_, _ = fmt.Fprintf(writer.writer, "channel-adapter stderr: %s", message)
 	}
 	return original, nil
 }

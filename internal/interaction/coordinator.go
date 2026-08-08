@@ -51,6 +51,7 @@ type PendingInteraction struct {
 	ExpiresAt     time.Time
 	Continuation  ContinuationMode
 	Phase         Phase
+	Delivery      DeliveryState
 }
 
 type Renderer interface {
@@ -127,7 +128,7 @@ func (c *Coordinator) Pending() (PendingInteraction, bool, error) {
 		return PendingInteraction{}, false, err
 	}
 	pending := state.Pending
-	return PendingInteraction{InteractionID: pending.ID, InputID: pending.InputID, Owner: pending.Owner, Request: pending.Request, Resolution: pending.Resolution, ExpiresAt: pending.ExpiresAt, Continuation: pending.Continuation, Phase: pending.Phase}, true, nil
+	return PendingInteraction{InteractionID: pending.ID, InputID: pending.InputID, Owner: pending.Owner, Request: pending.Request, Resolution: pending.Resolution, ExpiresAt: pending.ExpiresAt, Continuation: pending.Continuation, Phase: pending.Phase, Delivery: pending.Delivery}, true, nil
 }
 
 func NewCoordinator(store Store, renderer Renderer, continuation Continuation, now func() time.Time) (*Coordinator, error) {

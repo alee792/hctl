@@ -55,6 +55,15 @@ protocol output, and only then emits shutdown completion. The per-application
 lock remains held through the bounded admitted-work drain and is released on
 every shutdown return path.
 
+Discord derives the same stable conversation and owner identities formerly
+used by the in-process controller, but sends only the conversation id and
+SHA-256 owner keys across the protocol. The guild route and the first
+authorized DM route are adapter-owned profile state and are advertised as
+startup surfaces. Persisting that first DM route precedes its admission, so a
+restart can reattach its durable interaction callbacks before Gateway event
+replay. Restore registers callback ownership without posting a duplicate
+Discord message.
+
 Hctl continues to own portable participation policy, controller and
 dispatcher state, model execution, sessions, worktrees, capacity, hibernation,
 and durable generic interaction state. The process host now wires the external

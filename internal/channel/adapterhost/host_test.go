@@ -36,7 +36,7 @@ if [ -n "${HCTL_DISCORD_TOKEN-}" ]; then exit 90; fi
 while IFS= read -r line; do
  case "$line" in
   *'"method":"initialize"'*) echo '{"id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.1"}}' ;;
-  *'"method":"thread/start"'*) echo '{"id":2,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"},"sandbox":{"type":"readOnly"},"approvalPolicy":"never"}}' ;;
+  *'"method":"thread/start"'*|*'"method":"thread/resume"'*) echo '{"id":2,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"},"sandbox":{"type":"readOnly"},"approvalPolicy":"never"}}' ;;
   *'"method":"turn/start"'*)
     echo '{"id":3,"result":{"turn":{"id":"01922222-2222-7222-8222-222222222222","items":[],"status":"inProgress"}}}'
     echo '{"method":"item/agentMessage/delta","params":{"threadId":"01911111-1111-7111-8111-111111111111","turnId":"01922222-2222-7222-8222-222222222222","itemId":"reply","delta":"hello back"}}'
@@ -67,7 +67,7 @@ done
 	runtime, err := New(Config{
 		Project: p, Driver: codex.New(harness), ProfileID: "default", Environment: environment,
 		Launch:      launch,
-		TurnTimeout: 2 * time.Second, IdleTimeout: time.Minute, MaxResident: 2, MaxActive: 1, Executable: self, Audit: &audit,
+		TurnTimeout: 2 * time.Second, IdleTimeout: time.Minute, MaxResident: 1, MaxActive: 1, Executable: self, Audit: &audit,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ done
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	var earlyErr error
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(marker); err == nil {
@@ -132,7 +132,7 @@ func installFakeAdapter(t *testing.T, executable string) (Launch, *integration.S
 		"provenance":    map[string]any{"source": "https://example.invalid/fixture-channel", "revision": "fixture-v1"},
 		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
 		"artifacts":     []any{map[string]any{"id": "current", "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary", "source": map[string]any{"kind": "package", "path": "payload/adapter"}, "size": len(payload), "sha256": checksum, "executable": map[string]any{"path": "bin/adapter", "size": len(payload), "sha256": checksum}}},
-		"capabilities":  []any{map[string]any{"type": "channel-adapter", "version": 1, "id": "fixture", "channel_kind": "fixture", "artifacts": []string{"current"}, "executable": "bin/adapter", "runtime": map[string]any{"arguments": []string{"-test.run=^TestFakeAdapterProcess$"}}, "setup": map[string]any{"arguments": []string{"setup"}}, "status": map[string]any{"arguments": []string{"status"}}, "remove": map[string]any{"arguments": []string{"remove"}}, "protocol": map[string]any{"minimum": 1, "before": 2}, "profile_selector": "opaque-id-v1", "features": []string{"typing", "replies"}}},
+		"capabilities":  []any{map[string]any{"type": "channel-adapter", "version": 1, "id": "fixture", "channel_kind": "fixture", "artifacts": []string{"current"}, "executable": "bin/adapter", "runtime": map[string]any{"arguments": []string{"-test.run=^TestFakeAdapterProcess$"}}, "setup": map[string]any{"arguments": []string{"setup"}}, "status": map[string]any{"arguments": []string{"status"}}, "remove": map[string]any{"arguments": []string{"remove"}}, "protocol": map[string]any{"minimum": 1, "before": 2}, "profile_selector": "opaque-id-v1", "features": []string{"typing", "replies", "interactive-components", "text-fallback"}}},
 	}
 	manifest, err := json.Marshal(document)
 	if err != nil {
@@ -164,12 +164,17 @@ func TestFakeAdapterProcess(t *testing.T) {
 	if os.Getenv("HCTL_FAKE_ADAPTER") != "1" {
 		t.Skip("subprocess helper")
 	}
-	if os.Getenv("HCTL_DISCORD_TOKEN") == "" {
+	scenario := os.Getenv("HCTL_FAKE_SCENARIO")
+	if scenario == "" && os.Getenv("HCTL_DISCORD_TOKEN") == "" {
 		os.Exit(81)
 	}
 	decoder, encoder := channeladapter.NewDecoder(os.Stdin), channeladapter.NewEncoder(os.Stdout)
 	limits := channeladapter.Limits{MaxFrameBytes: channeladapter.MaxFrameBytes, MaxTextBytes: channeladapter.MaxTextBytes, MaxAttachments: 0, MaxAttachmentBytes: channeladapter.MaxAttachmentBytes, MaxOutstanding: 16}
-	hello := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.hello.1", Payload: channeladapter.Hello{ChannelKind: "fixture", Protocol: channeladapter.ProtocolRange{Minimum: 1, Before: 2}, Features: []channeladapter.Feature{channeladapter.FeatureTyping, channeladapter.FeatureReplies}, Limits: limits}}
+	if scenario == "bounds" {
+		limits.MaxTextBytes = 4
+	}
+	features := []channeladapter.Feature{channeladapter.FeatureTyping, channeladapter.FeatureReplies, channeladapter.FeatureInteractiveComponents, channeladapter.FeatureTextFallback}
+	hello := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.hello.1", Payload: channeladapter.Hello{ChannelKind: "fixture", Protocol: channeladapter.ProtocolRange{Minimum: 1, Before: 2}, Features: features, Limits: limits}}
 	if err := encoder.Write(hello, channeladapter.FromAdapter); err != nil {
 		os.Exit(82)
 	}
@@ -177,16 +182,44 @@ func TestFakeAdapterProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(83)
 	}
-	ready := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.ready.1", CorrelationID: initialize.ID, Payload: channeladapter.Ready{ChannelKind: "fixture", Features: []channeladapter.Feature{channeladapter.FeatureTyping, channeladapter.FeatureReplies}, Limits: limits}}
+	surface := channeladapter.Surface{Route: channeladapter.Route{Handle: "route_1"}, ConversationID: "fixture-conversation-1", Kind: channeladapter.SurfaceDirect, SurfaceKey: strings.Repeat("a", 64), PrincipalKey: strings.Repeat("b", 64)}
+	readyPayload := channeladapter.Ready{ChannelKind: "fixture", Features: features, Limits: limits}
+	if scenario == "recovery" {
+		readyPayload.Surfaces = []channeladapter.Surface{surface}
+	}
+	ready := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.ready.1", CorrelationID: initialize.ID, Payload: readyPayload}
 	if err := encoder.Write(ready, channeladapter.FromAdapter); err != nil {
 		os.Exit(84)
 	}
 	_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.connection.1", Payload: channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 0}}, channeladapter.FromAdapter)
-	inbound := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.inbound.1", Payload: channeladapter.InboundMessage{SourceID: "source-1", Route: channeladapter.Route{Handle: "route_1"}, Message: channeladapter.MessageRef{Handle: "message_1"}, Author: channeladapter.Author{Handle: "author_1", Label: "Operator"}, Text: "hello"}}
-	if err := encoder.Write(inbound, channeladapter.FromAdapter); err != nil {
-		os.Exit(85)
+	if scenario == "child_failure" {
+		return
 	}
-	replayed := false
+	inbound := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.inbound.1", Payload: channeladapter.InboundMessage{SourceID: "source-1", Route: surface.Route, ConversationID: surface.ConversationID, SurfaceKind: surface.Kind, SurfaceKey: surface.SurfaceKey, PrincipalKey: surface.PrincipalKey, Message: channeladapter.MessageRef{Handle: "message_1"}, Author: channeladapter.Author{Handle: "author_1", Label: "Operator"}, Text: "hello"}}
+	switch scenario {
+	case "recovery":
+		if err := encoder.Write(inbound, channeladapter.FromAdapter); err != nil {
+			os.Exit(85)
+		}
+	case "controls":
+		status := channeladapter.ControlRequest{SourceID: "control.status", Route: surface.Route, ConversationID: surface.ConversationID, SurfaceKind: surface.Kind, SurfaceKey: surface.SurfaceKey, PrincipalKey: surface.PrincipalKey, Message: channeladapter.MessageRef{Handle: "control_message_1"}, Action: channeladapter.ControlStatus}
+		reset := status
+		reset.SourceID, reset.Message.Handle, reset.Action = "control.reset", "control_message_2", channeladapter.ControlReset
+		_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.control.status", Payload: status}, channeladapter.FromAdapter)
+		_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.control.reset", Payload: reset}, channeladapter.FromAdapter)
+	case "bounds":
+		message := inbound.Payload.(channeladapter.InboundMessage)
+		message.Text = "too long"
+		inbound.Payload = message
+		if err := encoder.Write(inbound, channeladapter.FromAdapter); err != nil {
+			os.Exit(85)
+		}
+	default:
+		if err := encoder.Write(inbound, channeladapter.FromAdapter); err != nil {
+			os.Exit(85)
+		}
+	}
+	replayed, deliveries := false, 0
 	for {
 		frame, err := decoder.Read(channeladapter.FromHost)
 		if err != nil {
@@ -204,14 +237,53 @@ func TestFakeAdapterProcess(t *testing.T) {
 			}
 		case *channeladapter.Activity:
 		case *channeladapter.Delivery:
-			if payload.Text != "hello back" || payload.Route.Handle != "route_1" {
+			if scenario == "ambiguous" {
+				result := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.delivery.ambiguous", CorrelationID: frame.ID, Payload: channeladapter.DeliveryResult{Disposition: channeladapter.EffectAmbiguous}}
+				_ = encoder.Write(result, channeladapter.FromAdapter)
+				_ = os.WriteFile(os.Getenv("HCTL_FAKE_MARKER"), []byte("ambiguous\n"), 0o600)
+				continue
+			}
+			if payload.Text != "hello back" || payload.Route.Handle != "route_1" && payload.Route.Handle != "route_2" {
 				os.Exit(87)
 			}
 			result := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.delivery.1", CorrelationID: frame.ID, Payload: channeladapter.DeliveryResult{Disposition: channeladapter.EffectExact, Message: &channeladapter.MessageRef{Handle: "reply_1"}}}
 			if err := encoder.Write(result, channeladapter.FromAdapter); err != nil {
 				os.Exit(88)
 			}
-			_ = os.WriteFile(os.Getenv("HCTL_FAKE_MARKER"), []byte("delivered\n"), 0o600)
+			deliveries++
+			switch deliveries {
+			case 1:
+				second := channeladapter.InboundMessage{SourceID: "source-2", Route: channeladapter.Route{Handle: "route_2"}, ConversationID: "fixture-conversation-2", SurfaceKind: channeladapter.SurfaceDirect, SurfaceKey: strings.Repeat("c", 64), PrincipalKey: strings.Repeat("d", 64), Message: channeladapter.MessageRef{Handle: "message_2"}, Author: channeladapter.Author{Handle: "author_2", Label: "Operator"}, Text: "second"}
+				_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.inbound.2", Payload: second}, channeladapter.FromAdapter)
+			case 2:
+				third := channeladapter.InboundMessage{SourceID: "source-3", Route: channeladapter.Route{Handle: "route_1"}, ConversationID: "fixture-conversation-1", SurfaceKind: channeladapter.SurfaceDirect, SurfaceKey: strings.Repeat("a", 64), PrincipalKey: strings.Repeat("b", 64), Message: channeladapter.MessageRef{Handle: "message_3"}, Author: channeladapter.Author{Handle: "author_1", Label: "Operator"}, Text: "again"}
+				_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.inbound.3", Payload: third}, channeladapter.FromAdapter)
+			case 3:
+				_ = os.WriteFile(os.Getenv("HCTL_FAKE_MARKER"), []byte("delivered\n"), 0o600)
+			}
+		case *channeladapter.InteractionRequest:
+			if scenario == "recovery" && !payload.Restore || scenario != "recovery" && payload.Restore {
+				os.Exit(90)
+			}
+			receipt := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.interaction.receipt", CorrelationID: frame.ID, Payload: channeladapter.InteractionReceipt{InteractionID: payload.InteractionID, Disposition: channeladapter.EffectExact}}
+			_ = encoder.Write(receipt, channeladapter.FromAdapter)
+			if scenario == "recovery" {
+				_ = os.WriteFile(os.Getenv("HCTL_FAKE_MARKER"), []byte("restored\n"), 0o600)
+				continue
+			}
+			action := channeladapter.AnswerSubmit
+			answer := channeladapter.SemanticInteractionAnswer{SchemaVersion: 1, Action: action, Fields: []channeladapter.FieldAnswer{{FieldID: "confirmation", Confirmed: boolAddress(true)}}}
+			if scenario == "interaction_cancel" {
+				answer.Action, answer.Fields = channeladapter.AnswerCancel, nil
+			}
+			result := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.interaction.result", CorrelationID: frame.ID, Payload: channeladapter.InteractionResult{InteractionID: payload.InteractionID, Answer: answer}}
+			_ = encoder.Write(result, channeladapter.FromAdapter)
+			_ = os.WriteFile(os.Getenv("HCTL_FAKE_MARKER"), []byte("answered\n"), 0o600)
+		case *channeladapter.InteractionCancel:
+		case *channeladapter.ControlResult:
+			if frame.CorrelationID == "adapter.control.reset" && payload.Disposition == channeladapter.ControlExact {
+				_ = os.WriteFile(os.Getenv("HCTL_FAKE_MARKER"), []byte("reset\n"), 0o600)
+			}
 		case *channeladapter.Shutdown:
 			_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.shutdown.1", CorrelationID: frame.ID, Payload: channeladapter.ShutdownComplete{}}, channeladapter.FromAdapter)
 			return

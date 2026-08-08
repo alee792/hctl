@@ -5,6 +5,7 @@
   [ADR 0020](0020-map-plugin-mcp-through-native-harness-configuration.md), and
   [ADR 0027](0027-stage-agent-filesystems-for-downstream-oci-builds.md)
 - Specialized by: [ADR 0031](0031-use-the-official-github-server-as-native-unmanaged-mcp.md)
+- Extended by: [ADR 0032](0032-use-a-bounded-semantic-channel-adapter-protocol.md)
 
 ## Plain-English summary
 
@@ -45,11 +46,12 @@ the exact bytes named by the retained manifest SHA-256; mutating a caller's
 copy cannot create selection evidence with a stale identity.
 
 Capabilities are closed, tagged schemas with a stable capability id, type, and
-integer version. Schema 1 recognizes only `native-mcp` version 1. An unknown
-type or version rejects the manifest with a typed unsupported-capability error;
-it never invokes package code to discover behavior. Later capability schemas,
-including `channel-adapter`, may share the envelope without adding fields to
-`native-mcp` or introducing one generic runtime interface.
+integer version. Schema 1 recognizes `native-mcp` version 1 and, through ADR
+0032, `channel-adapter` version 1. An unknown type or version rejects the
+manifest with a typed unsupported-capability error; it never invokes package
+code to discover behavior. Later capability schemas share the envelope without
+adding fields to another capability or introducing one generic runtime
+interface.
 
 Package installation state is operator-owned and separate from the manifest.
 Its closed schema version 1 records the package id and version, exact manifest
@@ -145,8 +147,8 @@ rebuilding hctl.
 - The credentialless native-MCP fixture and official `github-mcp-server`
   executable metadata validate and select through the same vendor-neutral
   code path.
-- A future `channel-adapter` fixture is recognized as an unsupported tagged
-  capability and rejected without reading or executing its artifact.
+- An unknown capability or later unsupported `channel-adapter` version is
+  rejected without reading or executing its artifact.
 - Root hctl dependencies remain independent of package SDKs.
 - #76 may implement local and pinned-HTTPS installation, shared cache, offline
   apply, enablement, and selective staging without learning MCP runtime

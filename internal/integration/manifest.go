@@ -23,34 +23,45 @@ import (
 )
 
 const (
-	SchemaVersion                               = 1
-	InstallationStateVersion                    = 1
-	NativeMCPType                               = "native-mcp"
-	NativeMCPVersion                            = 1
-	OSDarwin                 OperatingSystem    = "darwin"
-	OSLinux                  OperatingSystem    = "linux"
-	ArchitectureARM64        Architecture       = "arm64"
-	ArchitectureAMD64        Architecture       = "amd64"
-	FormatBinary             ArtifactFormat     = "binary"
-	FormatTarGZ              ArtifactFormat     = "tar.gz"
-	FormatZIP                ArtifactFormat     = "zip"
-	SourcePackage            ArtifactSourceKind = "package"
-	SourceHTTPS              ArtifactSourceKind = "https"
-	CollisionReject          CollisionPolicy    = "reject"
-	StartupOptional          StartupPolicy      = "optional"
-	StartupRequired          StartupPolicy      = "required"
-	TrustNativeProject       NativeTrust        = "native-project"
-	TrustOperator            InstallationTrust  = "operator"
-	maxManifestBytes                            = 256 << 10
-	maxArtifacts                                = 64
-	maxCapabilities                             = 64
-	maxArguments                                = 128
-	maxEnvironment                              = 128
-	maxRequiredEnv                              = 128
-	maxArtifactBytes                            = int64(2 << 30)
-	maxExecutableBytes                          = int64(512 << 20)
-	maxArgumentBytes                            = 4096
-	maxEnvironmentBytes                         = 4096
+	SchemaVersion                                    = 1
+	InstallationStateVersion                         = 1
+	NativeMCPType                                    = "native-mcp"
+	NativeMCPVersion                                 = 1
+	ChannelAdapterType                               = "channel-adapter"
+	ChannelAdapterVersion                            = 1
+	ChannelAdapterProtocolVersion                    = 1
+	OSDarwin                      OperatingSystem    = "darwin"
+	OSLinux                       OperatingSystem    = "linux"
+	ArchitectureARM64             Architecture       = "arm64"
+	ArchitectureAMD64             Architecture       = "amd64"
+	FormatBinary                  ArtifactFormat     = "binary"
+	FormatTarGZ                   ArtifactFormat     = "tar.gz"
+	FormatZIP                     ArtifactFormat     = "zip"
+	SourcePackage                 ArtifactSourceKind = "package"
+	SourceHTTPS                   ArtifactSourceKind = "https"
+	CollisionReject               CollisionPolicy    = "reject"
+	StartupOptional               StartupPolicy      = "optional"
+	StartupRequired               StartupPolicy      = "required"
+	TrustNativeProject            NativeTrust        = "native-project"
+	TrustOperator                 InstallationTrust  = "operator"
+	ProfileOpaqueID               ProfileSelector    = "opaque-id-v1"
+	FeatureTyping                 ChannelFeature     = "typing"
+	FeatureReplies                ChannelFeature     = "replies"
+	FeatureEdits                  ChannelFeature     = "edits"
+	FeatureReactions              ChannelFeature     = "reactions"
+	FeatureAttachments            ChannelFeature     = "attachments"
+	FeatureInteractive            ChannelFeature     = "interactive-components"
+	FeatureTextFallback           ChannelFeature     = "text-fallback"
+	maxManifestBytes                                 = 256 << 10
+	maxArtifacts                                     = 64
+	maxCapabilities                                  = 64
+	maxArguments                                     = 128
+	maxEnvironment                                   = 128
+	maxRequiredEnv                                   = 128
+	maxArtifactBytes                                 = int64(2 << 30)
+	maxExecutableBytes                               = int64(512 << 20)
+	maxArgumentBytes                                 = 4096
+	maxEnvironmentBytes                              = 4096
 )
 
 var (
@@ -71,6 +82,8 @@ type CollisionPolicy string
 type StartupPolicy string
 type NativeTrust string
 type InstallationTrust string
+type ProfileSelector string
+type ChannelFeature string
 
 // Package is one immutable validated manifest and its exact-byte identity.
 // Accessors return defensive copies so capability selection always remains
@@ -133,12 +146,12 @@ type Executable struct {
 }
 
 // Capability contains exactly one recognized versioned capability schema.
-// NativeMCP is non-nil only for native-mcp v1.
 type Capability struct {
-	Type      string
-	Version   int
-	ID        string
-	NativeMCP *NativeMCP
+	Type           string
+	Version        int
+	ID             string
+	NativeMCP      *NativeMCP
+	ChannelAdapter *ChannelAdapter
 }
 
 // NativeMCP is the native stdio MCP capability v1 contract. The listed
@@ -171,6 +184,43 @@ type NativeHarnessTarget struct {
 	Trust   NativeTrust   `json:"trust"`
 }
 
+// ChannelAdapter is the metadata-only channel-adapter v1 declaration. It
+// identifies one executable and its exact fixed mode arguments; runtime
+// behavior is governed by the separate bounded channel-adapter protocol.
+// Every mode runs with the verified package root as its working directory.
+// Profile ids are non-secret opaque selectors. Hctl appends the standardized
+// "--profile", PROFILE pair for setup, status, and remove and sends the same
+// selector in runtime initialization.
+type ChannelAdapter struct {
+	Type            string                      `json:"type"`
+	Version         int                         `json:"version"`
+	ID              string                      `json:"id"`
+	ChannelKind     string                      `json:"channel_kind"`
+	Artifacts       []string                    `json:"artifacts"`
+	Executable      string                      `json:"executable"`
+	Runtime         ChannelAdapterCommand       `json:"runtime"`
+	Setup           ChannelAdapterCommand       `json:"setup"`
+	Status          ChannelAdapterCommand       `json:"status"`
+	Remove          ChannelAdapterCommand       `json:"remove"`
+	Protocol        ChannelAdapterProtocolRange `json:"protocol"`
+	ProfileSelector ProfileSelector             `json:"profile_selector"`
+	Features        []ChannelFeature            `json:"features"`
+}
+
+// ChannelAdapterCommand contains only fixed literal non-secret arguments. The
+// package cannot ask hctl to perform shell lookup or interpolate runtime
+// values.
+type ChannelAdapterCommand struct {
+	Arguments []string `json:"arguments"`
+}
+
+// ChannelAdapterProtocolRange is half-open. A live handshake may select only
+// a version inside this manifest declaration and hctl's own supported range.
+type ChannelAdapterProtocolRange struct {
+	Minimum int `json:"minimum"`
+	Before  int `json:"before"`
+}
+
 // NativeMCPSelection is content-free evidence binding one capability to an
 // exact package manifest, platform artifact, and executable identity. An
 // installer may add an absolute verified path; this contract does not.
@@ -179,6 +229,16 @@ type NativeMCPSelection struct {
 	PackageVersion string
 	ManifestSHA256 string
 	Capability     NativeMCP
+	Artifact       Artifact
+}
+
+// ChannelAdapterSelection is content-free metadata binding one adapter
+// capability to an immutable manifest, platform artifact, and executable.
+type ChannelAdapterSelection struct {
+	PackageID      string
+	PackageVersion string
+	ManifestSHA256 string
+	Capability     ChannelAdapter
 	Artifact       Artifact
 }
 
@@ -324,14 +384,22 @@ func decodeCapability(raw []byte) (Capability, error) {
 			return Capability{}, errors.New("field id is required and must be a string")
 		}
 	}
-	if header.Type != NativeMCPType || header.Version != NativeMCPVersion {
+	switch {
+	case header.Type == NativeMCPType && header.Version == NativeMCPVersion:
+		var native NativeMCP
+		if err := decodeStrict(raw, &native); err != nil {
+			return Capability{}, err
+		}
+		return Capability{Type: native.Type, Version: native.Version, ID: native.ID, NativeMCP: &native}, nil
+	case header.Type == ChannelAdapterType && header.Version == ChannelAdapterVersion:
+		var adapter ChannelAdapter
+		if err := decodeStrict(raw, &adapter); err != nil {
+			return Capability{}, err
+		}
+		return Capability{Type: adapter.Type, Version: adapter.Version, ID: adapter.ID, ChannelAdapter: &adapter}, nil
+	default:
 		return Capability{}, UnsupportedCapabilityError{Type: header.Type, Version: header.Version}
 	}
-	var native NativeMCP
-	if err := decodeStrict(raw, &native); err != nil {
-		return Capability{}, err
-	}
-	return Capability{Type: native.Type, Version: native.Version, ID: native.ID, NativeMCP: &native}, nil
 }
 
 func decodeStrict(content []byte, target any) error {
@@ -402,14 +470,23 @@ func (manifest Manifest) Validate() error {
 			return fmt.Errorf("integration capability id %q is duplicated", capability.ID)
 		}
 		capabilities[capability.ID] = true
-		if capability.Type != NativeMCPType || capability.Version != NativeMCPVersion || capability.NativeMCP == nil {
+		switch {
+		case capability.Type == NativeMCPType && capability.Version == NativeMCPVersion && capability.NativeMCP != nil && capability.ChannelAdapter == nil:
+			if capability.NativeMCP.ID != capability.ID || capability.NativeMCP.Type != capability.Type || capability.NativeMCP.Version != capability.Version {
+				return fmt.Errorf("capabilities[%d]: capability tags are inconsistent", index)
+			}
+			if err := capability.NativeMCP.Validate(artifacts); err != nil {
+				return fmt.Errorf("capabilities[%d]: %w", index, err)
+			}
+		case capability.Type == ChannelAdapterType && capability.Version == ChannelAdapterVersion && capability.ChannelAdapter != nil && capability.NativeMCP == nil:
+			if capability.ChannelAdapter.ID != capability.ID || capability.ChannelAdapter.Type != capability.Type || capability.ChannelAdapter.Version != capability.Version {
+				return fmt.Errorf("capabilities[%d]: capability tags are inconsistent", index)
+			}
+			if err := capability.ChannelAdapter.Validate(artifacts); err != nil {
+				return fmt.Errorf("capabilities[%d]: %w", index, err)
+			}
+		default:
 			return fmt.Errorf("capabilities[%d]: %w", index, UnsupportedCapabilityError{Type: capability.Type, Version: capability.Version})
-		}
-		if capability.NativeMCP.ID != capability.ID || capability.NativeMCP.Type != capability.Type || capability.NativeMCP.Version != capability.Version {
-			return fmt.Errorf("capabilities[%d]: capability tags are inconsistent", index)
-		}
-		if err := capability.NativeMCP.Validate(artifacts); err != nil {
-			return fmt.Errorf("capabilities[%d]: %w", index, err)
 		}
 	}
 	return nil
@@ -606,6 +683,94 @@ func (native NativeMCP) Validate(artifacts map[string]Artifact) error {
 	return nil
 }
 
+func (adapter ChannelAdapter) Validate(artifacts map[string]Artifact) error {
+	if adapter.Type != ChannelAdapterType || adapter.Version != ChannelAdapterVersion {
+		return UnsupportedCapabilityError{Type: adapter.Type, Version: adapter.Version}
+	}
+	if !capabilityID.MatchString(adapter.ID) || len(adapter.ID) > 64 {
+		return errors.New("channel-adapter id is invalid")
+	}
+	if !capabilityID.MatchString(adapter.ChannelKind) || len(adapter.ChannelKind) > 64 {
+		return errors.New("channel-adapter channel_kind is invalid")
+	}
+	if len(adapter.Artifacts) == 0 || len(adapter.Artifacts) > maxArtifacts {
+		return fmt.Errorf("channel-adapter artifacts must contain 1-%d ids", maxArtifacts)
+	}
+	if _, err := rootfs.CleanRelative(adapter.Executable); err != nil {
+		return errors.New("channel-adapter executable must be package-relative")
+	}
+	seenArtifacts := map[string]bool{}
+	seenPlatforms := map[string]bool{}
+	for _, id := range adapter.Artifacts {
+		if seenArtifacts[id] {
+			return fmt.Errorf("channel-adapter artifact %q is duplicated", id)
+		}
+		seenArtifacts[id] = true
+		artifact, ok := artifacts[id]
+		if !ok {
+			return fmt.Errorf("channel-adapter artifact %q is not declared", id)
+		}
+		if artifact.Executable.Path != adapter.Executable {
+			return fmt.Errorf("channel-adapter executable does not match artifact %q", id)
+		}
+		platform := string(artifact.OS) + "/" + string(artifact.Architecture)
+		if seenPlatforms[platform] {
+			return fmt.Errorf("channel-adapter has ambiguous artifacts for %s", platform)
+		}
+		seenPlatforms[platform] = true
+	}
+	commands := []struct {
+		name    string
+		command ChannelAdapterCommand
+	}{
+		{name: "runtime", command: adapter.Runtime},
+		{name: "setup", command: adapter.Setup},
+		{name: "status", command: adapter.Status},
+		{name: "remove", command: adapter.Remove},
+	}
+	for _, entry := range commands {
+		if len(entry.command.Arguments) == 0 || len(entry.command.Arguments) > maxArguments {
+			return fmt.Errorf("channel-adapter %s arguments must contain 1-%d values", entry.name, maxArguments)
+		}
+		for index, argument := range entry.command.Arguments {
+			if argument == "--profile" {
+				return fmt.Errorf("channel-adapter %s arguments reserve --profile for hctl", entry.name)
+			}
+			if err := validateLiteral("channel-adapter argument", argument, maxArgumentBytes); err != nil || argument == "" {
+				if err == nil {
+					err = errors.New("channel-adapter argument must not be empty")
+				}
+				return fmt.Errorf("%s.arguments[%d]: %w", entry.name, index, err)
+			}
+		}
+	}
+	if adapter.Protocol.Minimum < 1 || adapter.Protocol.Before <= adapter.Protocol.Minimum || adapter.Protocol.Minimum > ChannelAdapterProtocolVersion || adapter.Protocol.Before <= ChannelAdapterProtocolVersion {
+		return fmt.Errorf("channel-adapter protocol range must include version %d", ChannelAdapterProtocolVersion)
+	}
+	if adapter.ProfileSelector != ProfileOpaqueID {
+		return errors.New("channel-adapter profile_selector must be opaque-id-v1")
+	}
+	if len(adapter.Features) == 0 || len(adapter.Features) > 7 {
+		return errors.New("channel-adapter features must contain 1-7 values")
+	}
+	allowedFeatures := map[ChannelFeature]bool{
+		FeatureTyping: true, FeatureReplies: true, FeatureEdits: true,
+		FeatureReactions: true, FeatureAttachments: true,
+		FeatureInteractive: true, FeatureTextFallback: true,
+	}
+	seenFeatures := map[ChannelFeature]bool{}
+	for _, feature := range adapter.Features {
+		if !allowedFeatures[feature] {
+			return fmt.Errorf("channel-adapter feature %q is unsupported", feature)
+		}
+		if seenFeatures[feature] {
+			return fmt.Errorf("channel-adapter feature %q is duplicated", feature)
+		}
+		seenFeatures[feature] = true
+	}
+	return nil
+}
+
 // SelectNativeMCP resolves exact immutable metadata for one supported platform
 // without finding, opening, or executing an installed artifact.
 func (pkg Package) SelectNativeMCP(id, targetOS, targetArchitecture string) (NativeMCPSelection, error) {
@@ -632,6 +797,31 @@ func (pkg Package) SelectNativeMCP(id, targetOS, targetArchitecture string) (Nat
 		return NativeMCPSelection{}, fmt.Errorf("native-mcp capability %q does not support %s/%s", id, targetOS, targetArchitecture)
 	}
 	return NativeMCPSelection{}, fmt.Errorf("native-mcp capability %q is not declared", id)
+}
+
+// SelectChannelAdapter resolves exact immutable metadata for one supported
+// platform without finding, opening, or executing an installed artifact.
+func (pkg Package) SelectChannelAdapter(id, targetOS, targetArchitecture string) (ChannelAdapterSelection, error) {
+	if !checksumPattern.MatchString(pkg.sha256) {
+		return ChannelAdapterSelection{}, errors.New("integration package manifest identity is invalid")
+	}
+	for _, capability := range pkg.manifest.Capabilities {
+		if capability.ID != id || capability.ChannelAdapter == nil {
+			continue
+		}
+		for _, artifactID := range capability.ChannelAdapter.Artifacts {
+			for _, artifact := range pkg.manifest.Artifacts {
+				if artifact.ID == artifactID && string(artifact.OS) == targetOS && string(artifact.Architecture) == targetArchitecture {
+					return ChannelAdapterSelection{
+						PackageID: pkg.manifest.ID, PackageVersion: pkg.manifest.Version,
+						ManifestSHA256: pkg.sha256, Capability: cloneChannelAdapter(*capability.ChannelAdapter), Artifact: artifact,
+					}, nil
+				}
+			}
+		}
+		return ChannelAdapterSelection{}, fmt.Errorf("channel-adapter capability %q does not support %s/%s", id, targetOS, targetArchitecture)
+	}
+	return ChannelAdapterSelection{}, fmt.Errorf("channel-adapter capability %q is not declared", id)
 }
 
 // Validate binds operator-owned install, trust, and enable state to exact
@@ -695,7 +885,22 @@ func cloneManifest(manifest Manifest) Manifest {
 			native := cloneNativeMCP(*capability.NativeMCP)
 			cloned.Capabilities[index].NativeMCP = &native
 		}
+		if capability.ChannelAdapter != nil {
+			adapter := cloneChannelAdapter(*capability.ChannelAdapter)
+			cloned.Capabilities[index].ChannelAdapter = &adapter
+		}
 	}
+	return cloned
+}
+
+func cloneChannelAdapter(adapter ChannelAdapter) ChannelAdapter {
+	cloned := adapter
+	cloned.Artifacts = append([]string(nil), adapter.Artifacts...)
+	cloned.Runtime.Arguments = append([]string(nil), adapter.Runtime.Arguments...)
+	cloned.Setup.Arguments = append([]string(nil), adapter.Setup.Arguments...)
+	cloned.Status.Arguments = append([]string(nil), adapter.Status.Arguments...)
+	cloned.Remove.Arguments = append([]string(nil), adapter.Remove.Arguments...)
+	cloned.Features = append([]ChannelFeature(nil), adapter.Features...)
 	return cloned
 }
 

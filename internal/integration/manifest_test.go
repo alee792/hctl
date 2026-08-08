@@ -36,6 +36,64 @@ func TestNativeMCPFixturesUseOneVendorNeutralContract(t *testing.T) {
 	}
 }
 
+func TestChannelAdapterCapabilitySelectsImmutablePlatformMetadata(t *testing.T) {
+	t.Parallel()
+	pkg, err := Load(filepath.Join("testdata", "channel-adapter-fixture.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := pkg.SelectChannelAdapter("fixture", "darwin", "arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.ManifestSHA256 != pkg.Identity() || selection.Capability.ChannelKind != "fixture" || selection.Artifact.Executable.Path != "bin/fixture-channel" {
+		t.Fatalf("selection = %#v", selection)
+	}
+	if selection.Capability.Protocol != (ChannelAdapterProtocolRange{Minimum: 1, Before: 2}) || selection.Capability.ProfileSelector != ProfileOpaqueID {
+		t.Fatalf("protocol/profile contract = %#v", selection.Capability)
+	}
+	selection.Capability.Runtime.Arguments[0] = "changed"
+	again, err := pkg.SelectChannelAdapter("fixture", "darwin", "arm64")
+	if err != nil || again.Capability.Runtime.Arguments[0] != "run" {
+		t.Fatalf("selection was not defensive: %#v, %v", again, err)
+	}
+}
+
+func TestChannelAdapterCapabilityValidatesEveryClosedField(t *testing.T) {
+	t.Parallel()
+	pkg, err := Load(filepath.Join("testdata", "channel-adapter-fixture.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*ChannelAdapter)
+		want   string
+	}{
+		{name: "channel kind", mutate: func(value *ChannelAdapter) { value.ChannelKind = "Discord_Transport" }, want: "channel_kind"},
+		{name: "artifact", mutate: func(value *ChannelAdapter) { value.Artifacts[0] = "missing" }, want: "not declared"},
+		{name: "executable", mutate: func(value *ChannelAdapter) { value.Executable = "../escape" }, want: "package-relative"},
+		{name: "runtime mode", mutate: func(value *ChannelAdapter) { value.Runtime.Arguments = nil }, want: "runtime arguments"},
+		{name: "profile argument", mutate: func(value *ChannelAdapter) { value.Setup.Arguments = []string{"setup", "--profile"} }, want: "reserve --profile"},
+		{name: "protocol", mutate: func(value *ChannelAdapter) { value.Protocol.Before = 1 }, want: "protocol range"},
+		{name: "profile selector", mutate: func(value *ChannelAdapter) { value.ProfileSelector = "path" }, want: "profile_selector"},
+		{name: "feature", mutate: func(value *ChannelAdapter) { value.Features[0] = "vendor-payloads" }, want: "unsupported"},
+		{name: "duplicate feature", mutate: func(value *ChannelAdapter) { value.Features[1] = value.Features[0] }, want: "duplicated"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := pkg.Manifest()
+			test.mutate(manifest.Capabilities[0].ChannelAdapter)
+			if err := manifest.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	if _, err := pkg.SelectChannelAdapter("fixture", "linux", "amd64"); err == nil || !strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("unsupported platform error = %v", err)
+	}
+}
+
 func TestUnknownCapabilityIsRejectedWithoutReadingArtifact(t *testing.T) {
 	t.Parallel()
 	_, err := Load(filepath.Join("testdata", "future-capability.json"))
@@ -43,7 +101,7 @@ func TestUnknownCapabilityIsRejectedWithoutReadingArtifact(t *testing.T) {
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("future capability error = %v", err)
 	}
-	if unsupported.Type != "channel-adapter" || unsupported.Version != 1 {
+	if unsupported.Type != "channel-adapter" || unsupported.Version != 2 {
 		t.Fatalf("future capability = %#v", unsupported)
 	}
 }

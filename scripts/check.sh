@@ -17,14 +17,14 @@ cd "$repo_root"
 
 actionlint
 
-unformatted=$(find cmd internal -type f -name '*.go' -exec gofmt -l {} +)
+unformatted=$(find cmd internal channeladapter -type f -name '*.go' -exec gofmt -l {} +)
 if [ -n "$unformatted" ]; then
   echo "gofmt is required for:" >&2
   echo "$unformatted" >&2
   exit 1
 fi
 
-unimported=$(find cmd internal -type f -name '*.go' -exec goimports -l {} +)
+unimported=$(find cmd internal channeladapter -type f -name '*.go' -exec goimports -l {} +)
 if [ -n "$unimported" ]; then
   echo "goimports is required for:" >&2
   echo "$unimported" >&2
@@ -35,3 +35,11 @@ go test ./...
 go vet ./...
 golangci-lint run
 govulncheck ./...
+
+(
+  cd channeladapter
+  go test ./...
+  go vet ./...
+  golangci-lint run ./...
+  govulncheck ./...
+)

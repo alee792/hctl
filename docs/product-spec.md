@@ -754,6 +754,73 @@ only ASCII letters, spaces, commas, periods, semicolons, parentheses,
 apostrophes, and hyphens and beginning with a letter. Hctl still cannot
 reliably detect an arbitrary secret disguised as allowed prose.
 
+The second recognized capability is `channel-adapter` version 1. It declares a
+stable channel kind, the exact artifacts in its selective runtime and staging
+closure, one matching package-relative executable, fixed literal argument
+vectors for runtime/setup/status/remove, a half-open protocol range containing
+version 1, the non-secret `opaque-id-v1` profile selector, and a closed subset
+of typing, replies, edits, reactions, attachments, interactive components, and
+text fallback. Hctl appends only the standardized `--profile PROFILE` pair to
+setup/status/remove. The runtime profile id travels in initialization. Live
+feature and limit negotiation may only narrow the manifest declaration.
+Every mode runs from the verified package root; no manifest field selects the
+agent workspace or an ambient working directory.
+
+The channel-adapter protocol is one bounded bidirectional JSONL stream over an
+exact verified child process's stdin/stdout. The adapter opens with
+hello; hctl selects one compatible version plus profile, feature, limit, and
+ambient participation policy; and the adapter becomes usable only after a
+correlated ready response. Stdout is protocol-only and stderr is bounded
+diagnostics. Hctl owns launch, deadlines, cancellation, graceful/forced
+process-tree cleanup, and the translation to the existing channel controller.
+The adapter owns vendor connect/reconnect, source authorization, SDK payloads,
+rendering, callback identifiers, rate limits, transport state, credentials,
+and non-secret profile data.
+
+Frames contain only closed semantic messages: opaque route/message/author
+handles, normalized inbound text and attachment descriptors, authorized
+status/reset requests and redacted results, activity and reply/edit/reaction
+intents, the existing bounded interactive request and normalized answer,
+attachment transfer authorization and bounded base64 chunks, exact/ambiguous/
+failed dispositions, connection lifecycle, classified diagnostics, event
+acknowledgement, and shutdown. Vendor payloads and SDK objects, credentials,
+raw environment, arbitrary markup/component trees, executable code, commands,
+URLs carrying authority, and filesystem/workspace paths have no protocol
+representation. Hctl remains the sole writer of dispatcher, session,
+interaction, worktree, capacity, and generic durable state.
+
+Version 1 limits one frame to 256 KiB, semantic text to 64 KiB, one message to
+16 attachments, one attachment transfer to 16 MiB in 64-KiB chunks, concurrent
+transfers to four, outstanding correlations to 128, the in-memory protocol
+queue to 64 frames and 8 MiB, retained stderr to 64 KiB, and a
+setup/status/remove result to 16 KiB. Negotiation may lower those values.
+Ordinary commands and deliveries have 30-second deadlines, attachments 60
+seconds, and graceful shutdown five seconds before forced tree cleanup.
+
+An adapter keeps an event id and exact bytes stable until hctl acknowledges a
+durable acceptance, duplicate, or rejection. Exact same-content replay is
+idempotent; changed content under one id is fatal. Stable inbound source ids
+enter dispatcher deduplication. Hctl never automatically resends an effect
+after a complete command write without a proven pre-attempt failure. Missing
+results, disconnects, deadlines, and post-write child exits are ambiguous and
+use the controller's existing uncertain/no-retry behavior. Malformed,
+oversized, unknown, wrong-direction, or uncorrelated protocol data terminates
+only the owning adapter runtime.
+
+Setup, status, and remove use exact package modes. Secret entry and credential
+storage occur inside the trusted adapter using its inherited operator terminal
+or deployment environment; hctl receives one closed bounded non-secret result.
+Hctl sends only a non-secret profile id. An ambient compatibility credential
+may be inherited only by the exact adapter; it is never parsed or sent in a
+frame and must be scrubbed from every unrelated child. Process isolation keeps
+dependencies and responsibility separate, but is not an OS sandbox or a
+defense against a malicious adapter or same-user peer process. See
+[ADR 0032](adr/0032-use-a-bounded-semantic-channel-adapter-protocol.md).
+
+This contract does not yet route the current Discord runtime out of process.
+The separate official adapter, generic process host, and final dependency
+removal remain the migration deliveries that follow this foundation.
+
 Core depends only on validated package data and narrow capability consumers.
 Vendor packages depend inward on those contracts and run as separate
 executables. No package can contribute Go interfaces, be imported into hctl,

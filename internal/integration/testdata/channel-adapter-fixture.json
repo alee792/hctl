@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "id": "fixture-channel-adapter",
+  "version": "1.0.0",
+  "name": "Credentialless channel adapter fixture",
+  "description": "A deterministic metadata-only fixture for the channel adapter package contract.",
+  "license": "MIT",
+  "provenance": {
+    "source": "https://example.invalid/hctl/channel-adapter-fixture",
+    "revision": "fixture-v1"
+  },
+  "compatibility": {
+    "minimum": "0.1.0-dev",
+    "before": "1.0.0"
+  },
+  "artifacts": [
+    {
+      "id": "darwin-arm64",
+      "os": "darwin",
+      "architecture": "arm64",
+      "format": "binary",
+      "source": {
+        "kind": "package",
+        "path": "payload/fixture-channel"
+      },
+      "size": 4096,
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "executable": {
+        "path": "bin/fixture-channel",
+        "size": 4096,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    }
+  ],
+  "capabilities": [
+    {
+      "type": "channel-adapter",
+      "version": 1,
+      "id": "fixture",
+      "channel_kind": "fixture",
+      "artifacts": ["darwin-arm64"],
+      "executable": "bin/fixture-channel",
+      "runtime": {"arguments": ["run", "--stdio"]},
+      "setup": {"arguments": ["setup"]},
+      "status": {"arguments": ["status"]},
+      "remove": {"arguments": ["remove"]},
+      "protocol": {"minimum": 1, "before": 2},
+      "profile_selector": "opaque-id-v1",
+      "features": [
+        "typing",
+        "replies",
+        "edits",
+        "reactions",
+        "attachments",
+        "interactive-components",
+        "text-fallback"
+      ]
+    }
+  ]
+}

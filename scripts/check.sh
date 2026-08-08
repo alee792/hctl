@@ -4,7 +4,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tools_root="$repo_root/.tools"
 
-if [ ! -x "$tools_root/go/bin/go" ] || [ ! -x "$tools_root/bin/golangci-lint" ]; then
+if [ ! -x "$tools_root/go/bin/go" ] || [ ! -x "$tools_root/bin/golangci-lint" ] || [ ! -x "$tools_root/bin/actionlint" ]; then
   echo "development tools are missing; run ./scripts/bootstrap-tools.sh" >&2
   exit 1
 fi
@@ -14,6 +14,8 @@ export GOCACHE="$tools_root/cache/build"
 export GOMODCACHE="$tools_root/cache/mod"
 
 cd "$repo_root"
+
+actionlint
 
 unformatted=$(find cmd internal -type f -name '*.go' -exec gofmt -l {} +)
 if [ -n "$unformatted" ]; then

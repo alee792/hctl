@@ -5,11 +5,11 @@ native harness, hctl, and the pinned Deno, Python/uv, and Go inputs that `apply`
 or `stage` may need. They do not contain an agent, provider credentials, login
 state, or conversation state.
 
-The Codex image definition is currently built and exercised without publishing
-on every pull request. Until exact release-tag publication is implemented,
-`ghcr.io/alee792/hctl/codex:VERSION` below documents the intended interface,
-not an available package. The Claude image remains separate work and must not
-be published without permission under Anthropic's terms.
+The Codex image definition is built and exercised without publishing on every
+pull request. An exact `vX.Y.Z` hctl tag reruns that proof and publishes
+`ghcr.io/alee792/hctl/codex:vX.Y.Z`. No moving `latest`, major, or minor tag is
+published. The Claude image remains separate work and must not be published
+without permission under Anthropic's terms.
 
 ## Direct image
 
@@ -97,3 +97,39 @@ context, staged tree, or registry layer. OpenAI's current
 [Codex authentication guidance](https://learn.chatgpt.com/docs/auth.md)
 documents API-key login, headless login, cache locations, and credential-store
 options.
+
+## Release identity and verification
+
+The release workflow publishes the already-checked Codex source image, not a
+second independently constructed image. Its GitHub release contains:
+
+- `hctl_X.Y.Z_darwin_arm64.tar.gz`;
+- `hctl_X.Y.Z_SHA256SUMS`;
+- `hctl_X.Y.Z_codex_linux_amd64_DIGEST`; and
+- `hctl_X.Y.Z_codex_linux_amd64.spdx.json`.
+
+Use the digest file when an immutable deployment input matters:
+
+```sh
+image=$(cat hctl_X.Y.Z_codex_linux_amd64_DIGEST)
+docker pull "$image"
+```
+
+The exact image digest receives both GitHub build-provenance and SPDX SBOM
+attestations. With a current GitHub CLI and an authenticated GHCR session:
+
+```sh
+gh attestation verify \
+  oci://ghcr.io/alee792/hctl/codex:vX.Y.Z \
+  --repo alee792/hctl
+```
+
+The tag workflow has a read-only build job and a downstream `release`
+environment with release, package, and attestation authority. Repository
+owners must protect that environment, restrict `v*` tag creation with a
+repository ruleset, and make the linked GHCR package public before treating the
+image as generally available. The workflow refuses to replace an existing
+exact image tag. If publication stops after the image push but before the
+GitHub release is created, do not move or recreate the Git tag; inspect the
+pushed digest and remove the incomplete package version before a controlled
+rerun.

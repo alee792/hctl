@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify release artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate exact release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$(git tag --points-at HEAD --list 'v[0-9]*')" == "$GITHUB_REF_NAME" ]]
+
+      - name: Bootstrap pinned development tools
+        run: ./scripts/bootstrap-tools.sh
+
+      - name: Run repository checks
+        run: ./scripts/check.sh
+
+      - name: Build and verify release artifacts
+        run: |
+          export PATH="$PWD/.tools/go/bin:$PWD/.tools/bin:$PATH"
+          ./scripts/build-release-artifacts.sh --output release-output
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-assets
+          path: release-output/release/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload checked Codex image transport
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: codex-image
+          path: release-output/transport/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    name: Publish release and Codex image
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository }}/codex
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: release-assets
+          path: dist/release
+
+      - name: Download checked Codex image
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: codex-image
+          path: dist/transport
+
+      - name: Validate transported image
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]
+          version="${BASH_REMATCH[1]}"
+          transport="dist/transport/hctl_${version}_codex_linux_amd64.docker.tar.gz"
+          (cd dist/transport && sha256sum --check "$(basename "$transport").sha256")
+          gzip --test "$transport"
+          printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
+          printf 'transport=%s\n' "$transport" >>"$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push exact Codex image tag
+        id: push
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TRANSPORT: ${{ steps.release.outputs.transport }}
+        run: |
+          set -euo pipefail
+          gzip --decompress --stdout "$TRANSPORT" | docker image load
+          reference="$IMAGE_NAME:v$VERSION"
+          if docker manifest inspect "$reference" >/dev/null 2>&1; then
+            echo "refusing to replace existing image tag $reference" >&2
+            exit 1
+          fi
+          docker image tag hctl-codex:acceptance "$reference"
+          docker image push "$reference"
+          repo_digest=$(docker image inspect "$reference" --format '{{range .RepoDigests}}{{println .}}{{end}}' | awk -v prefix="$IMAGE_NAME@" 'index($0, prefix) == 1 { print; exit }')
+          digest=${repo_digest#*@}
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "$digest" >>"$GITHUB_OUTPUT"
+          printf '%s@%s\n' "$IMAGE_NAME" "$digest" >"dist/release/hctl_${VERSION}_codex_linux_amd64_DIGEST"
+
+      - name: Generate image SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: dist/release/hctl_${{ steps.release.outputs.version }}_codex_linux_amd64.spdx.json
+          dependency-snapshot: false
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Complete release checksums
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          cd dist/release
+          sha256sum \
+            "hctl_${VERSION}_codex_linux_amd64_DIGEST" \
+            "hctl_${VERSION}_codex_linux_amd64.spdx.json" \
+            >>"hctl_${VERSION}_SHA256SUMS"
+          sha256sum --check "hctl_${VERSION}_SHA256SUMS"
+
+      - name: Attest release files
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-checksums: dist/release/hctl_${{ steps.release.outputs.version }}_SHA256SUMS
+
+      - name: Attest image provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-version: v${{ steps.release.outputs.version }}
+          push-to-registry: true
+
+      - name: Attest image SBOM
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-version: v${{ steps.release.outputs.version }}
+          sbom-path: dist/release/hctl_${{ steps.release.outputs.version }}_codex_linux_amd64.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/release/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

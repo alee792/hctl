@@ -46,8 +46,8 @@ with minimal permissions.
 | Authored-tool runtimes | The Codex source image installs Deno, Python/uv, and Go at canonical paths; Python reports the exact `/opt/hctl/runtimes/python` base prefix. Focused staged fixtures prove Deno-only, Python-only, Go-only, and tool-free execution closures. | Repeat the same matrix for Claude if its image build is authorized. |
 | Compatible final base | The input manifest records the measured loader and shared-library union. CI checks those dependencies, the CA bundle, UID/GID 65532, direct apply, and the clean-base staged journey. | Keep the measured contract current when any binary input changes. |
 | Credential-free acceptance | CI uses the real Codex binary without credentials or model calls and proves source, direct, and all focused staged-runtime images. | Equivalent Claude coverage remains subject to its publication gate. |
-| Supply chain | The local release archive gets a SHA-256 manifest. Harness and runtime inputs are checksum-pinned and fetched through one verifier. | Published images need immutable digests, SBOMs, provenance, and retained version metadata. |
-| Publication | No release or package workflow exists. | GHCR naming, tag policy, permissions, protected release environment, and failure/rollback behavior remain to be implemented. |
+| Supply chain | The release archive gets a SHA-256 manifest. Harness and runtime inputs are checksum-pinned and fetched through one verifier. Exact Codex image releases retain the registry digest, SPDX SBOM, and GitHub provenance/SBOM attestations. | Repeat the same evidence for Claude only if publication is authorized. |
+| Publication | An exact-tag workflow passes checked artifacts from a read-only build job to a `release` environment, publishes only `ghcr.io/alee792/hctl/codex:vX.Y.Z`, and refuses to replace that tag. | Protect the repository environment and make the linked package public as one-time GitHub configuration; Claude remains gated. |
 
 Container acceptance cannot depend on every developer having a matching Linux
 daemon. Hosted Linux CI is therefore the required acceptance environment, not
@@ -96,7 +96,8 @@ merely a mirror of an optional local container proof.
    out of scope for issue #48.
 5. **Claude vertical slice.** Build and test the equivalent image only within
    the authorization established for the proprietary harness.
-6. **Tag publication.** Publish the existing archive and authorized GHCR images
-   from exact clean tags, retain immutable digests, and generate SBOM and
-   provenance evidence. Keep signing, deployment, and downstream agent images
-   outside hctl's boundary.
+6. **Tag publication (Codex complete).** Exact clean tags publish the existing
+   archive and the checked Codex image, retain its immutable digest, and attach
+   SPDX SBOM and GitHub provenance evidence. Claude stays excluded while its
+   publication gate is closed. Signing, deployment, and downstream agent
+   images remain outside hctl's boundary.

@@ -4,11 +4,15 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 manifest="$repo_root/images/inputs.json"
 
-if [ "$#" -ne 2 ] || [ "$1" != "--hctl" ] || [ -z "$2" ]; then
-  echo "usage: ./scripts/check-codex-image.sh --hctl FILE" >&2
+if { [ "$#" -ne 2 ] && [ "$#" -ne 4 ]; } || [ "$1" != "--hctl" ] || [ -z "$2" ] || { [ "$#" -eq 4 ] && { [ "$3" != "--version" ] || [ -z "$4" ]; }; }; then
+  echo "usage: ./scripts/check-codex-image.sh --hctl FILE [--version VERSION]" >&2
   exit 64
 fi
 hctl_executable=$2
+hctl_version_override=
+if [ "$#" -eq 4 ]; then
+  hctl_version_override=$4
+fi
 hctl_parent=$(CDPATH= cd -- "$(dirname -- "$hctl_executable")" && pwd -P) || {
   echo "hctl image input parent must exist" >&2
   exit 1
@@ -37,7 +41,7 @@ while IFS="$tab" read -r key value; do
   case "$key" in
     base_reference) base_reference=$value ;;
     base_digest) base_digest=$value ;;
-    hctl_version) hctl_version=$value ;;
+    hctl_version) manifest_hctl_version=$value ;;
     shared_libraries) shared_libraries=$value ;;
     codex_version) codex_version=$value ;;
     codex_sha256) codex_sha256=$value ;;
@@ -52,6 +56,8 @@ while IFS="$tab" read -r key value; do
     *) echo "unexpected image metadata field: $key" >&2; exit 1 ;;
   esac
 done <"$work/metadata.tsv"
+hctl_version=${hctl_version_override:-$manifest_hctl_version}
+(cd "$repo_root" && go run -mod=readonly ./scripts/image-inputs validate-version "$hctl_version")
 base_image="$base_reference@$base_digest"
 
 "$repo_root/scripts/prepare-codex-image-context.sh" --hctl "$hctl_executable" --version "$hctl_version" --output "$work/context"

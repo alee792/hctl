@@ -122,9 +122,10 @@ translate, provision dependencies from, or enforce this vendor document.
    source boundary does not.
 5. Require valid UTF-8 relative resource paths so JSON ownership records can
    represent every generated file exactly.
-6. Keep the existing eight-skill limit and bound resource counts, individual
-   files, and aggregate skill content. Reject entries before reading outside
-   those bounds.
+6. Apply [ADR 0029](../adr/0029-bound-authored-projects-with-aggregate-budgets.md)'s
+   high skill-count ceiling and shared skill-set file and byte budgets. Keep
+   individual skills and resources bounded, and reject entries before reading
+   outside those bounds.
 7. Parse frontmatter as YAML. Do not extend the former line parser to
    approximate nested `metadata`, lists, booleans, or vendor documents.
 8. Diagnose recognized vendor metadata by authored path, field when available,

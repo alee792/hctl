@@ -1,6 +1,7 @@
 # ADR 0020: Map plugin MCP through native harness configuration
 
 - Status: accepted
+- Extended by: [ADR 0029](0029-bound-authored-projects-with-aggregate-budgets.md)
 
 ## Plain-English summary
 

@@ -21,10 +21,13 @@ import (
 )
 
 const (
-	maxHostLine    = 64 << 10
-	maxDescription = 1024
-	shutdownWait   = 2 * time.Second
+	maxHostCallLine    = 64 << 10
+	maxHostCatalogLine = 8 << 20
+	maxDescription     = 1024
+	shutdownWait       = 2 * time.Second
 )
+
+var errHostResponseTooLarge = errors.New("tool host output exceeded the bounded response size")
 
 type Definition struct {
 	Name         string          `json:"name"`
@@ -130,14 +133,14 @@ func (runtime *Runtime) Call(ctx context.Context, name string, arguments json.Ra
 	if !exists {
 		return nil, fmt.Errorf("unknown managed tool %q", name)
 	}
-	if len(arguments) == 0 || len(arguments) > maxHostLine || !json.Valid(arguments) {
+	if len(arguments) == 0 || len(arguments) > maxHostCallLine || !json.Valid(arguments) {
 		return nil, errors.New("tool arguments must be bounded JSON")
 	}
 	var result hostCall
 	if err := tool.client.request(ctx, "call", map[string]any{"name": name, "arguments": json.RawMessage(arguments)}, &result); err != nil {
 		return nil, err
 	}
-	if len(result.Output) == 0 || len(result.Output) > maxHostLine || !json.Valid(result.Output) {
+	if len(result.Output) == 0 || len(result.Output) > maxHostCallLine || !json.Valid(result.Output) {
 		return nil, errors.New("tool host returned invalid or oversized output")
 	}
 	return result.Output, nil
@@ -235,7 +238,7 @@ func validateDefinition(definition Definition) error {
 		return errors.New("name or description is invalid")
 	}
 	for _, schema := range []json.RawMessage{definition.InputSchema, definition.OutputSchema} {
-		if len(schema) == 0 || len(schema) > maxHostLine || !json.Valid(schema) {
+		if len(schema) == 0 || len(schema) > maxHostCallLine || !json.Valid(schema) {
 			return errors.New("schema is invalid or oversized")
 		}
 		var object map[string]any
@@ -250,7 +253,7 @@ type client struct {
 	name    string
 	command *exec.Cmd
 	input   io.WriteCloser
-	output  *bufio.Scanner
+	output  *bufio.Reader
 	encoder *json.Encoder
 	mu      sync.Mutex
 	nextID  int
@@ -274,9 +277,40 @@ func startClient(ctx context.Context, directory, name string, environment []stri
 	if err := command.Start(); err != nil {
 		return nil, fmt.Errorf("cannot start %s tool host", name)
 	}
-	scanner := bufio.NewScanner(output)
-	scanner.Buffer(make([]byte, 4096), maxHostLine)
-	return &client{name: name, command: command, input: input, output: scanner, encoder: json.NewEncoder(input)}, nil
+	reader := bufio.NewReaderSize(output, 4096)
+	return &client{name: name, command: command, input: input, output: reader, encoder: json.NewEncoder(input)}, nil
+}
+
+func readHostLine(reader *bufio.Reader, limit int) ([]byte, error) {
+	line := make([]byte, 0, min(limit, 4096))
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		switch {
+		case err == nil:
+			fragment = bytes.TrimSuffix(fragment, []byte{'\n'})
+			fragment = bytes.TrimSuffix(fragment, []byte{'\r'})
+			if len(line)+len(fragment) > limit {
+				return nil, errHostResponseTooLarge
+			}
+			return append(line, fragment...), nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			if len(line)+len(fragment) > limit {
+				return nil, errHostResponseTooLarge
+			}
+			line = append(line, fragment...)
+		case errors.Is(err, io.EOF):
+			fragment = bytes.TrimSuffix(fragment, []byte{'\r'})
+			if len(line)+len(fragment) > limit {
+				return nil, errHostResponseTooLarge
+			}
+			if len(line)+len(fragment) == 0 {
+				return nil, io.EOF
+			}
+			return append(line, fragment...), nil
+		default:
+			return nil, err
+		}
+	}
 }
 
 func (client *client) request(ctx context.Context, method string, params any, target any) error {
@@ -296,12 +330,13 @@ func (client *client) request(ctx context.Context, method string, params any, ta
 		err  error
 	}
 	result := make(chan scanResult, 1)
+	limit := maxHostCallLine
+	if method == "list" {
+		limit = maxHostCatalogLine
+	}
 	go func() {
-		if client.output.Scan() {
-			result <- scanResult{line: append([]byte(nil), client.output.Bytes()...)}
-			return
-		}
-		result <- scanResult{err: client.output.Err()}
+		line, err := readHostLine(client.output, limit)
+		result <- scanResult{line: line, err: err}
 	}()
 	var scanned scanResult
 	select {
@@ -312,6 +347,9 @@ func (client *client) request(ctx context.Context, method string, params any, ta
 	}
 	if scanned.line == nil {
 		client.abort()
+		if errors.Is(scanned.err, errHostResponseTooLarge) {
+			return errHostResponseTooLarge
+		}
 		if scanned.err != nil {
 			return errors.New("tool host output exceeded the bounded line size")
 		}

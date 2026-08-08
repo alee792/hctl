@@ -108,19 +108,41 @@ hyphens. `instructions.md` is required and contains YAML frontmatter with one
 plain `description` plus a non-empty Markdown body. Generated always-on
 instructions contain the body, not the frontmatter.
 
+Authored source remains bounded by implementation-owned safety ceilings rather
+than ordinary-use quotas. Counts are intentionally high; aggregate file and
+byte budgets bound the work performed by load and apply:
+
+| Surface | Count ceiling | File and aggregate ceilings |
+| --- | ---: | --- |
+| Root instructions | One required file | 128 KiB |
+| Root and imported skills | 256 aggregate | 1,024 files per skill; 8,192 files and 64 MiB across the skill set; `SKILL.md` 128 KiB; other resources 16 MiB each |
+| Authored tools | 128 | 1,024 source and dependency files; 1 MiB each and 64 MiB aggregate |
+| Immediate subagents | 128 | 128 KiB each and 16 MiB aggregate |
+| Schedules | 256 | 128 KiB per source, including a 32 KiB prompt; 16 MiB aggregate |
+| Vendored plugins | 128 directory entries | `plugin.json` and `mcp.json` 128 KiB each; each plugin `skills/` location has 1,024 entries |
+| Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration is at most 8 MiB |
+| Selected harness-specific files | 1,024 | 1 MiB each and 8 MiB aggregate |
+| Connections and channels | One implemented file each | `github.md` and `discord.md` are 8 KiB files whose authored descriptions or policies contain 1-1,024 characters |
+
+These ceilings are not configurable authoring API. Exceeding a root-project
+or project-level directory ceiling fails before workspace mutation. Invalid or
+excess optional plugin components that reach component validation remain
+isolated with authored-path diagnostics. See
+[ADR 0029](adr/0029-bound-authored-projects-with-aggregate-budgets.md).
+
 The `skills/` directory is optional. Each visible immediate directory is one
 skill and contains a required `SKILL.md`; its frontmatter `name` must match the
 directory name. A skill follows the open Agent Skills format and may include
 regular-file resources such as `scripts/`, `references/`, `assets/`, and other
 nested directories. Adding or removing a skill directory updates the compiled
-project without separate registration. Hctl keeps the existing eight-skill
-limit.
+project without separate registration. Root and imported skills share the
+aggregate ceilings above.
 
 The optional `plugins/` directory vendors Agent Plugins v1 dependencies. Each
 visible immediate real directory is one plugin with a required bounded
 `plugin.json` targeting the exact canonical v1.0.0 schema identifier. The
-directory may contain at most 32 entries, and each plugin `skills/` location at
-most 128 entries before the merged eight-skill limit applies. Hctl
+directory may contain at most 128 entries, and each plugin `skills/` location at
+most 1,024 entries before the merged 256-skill limit applies. Hctl
 validates that schema locally without fetching it. Manifest violations reject
 only that plugin; unsupported top-level fields, non-object `extensions` values,
 and every unsupported extension namespace are ignored with warnings. Namespace
@@ -132,8 +154,8 @@ are normal.
 Root `skills/` load first. Plugin and component directories load in lexical
 order. The first skill name wins; later collisions are skipped with a warning
 and are not renamed. Invalid plugin skills are skipped independently while
-valid sibling components continue. The merged skill set retains the existing
-eight-skill aggregate limit and resource bounds. Symlinks are never followed.
+valid sibling components continue. The merged skill set shares the aggregate
+count, file, and byte bounds above. Symlinks are never followed.
 Accepted plugin manifests and consumed skill resources participate in the
 source fingerprint and generate through the same native Claude and Codex skill
 paths as root skills.
@@ -213,7 +235,7 @@ or `high`; apply emits it as Claude agent `effort` or Codex custom-agent
 `model_reasoning_effort`. The field is omitted from native output when absent.
 Hctl validates and requests effort, while the selected harness, model, account,
 and policy determine whether it is honored. Root `instructions.md` remains
-description-only. The MVP allows one level and at most eight subagents. A subagent
+description-only. The MVP allows one level and at most 128 subagents. A subagent
 inherits the selected parent's generated instructions, skills, managed MCP
 tools, native tools, and permissions through native harness behavior. Child
 skills, tools, dependency files, and nested subagents are rejected rather than
@@ -542,7 +564,7 @@ status remains path- and identifier-free.
 
 The optional root `schedules/` directory contains nested Markdown task files.
 The bounded, valid UTF-8 path beneath `schedules/`, without `.md`, is the
-schedule name. At most 32 schedules are discovered. Each file is bounded UTF-8
+schedule name. At most 256 schedules are discovered. Each file is bounded UTF-8
 Markdown whose strict YAML frontmatter
 contains exactly one string field named `cron`. The value is at most 256
 printable ASCII characters and must parse as a standard five-field expression.

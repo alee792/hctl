@@ -2,6 +2,7 @@ package setup
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -98,6 +99,118 @@ func TestApplyIsDeterministicAndRefusesConflicts(t *testing.T) {
 	}
 	if _, err := Apply(conflict, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "without hctl ownership") {
 		t.Fatalf("hand-authored native file was not refused: %v", err)
+	}
+}
+
+func TestApplyMoreThanEightSkillsForBothHarnesses(t *testing.T) {
+	root := testAgent(t)
+	for index := 0; index < 12; index++ {
+		name := "skill-" + strconv.Itoa(index)
+		write(t, filepath.Join(root, "skills", name, "SKILL.md"), "---\nname: "+name+"\ndescription: Extra skill.\n---\n\nUse it.\n")
+		write(t, filepath.Join(root, "skills", name, "references", "proof.txt"), "proof\n")
+	}
+	for _, harness := range []string{"claude", "codex"} {
+		p, err := project.Load(root, harness)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(p.Skills) != 13 {
+			t.Fatalf("%s loaded %d skills", harness, len(p.Skills))
+		}
+		if _, err := Apply(p, "/opt/hctl/bin/hctl"); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, ".claude", "skills", "skill-11", "references", "proof.txt")
+		if harness == "codex" {
+			path = filepath.Join(root, ".agents", "skills", "skill-11", "references", "proof.txt")
+		}
+		if got := read(t, path); got != "proof\n" {
+			t.Fatalf("%s changed skill resource: %q", harness, got)
+		}
+	}
+}
+
+func TestApplyAndVerifyLargeSkillResource(t *testing.T) {
+	root := testAgent(t)
+	content := make([]byte, 2<<20)
+	writeBytes(t, root, "skills/echo/assets/large.bin", content)
+	p, err := project.Load(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(p, "/opt/hctl/bin/hctl"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(p); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(root, ".claude", "skills", "echo", "assets", "large.bin"))
+	if err != nil || info.Size() != int64(len(content)) {
+		t.Fatalf("large skill resource size = %v, err = %v", info, err)
+	}
+}
+
+func TestGeneratedPluginMCPConfigurationIsBounded(t *testing.T) {
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			root := t.TempDir()
+			p := &project.Project{
+				Name:              "bounded",
+				Harness:           harness,
+				SourceRoot:        root,
+				WorkspaceRoot:     root,
+				SourceFingerprint: "fingerprint",
+				Instructions:      []byte("Be concise.\n"),
+				PluginMCPServers: []project.PluginMCPServer{{
+					Name:    "large",
+					Type:    "streamable-http",
+					URL:     "https://example.com/mcp",
+					Headers: map[string]string{"X-Large": strings.Repeat("x", maxGeneratedConfigBytes)},
+				}},
+			}
+			if _, err := filesFor(p, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "configuration") || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("oversized generated MCP configuration was not rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestGeneratedMCPConfigurationBoundary(t *testing.T) {
+	if err := validateGeneratedConfig(".mcp.json", make([]byte, maxGeneratedConfigBytes)); err != nil {
+		t.Fatalf("maximum configuration was rejected: %v", err)
+	}
+	if err := validateGeneratedConfig(".mcp.json", make([]byte, maxGeneratedConfigBytes+1)); err == nil || !strings.Contains(err.Error(), ".mcp.json") {
+		t.Fatalf("configuration above maximum was not rejected at its path: %v", err)
+	}
+}
+
+func TestGeneratedMCPConfigurationVerificationUsesGenerationLimit(t *testing.T) {
+	root := t.TempDir()
+	writeBytes(t, root, ".mcp.json", make([]byte, maxGeneratedConfigBytes+1))
+	if _, _, _, err := generatedState(root, ".mcp.json"); err == nil || !strings.Contains(err.Error(), ".mcp.json") {
+		t.Fatalf("oversized generated configuration was accepted during verification: %v", err)
+	}
+}
+
+func TestApplyRecordLimitFailsBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	p := &project.Project{
+		Name:              "bounded",
+		AgentID:           "bounded",
+		Harness:           "claude",
+		SourceRoot:        root,
+		WorkspaceRoot:     root,
+		SourceReference:   strings.Repeat("s", maxMetadataBytes),
+		SourceFingerprint: "fingerprint",
+		Instructions:      []byte("Be concise.\n"),
+	}
+	if _, err := Apply(p, "/opt/hctl/bin/hctl"); err == nil || !strings.Contains(err.Error(), "apply record exceeds") {
+		t.Fatalf("oversized apply record was not rejected: %v", err)
+	}
+	for _, path := range []string{"CLAUDE.md", ".mcp.json", ".hctl"} {
+		if _, err := os.Lstat(filepath.Join(root, path)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s was mutated before apply-record validation: %v", path, err)
+		}
 	}
 }
 

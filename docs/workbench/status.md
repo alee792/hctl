@@ -180,6 +180,14 @@ a generated custom subagent, and session resume in a fresh external workspace.
   metadata and regular-file resources survive both native project harness
   setups. Recognized vendor metadata is copied unchanged to either target and
   warns when that harness does not document honoring it.
+- Authored-project cardinality ceilings are deliberately high rather than
+  ordinary-use quotas: 256 aggregate skills, 128 tools and subagents, 256
+  schedules, 128 plugins and plugin MCP servers, and 1,024 skill, tool-source,
+  or selected harness files where applicable. Shared file and byte budgets
+  bound skill-set and tool-source work; tool catalogs and calls retain separate
+  protocol ceilings; generated MCP configuration is bounded consistently with
+  later verification. [ADR 0029](../adr/0029-bound-authored-projects-with-aggregate-budgets.md)
+  records the decision.
 - Agent Plugins v1 directories may be vendored beneath `plugins/`. Hctl validates
   each local manifest without a schema fetch, imports its fixed Agent Skills
   component, and maps supported optional MCP declarations into native harness

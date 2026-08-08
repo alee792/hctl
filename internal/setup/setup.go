@@ -30,7 +30,11 @@ import (
 	"hctl/internal/rootfs"
 )
 
-const maxMetadataBytes = 8 << 20
+const (
+	maxMetadataBytes        = 8 << 20
+	maxGeneratedConfigBytes = 8 << 20
+	maxGeneratedFileBytes   = 16 << 20
+)
 
 var (
 	portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
@@ -152,20 +156,28 @@ func apply(p *project.Project, executable string, channelWritable bool, workspac
 			return Result{}, fmt.Errorf("native file %s already exists without hctl ownership; refusing to overwrite it", path)
 		}
 	}
+	paths := sortedKeys(files)
+	owned := make([]ownedFile, 0, len(paths))
+	for _, path := range paths {
+		file := files[path]
+		owned = append(owned, ownedFile{Path: path, SHA256: rootfs.SHA256(file.Content), Mode: uint32(file.Mode.Perm())})
+	}
+	meta := applyRecord{SchemaVersion: 3, Generator: project.GeneratorVersion, Harness: p.Harness, AgentID: p.AgentID, Source: p.SourceReference, SourceFingerprint: p.SourceFingerprint, ChannelWritable: channelWritable, Files: owned}
+	metaBytes, err := marshalApplyRecord(meta)
+	if err != nil {
+		return Result{}, err
+	}
 	for _, path := range pluginDataDirectories(p) {
 		if err := rootfs.EnsurePrivateDir(workspaceRoot, path); err != nil {
 			return Result{}, fmt.Errorf("cannot prepare plugin data directory %s: %w", path, err)
 		}
 	}
 
-	paths := sortedKeys(files)
-	owned := make([]ownedFile, 0, len(paths))
 	for _, path := range paths {
 		file := files[path]
 		if err := rootfs.WriteAtomic(workspaceRoot, path, file.Content, file.Mode); err != nil {
 			return Result{}, err
 		}
-		owned = append(owned, ownedFile{Path: path, SHA256: rootfs.SHA256(file.Content), Mode: uint32(file.Mode.Perm())})
 	}
 	for path := range priorFiles {
 		if _, retained := files[path]; !retained {
@@ -174,12 +186,7 @@ func apply(p *project.Project, executable string, channelWritable bool, workspac
 			}
 		}
 	}
-	meta := applyRecord{SchemaVersion: 3, Generator: project.GeneratorVersion, Harness: p.Harness, AgentID: p.AgentID, Source: p.SourceReference, SourceFingerprint: p.SourceFingerprint, ChannelWritable: channelWritable, Files: owned}
-	metaBytes, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return Result{}, errors.New("cannot encode apply record")
-	}
-	if err := rootfs.WriteAtomic(workspaceRoot, recordPath, append(metaBytes, '\n'), 0o644); err != nil {
+	if err := rootfs.WriteAtomic(workspaceRoot, recordPath, metaBytes, 0o644); err != nil {
 		return Result{}, err
 	}
 	if legacy {
@@ -191,6 +198,18 @@ func apply(p *project.Project, executable string, channelWritable bool, workspac
 		return Result{}, err
 	}
 	return Result{Files: append(paths, recordPath), Diagnostics: generated.Diagnostics}, nil
+}
+
+func marshalApplyRecord(meta applyRecord) ([]byte, error) {
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return nil, errors.New("cannot encode apply record")
+	}
+	data = append(data, '\n')
+	if len(data) > maxMetadataBytes {
+		return nil, fmt.Errorf("apply record exceeds %d bytes", maxMetadataBytes)
+	}
+	return data, nil
 }
 
 func Verify(p *project.Project) error {
@@ -333,7 +352,11 @@ func filesForPolicy(p *project.Project, executable string, channelWritable bool)
 		if err != nil {
 			return generatedSetup{}, errors.New("cannot encode Claude MCP configuration")
 		}
-		files[".mcp.json"] = generatedFile{Content: append(configBytes, '\n'), Mode: 0o644}
+		configBytes = append(configBytes, '\n')
+		if err := validateGeneratedConfig(".mcp.json", configBytes); err != nil {
+			return generatedSetup{}, err
+		}
+		files[".mcp.json"] = generatedFile{Content: configBytes, Mode: 0o644}
 		if p.DiscordChannel != nil {
 			commandHook := map[string]any{"type": "command", "command": executable, "args": []string{"hook", "claude-deferred-input"}}
 			matcher := map[string]any{"matcher": `^mcp__managed__channel\.request_input$`, "hooks": []any{commandHook}}
@@ -371,6 +394,9 @@ func filesForPolicy(p *project.Project, executable string, channelWritable bool)
 		files["AGENTS.md"] = generatedFile{Content: []byte(instructions), Mode: 0o644}
 		config, err := codexMCPConfig(p, executable, mcpArgs)
 		if err != nil {
+			return generatedSetup{}, err
+		}
+		if err := validateGeneratedConfig(".codex/config.toml", config); err != nil {
 			return generatedSetup{}, err
 		}
 		files[".codex/config.toml"] = generatedFile{Content: config, Mode: 0o644}
@@ -672,11 +698,22 @@ func generatedSubagentPath(path, prefix, suffix string) bool {
 }
 
 func generatedState(root, relative string) (string, os.FileMode, bool, error) {
-	data, mode, exists, err := rootfs.ReadOptional(root, relative, 1<<20)
+	limit := int64(maxGeneratedFileBytes)
+	if relative == ".mcp.json" || relative == ".codex/config.toml" {
+		limit = maxGeneratedConfigBytes
+	}
+	data, mode, exists, err := rootfs.ReadOptional(root, relative, limit)
 	if err != nil || !exists {
 		return "", mode, exists, err
 	}
 	return rootfs.SHA256(data), mode, true, nil
+}
+
+func validateGeneratedConfig(path string, content []byte) error {
+	if len(content) > maxGeneratedConfigBytes {
+		return fmt.Errorf("generated MCP configuration %q exceeds %d bytes", path, maxGeneratedConfigBytes)
+	}
+	return nil
 }
 
 func sortedKeys(values map[string]generatedFile) []string {

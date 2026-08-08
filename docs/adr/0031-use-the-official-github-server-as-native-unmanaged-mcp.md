@@ -88,12 +88,25 @@ The same contract applies locally and headlessly. A shell, service manager,
 container runtime, or external secret manager injects
 `GITHUB_PERSONAL_ACCESS_TOKEN` when it launches Claude or Codex. Hctl does not
 copy it from the apply environment or persist it for a later launch.
+Direct local harnesses inherit their launch shell. Hctl-owned concurrent,
+resumed, and hibernation-replacement harness children inherit the unchanged
+environment of the owning hctl service or container; rotating external
+injection requires restarting that owner, not merely opening another child.
 Interactive operators establish native project and server trust through the
 harness's normal approval journey. Before unattended use, the operator must
 deliberately establish the equivalent native project/server trust and tool
 approval in supported user, administrator, enterprise, or service launch
 configuration. `apply` does not silently grant that trust, and
 `connections/github.md` is not an approval grant.
+
+Plain native launches likewise use the exact installed path embedded by the
+last apply; they do not re-resolve current package state through hctl. An update
+therefore requires reapplying local consumers and rebuilding direct/staged
+agent images before restarting or redeploying. Safe removal removes
+`connections/github.md`, reapplies local consumers and rebuilds staged outputs
+to remove their native entry and closure, then removes package state and
+restarts. Hctl-owned scheduled, channel, and continuation opens retain their
+separate current-state guard.
 
 ### Collisions and diagnostics
 
@@ -150,6 +163,20 @@ GitHub code path. Separate tests use a fake value to prove only the environment
 name is generated and the value appears in no generated, staged, diagnostic,
 or retained artifact. Live GitHub acceptance is optional and requires explicit
 authorization and a temporary least-privilege credential.
+
+The Linux/amd64 image gate also builds GitHub-bearing direct and selectively
+staged agent images plus a GitHub-free counterpart. Without executing the
+official server, it proves the exact pinned executable path and SHA-256,
+generated Codex mapping, runtime-only fake environment inheritance, value
+omission, and selective artifact omission.
+
+The [operator journey](../github-native-mcp.md) records the literal local and
+service/container paths, package lifecycle, native trust, troubleshooting, and
+runtime-only secret injection. The
+[acceptance record](../workbench/github-native-mcp-acceptance.md) maps each
+claim to credential-free tests and keeps the separately authorized live
+procedure explicitly unexecuted until its PAT, repository, permissions,
+effects, and cleanup are approved.
 
 ## Context
 

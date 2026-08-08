@@ -174,6 +174,25 @@ func TestCreateSelectivelyStagesGitHubNativeMCPClosure(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+
+	if err := os.RemoveAll(filepath.Join(source, "connections")); err != nil {
+		t.Fatal(err)
+	}
+	withoutGitHub, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutOutput := filepath.Join(t.TempDir(), "staged-without-github")
+	if _, err := Create(context.Background(), Request{Project: withoutGitHub, Output: withoutOutput, HCTLExecutable: hctl, HarnessExecutable: harness, HarnessVersion: "1.2.3", IntegrationStore: store}); err != nil {
+		t.Fatal(err)
+	}
+	withoutConfig := readTestFile(t, filepath.Join(withoutOutput, "workspace", ".codex", "config.toml"))
+	if bytes.Contains(withoutConfig, []byte(`[mcp_servers."github"]`)) || bytes.Contains(withoutConfig, []byte("GITHUB_PERSONAL_ACCESS_TOKEN")) {
+		t.Fatalf("GitHub-free counterpart contains native GitHub configuration: %s", withoutConfig)
+	}
+	if _, err := os.Stat(filepath.Join(withoutOutput, "opt", "hctl", "integrations")); !os.IsNotExist(err) {
+		t.Fatalf("GitHub-free counterpart staged integration artifacts: %v", err)
+	}
 }
 
 func testGitHubPackage(t *testing.T) string {

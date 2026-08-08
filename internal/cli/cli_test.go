@@ -667,10 +667,17 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"structuredContent":{"managed_e
 				t.Fatal(err)
 			}
 			packageRoot := writeCLIGitHubPackage(t, "1.8.0", []byte(`#!/bin/sh
-if [ -z "${GITHUB_PERSONAL_ACCESS_TOKEN-}" ]; then
-  echo 'authentication required' >&2
+if [ "${GITHUB_PERSONAL_ACCESS_TOKEN+x}" != x ]; then
+  echo 'authentication missing' >&2
   exit 20
 fi
+if [ -z "$GITHUB_PERSONAL_ACCESS_TOKEN" ]; then
+  echo 'authentication empty' >&2
+  exit 21
+fi
+case "$GITHUB_PERSONAL_ACCESS_TOKEN" in
+  invalid-*) echo 'authentication rejected' >&2; exit 22 ;;
+esac
 IFS= read -r initialize || exit 1
 IFS= read -r list || exit 1
 IFS= read -r call || call=
@@ -728,7 +735,15 @@ if [ "$server_approved" = approved ]; then
   github_status=$?
   set -e
   if [ "$github_status" -ne 0 ]; then
-    github_diagnostic='github-unavailable reason=missing-credential'
+    if grep -F 'authentication missing' "$failure" >/dev/null; then
+      github_diagnostic='github-unavailable reason=missing-credential'
+    elif grep -F 'authentication empty' "$failure" >/dev/null; then
+      github_diagnostic='github-unavailable reason=empty-credential'
+    elif grep -F 'authentication rejected' "$failure" >/dev/null; then
+      github_diagnostic='github-unavailable reason=invalid-credential'
+    else
+      github_diagnostic='github-unavailable reason=native-startup-failed'
+    fi
   elif [ "$tool_approved" != approved ]; then
     github_diagnostic='github-unavailable reason=tool-approval-required'
   elif printf '%s\n' "$github_output" | grep -F '"github_read":"ok"' >/dev/null; then
@@ -761,10 +776,23 @@ printf '%s\n' "$github_diagnostic" 'managed-echo=ok'
 					t.Fatalf("headless %s run %s = output %q, stderr %q, error %v", harnessName, inputID, output, stderr, err)
 				}
 			}
+			if err := os.Unsetenv("GITHUB_PERSONAL_ACCESS_TOKEN"); err != nil {
+				t.Fatal(err)
+			}
+			output, stderr, err := run(workspace, "maintainer", "github-missing")
+			if err != nil || !strings.Contains(output, `"delta":"github-unavailable reason=missing-credential"`) || !strings.Contains(output, `"delta":"managed-echo=ok"`) || !strings.Contains(output, `"type":"turn.completed"`) || strings.Contains(output, "authentication missing") || strings.Contains(stderr, fakeValue) {
+				t.Fatalf("missing GitHub credential broke %s session = output %q, stderr %q, error %v", harnessName, output, stderr, err)
+			}
 			t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "")
-			output, stderr, err := run(workspace, "maintainer", "github-unavailable")
-			if err != nil || !strings.Contains(output, `"delta":"github-unavailable reason=missing-credential"`) || !strings.Contains(output, `"delta":"managed-echo=ok"`) || !strings.Contains(output, `"type":"turn.completed"`) || strings.Contains(output, "authentication required") || strings.Contains(stderr, fakeValue) {
-				t.Fatalf("optional GitHub failure broke %s session = output %q, stderr %q, error %v", harnessName, output, stderr, err)
+			output, stderr, err = run(workspace, "maintainer", "github-empty")
+			if err != nil || !strings.Contains(output, `"delta":"github-unavailable reason=empty-credential"`) || !strings.Contains(output, `"delta":"managed-echo=ok"`) || !strings.Contains(output, `"type":"turn.completed"`) || strings.Contains(output, "authentication empty") || strings.Contains(stderr, fakeValue) {
+				t.Fatalf("empty GitHub credential broke %s session = output %q, stderr %q, error %v", harnessName, output, stderr, err)
+			}
+			const invalidValue = "invalid-headless-fixture-marker"
+			t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", invalidValue)
+			output, stderr, err = run(workspace, "maintainer", "github-invalid")
+			if err != nil || !strings.Contains(output, `"delta":"github-unavailable reason=invalid-credential"`) || !strings.Contains(output, `"delta":"managed-echo=ok"`) || !strings.Contains(output, `"type":"turn.completed"`) || strings.Contains(output, "authentication rejected") || strings.Contains(output, invalidValue) || strings.Contains(stderr, invalidValue) {
+				t.Fatalf("invalid GitHub credential broke %s session = output %q, stderr %q, error %v", harnessName, output, stderr, err)
 			}
 			t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", fakeValue)
 			if harnessName == "claude" {
@@ -814,7 +842,31 @@ printf '%s\n' "$github_diagnostic" 'managed-echo=ok'
 					t.Fatalf("concurrent %s headless session = output %q, stderr %q, error %v", harnessName, result.output, result.stderr, result.err)
 				}
 			}
+			for _, evidenceRoot := range []string{home, source, workspace} {
+				assertCLITreeOmits(t, evidenceRoot, fakeValue, invalidValue)
+			}
 		})
+	}
+}
+
+func assertCLITreeOmits(t *testing.T, root string, values ...string) {
+	t.Helper()
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, value := range values {
+			if bytes.Contains(data, []byte(value)) {
+				t.Fatalf("resolved environment value entered %s", path)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

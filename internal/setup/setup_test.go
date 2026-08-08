@@ -238,18 +238,21 @@ func TestGeneratedGitHubNativeMCPLaunchesCredentialFreeFixture(t *testing.T) {
 					"FAKE_CODEX_TOOL_APPROVAL=" + tool,
 				}
 			}
-			run := func(value string, approvals []string, runtimeEnv ...string) (string, string, error) {
+			runWithEnvironment := func(environment []string, approvals []string, runtimeEnv ...string) (string, string, error) {
 				process := exec.Command(harnessExecutable)
 				process.Env = append([]string{
 					"PATH=" + os.Getenv("PATH"), "FAKE_WORKSPACE=" + root,
-					"GITHUB_PERSONAL_ACCESS_TOKEN=" + value,
 				}, approvals...)
+				process.Env = append(process.Env, environment...)
 				process.Env = append(process.Env, runtimeEnv...)
 				var stdout, stderr bytes.Buffer
 				process.Stdout = &stdout
 				process.Stderr = &stderr
 				err := process.Run()
 				return stdout.String(), stderr.String(), err
+			}
+			run := func(value string, approvals []string, runtimeEnv ...string) (string, string, error) {
+				return runWithEnvironment([]string{"GITHUB_PERSONAL_ACCESS_TOKEN=" + value}, approvals, runtimeEnv...)
 			}
 			approved := approvalEnv("approved", "approved", "approved")
 			stdout, stderr, err := run(fakeValue, approved)
@@ -291,11 +294,18 @@ func TestGeneratedGitHubNativeMCPLaunchesCredentialFreeFixture(t *testing.T) {
 				}
 			}
 
-			for _, value := range []string{"", "explicitly-invalid-fake-value"} {
-				stdout, stderr, err := run(value, approved)
-				if err != nil || stdout != "" || !strings.Contains(stderr, "github optional startup failed") || (!strings.Contains(stderr, "authentication required") && !strings.Contains(stderr, "authentication rejected")) || strings.Contains(stderr, fakeValue) {
-					t.Fatalf("bounded authentication failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
-				}
+			stdout, stderr, err = runWithEnvironment(nil, approved)
+			if err != nil || stdout != "" || !strings.Contains(stderr, "github optional startup failed: authentication missing") || strings.Contains(stderr, fakeValue) {
+				t.Fatalf("bounded missing authentication failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
+			}
+			stdout, stderr, err = run("", approved)
+			if err != nil || stdout != "" || !strings.Contains(stderr, "github optional startup failed: authentication empty") || strings.Contains(stderr, fakeValue) {
+				t.Fatalf("bounded empty authentication failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
+			}
+			const invalidValue = "invalid-native-fixture-marker"
+			stdout, stderr, err = run(invalidValue, approved)
+			if err != nil || stdout != "" || !strings.Contains(stderr, "github optional startup failed: authentication rejected") || strings.Contains(stderr, fakeValue) || strings.Contains(stderr, invalidValue) {
+				t.Fatalf("bounded invalid authentication failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
 			}
 			if harness == "claude" {
 				if stdout, stderr, err := run(fakeValue, approvalEnv("approved", "missing", "approved")); err == nil || stdout != "" || !strings.Contains(stderr, "Claude project MCP server approval required") {
@@ -328,6 +338,7 @@ func TestGeneratedGitHubNativeMCPLaunchesCredentialFreeFixture(t *testing.T) {
 			}
 			for _, evidenceRoot := range []string{packageRoot, storeRoot, root} {
 				assertTreeOmits(t, evidenceRoot, fakeValue)
+				assertTreeOmits(t, evidenceRoot, invalidValue)
 			}
 		})
 	}
@@ -337,20 +348,23 @@ func testInstalledNativeMCPDescriptor(t *testing.T, harness string) (integration
 	t.Helper()
 	packageRoot := t.TempDir()
 	payload := []byte(`#!/bin/sh
-if [ -z "${GITHUB_PERSONAL_ACCESS_TOKEN-}" ]; then
-  echo 'authentication required' >&2
+if [ "${GITHUB_PERSONAL_ACCESS_TOKEN+x}" != x ]; then
+  echo 'authentication missing' >&2
   exit 20
 fi
-if [ "$GITHUB_PERSONAL_ACCESS_TOKEN" = "explicitly-invalid-fake-value" ]; then
-  echo 'authentication rejected' >&2
+if [ -z "$GITHUB_PERSONAL_ACCESS_TOKEN" ]; then
+  echo 'authentication empty' >&2
   exit 21
 fi
+case "$GITHUB_PERSONAL_ACCESS_TOKEN" in
+  invalid-*) echo 'authentication rejected' >&2; exit 22 ;;
+esac
 IFS= read -r initialize
 IFS= read -r list
 IFS= read -r call
 case "$call" in
   *'"name":"fixture_issue_claim"'*) ;;
-  *) echo 'unexpected fixture tool outcome' >&2; exit 22 ;;
+  *) echo 'unexpected fixture tool outcome' >&2; exit 23 ;;
 esac
 protocol_version=${FAKE_MCP_PROTOCOL_VERSION-2025-06-18}
 server_version=${FAKE_MCP_SERVER_VERSION-1.8.0-fixture}

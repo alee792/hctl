@@ -26,6 +26,9 @@ The package declares only the required ambient variable name
 `GITHUB_PERSONAL_ACCESS_TOKEN`. It never resolves or stores a value. The native
 harness and official server may access the ambient value, as documented in
 [ADR 0031](../../docs/adr/0031-use-the-official-github-server-as-native-unmanaged-mcp.md).
+Follow the [native GitHub MCP journey](../../docs/github-native-mcp.md) for
+offline apply, runtime injection, native trust, package lifecycle, and
+troubleshooting.
 
 For an image or air-gapped distribution, materialize a reviewed platform
 package without installing it:

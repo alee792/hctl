@@ -17,8 +17,11 @@ import (
 	"time"
 
 	"hctl/internal/dispatch"
+	"hctl/internal/harness"
 	"hctl/internal/integration"
+	"hctl/internal/project"
 	"hctl/internal/schedule"
+	"hctl/internal/setup"
 	"hctl/internal/version"
 )
 
@@ -192,6 +195,84 @@ func TestApplySelectsInstalledGitHubNativeMCPWithoutReadingPAT(t *testing.T) {
 	}
 	if entries, readErr := os.ReadDir(workspace); readErr != nil || len(entries) != 0 {
 		t.Fatalf("failed offline selection mutated workspace: %v, %v", entries, readErr)
+	}
+}
+
+func TestScheduledOpenRevalidatesCurrentGitHubPackageState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := writeCLIGitHubPackage(t, "1.8.0", []byte("#!/bin/sh\n# first\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "scheduled-github-agent")
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Scheduled GitHub agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "schedules", "probe.md"), "---\ncron: '* * * * *'\n---\n\nProbe GitHub.\n", 0o644)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, err := resolveProjectNativeMCP(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.ApplyWithNativeMCP(p, self, servers); err != nil {
+		t.Fatal(err)
+	}
+	underlying := &countingOpenDriver{}
+	driver := &currentSetupDriver{Driver: underlying, project: p, self: self, diagnostics: io.Discard}
+
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", false); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.Open(context.Background(), harness.OpenRequest{Root: source}); err == nil || session != nil || underlying.opens != 0 || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("disabled scheduled open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove(context.Background(), "github-mcp-server"); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.Open(context.Background(), harness.OpenRequest{Root: source}); err == nil || session != nil || underlying.opens != 0 || !strings.Contains(err.Error(), "not installed") {
+		t.Fatalf("removed scheduled open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	second := writeCLIGitHubPackage(t, "1.8.1", []byte("#!/bin/sh\n# second\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: second, Trust: integration.TrustOperator, UpdatePackageID: "github-mcp-server"}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := driver.Open(context.Background(), harness.OpenRequest{Root: source})
+	if err != nil || session == nil || underlying.opens != 1 {
+		t.Fatalf("updated scheduled open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	if config := readCLIFile(t, filepath.Join(source, ".codex", "config.toml")); !strings.Contains(config, current.Executable) {
+		t.Fatalf("scheduled open retained stale executable: %s", config)
+	}
+	if err := os.Chmod(current.Executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(current.Executable, []byte("corrupt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.Open(context.Background(), harness.OpenRequest{Root: source}); err == nil || session != nil || underlying.opens != 1 || !strings.Contains(err.Error(), "cache is corrupt") {
+		t.Fatalf("corrupt scheduled open = session %#v, opens %d, error %v", session, underlying.opens, err)
 	}
 }
 
@@ -508,7 +589,7 @@ func TestScheduleRunCancellationStopsHarnessVerification(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- runScheduleClockContext(ctx, []string{source, "--workspace", workspace, "--harness", "claude", "--command", command}, io.Discard, &stderr, nil)
+		done <- runScheduleClockContext(ctx, []string{source, "--workspace", workspace, "--harness", "claude", "--command", command}, io.Discard, &stderr, "", nil)
 	}()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -691,7 +772,7 @@ done
 			var output lockedBuffer
 			done := make(chan error, 1)
 			go func() {
-				done <- runScheduleClockContext(ctx, []string{source, "--workspace", workspace, "--harness", harnessName, "--command", command}, &output, &stderr, clock)
+				done <- runScheduleClockContext(ctx, []string{source, "--workspace", workspace, "--harness", harnessName, "--command", command}, &output, &stderr, "", clock)
 			}()
 			clock.wake(t, start.Add(time.Minute))
 			deadline := time.Now().Add(2 * time.Second)
@@ -728,3 +809,54 @@ func readCLIFile(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+func writeCLIGitHubPackage(t *testing.T, packageVersion string, payload []byte) string {
+	t.Helper()
+	root := t.TempDir()
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "github-mcp-server", "version": packageVersion, "name": "GitHub fixture", "description": "Credential-free scheduled fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://github.com/github/github-mcp-server", "revision": "v" + packageVersion},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary", "source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID}, "executable": "github-mcp-server", "arguments": []string{"stdio"}, "working_directory": ".", "environment": map[string]string{},
+			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
+			"harnesses": []any{
+				map[string]any{"name": "claude", "startup": "optional", "trust": "native-project"},
+				map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"},
+			},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "integration.json"), string(manifest)+"\n", 0o600)
+	writeCLIFile(t, filepath.Join(root, "payload", "github-mcp-server"), string(payload), 0o600)
+	return root
+}
+
+type countingOpenDriver struct{ opens int }
+
+func (d *countingOpenDriver) Name() string                 { return "codex" }
+func (d *countingOpenDriver) Executable() string           { return "/usr/bin/true" }
+func (d *countingOpenDriver) Verify(context.Context) error { return nil }
+func (d *countingOpenDriver) Open(context.Context, harness.OpenRequest) (harness.Session, error) {
+	d.opens++
+	return countingSession{}, nil
+}
+
+type countingSession struct{}
+
+func (countingSession) InitialEvents() []harness.Event { return nil }
+func (countingSession) RunTurn(context.Context, harness.Input, func(harness.Event)) (harness.TurnResult, error) {
+	return harness.TurnResult{Status: "completed"}, nil
+}
+func (countingSession) Close() error { return nil }
+func (countingSession) Abort()       {}

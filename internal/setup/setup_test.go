@@ -2,6 +2,9 @@ package setup
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -13,8 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/pelletier/go-toml/v2"
 
 	"hctl/internal/integration"
 	"hctl/internal/project"
@@ -222,38 +223,25 @@ func TestGeneratedGitHubNativeMCPLaunchesCredentialFreeFixture(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			descriptor := testProtocolNativeMCPDescriptor(t, harness, fakeValue)
+			descriptor, packageRoot, storeRoot := testInstalledNativeMCPDescriptor(t, harness)
 			if _, err := ApplyWithNativeMCP(p, "/opt/hctl/bin/hctl", []integration.NativeMCPLaunchDescriptor{descriptor}); err != nil {
 				t.Fatal(err)
 			}
-
-			command, args, cwd, envNames := generatedGitHubCommand(t, root, harness)
-			if harness == "codex" && !reflect.DeepEqual(envNames, []string{"GITHUB_PERSONAL_ACCESS_TOKEN"}) {
-				t.Fatalf("Codex forwarded environment names = %v", envNames)
-			}
-			run := func(value string) (string, string, error) {
-				process := exec.Command(command, args...)
-				process.Dir = cwd
-				if harness == "claude" {
-					process.Env = append(os.Environ(), "GITHUB_PERSONAL_ACCESS_TOKEN="+value)
-				} else {
-					process.Env = []string{"PATH=" + os.Getenv("PATH")}
-					for _, name := range envNames {
-						process.Env = append(process.Env, name+"="+value)
-					}
+			harnessExecutable := testNativeConfigHarness(t, harness)
+			run := func(value, projectTrust, serverTrust string) (string, string, error) {
+				process := exec.Command(harnessExecutable)
+				process.Env = []string{
+					"PATH=" + os.Getenv("PATH"), "FAKE_WORKSPACE=" + root,
+					"FAKE_PROJECT_TRUST=" + projectTrust, "FAKE_SERVER_TRUST=" + serverTrust,
+					"GITHUB_PERSONAL_ACCESS_TOKEN=" + value,
 				}
-				process.Stdin = strings.NewReader(strings.Join([]string{
-					`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
-					`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
-					`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fixture_read","arguments":{}}}`,
-				}, "\n") + "\n")
 				var stdout, stderr bytes.Buffer
 				process.Stdout = &stdout
 				process.Stderr = &stderr
 				err := process.Run()
 				return stdout.String(), stderr.String(), err
 			}
-			stdout, stderr, err := run(fakeValue)
+			stdout, stderr, err := run(fakeValue, "approved", "approved")
 			if err != nil || stderr != "" {
 				t.Fatalf("native fixture launch = stdout %q, stderr %q, error %v", stdout, stderr, err)
 			}
@@ -266,25 +254,34 @@ func TestGeneratedGitHubNativeMCPLaunchesCredentialFreeFixture(t *testing.T) {
 				t.Fatal("native protocol output exposed the ambient value")
 			}
 
-			for _, value := range []string{"", "wrong-fake-value"} {
-				stdout, stderr, err := run(value)
-				if err == nil || stdout != "" || (!strings.Contains(stderr, "authentication required") && !strings.Contains(stderr, "authentication rejected")) || strings.Contains(stderr, fakeValue) {
+			for _, value := range []string{"", "explicitly-invalid-fake-value"} {
+				stdout, stderr, err := run(value, "approved", "approved")
+				if err != nil || stdout != "" || !strings.Contains(stderr, "github optional startup failed") || (!strings.Contains(stderr, "authentication required") && !strings.Contains(stderr, "authentication rejected")) || strings.Contains(stderr, fakeValue) {
 					t.Fatalf("bounded authentication failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
 				}
+			}
+			if stdout, stderr, err := run(fakeValue, "missing", "approved"); err == nil || stdout != "" || !strings.Contains(stderr, "project approval required") {
+				t.Fatalf("project trust failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
+			}
+			if stdout, stderr, err := run(fakeValue, "approved", "missing"); err == nil || stdout != "" || !strings.Contains(stderr, "server approval required") {
+				t.Fatalf("server trust failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
+			}
+			for _, evidenceRoot := range []string{packageRoot, storeRoot, root} {
+				assertTreeOmits(t, evidenceRoot, fakeValue)
 			}
 		})
 	}
 }
 
-func testProtocolNativeMCPDescriptor(t *testing.T, harness, expected string) integration.NativeMCPLaunchDescriptor {
+func testInstalledNativeMCPDescriptor(t *testing.T, harness string) (integration.NativeMCPLaunchDescriptor, string, string) {
 	t.Helper()
-	descriptor := testNativeMCPDescriptor(t, harness)
-	script := `#!/bin/sh
+	packageRoot := t.TempDir()
+	payload := []byte(`#!/bin/sh
 if [ -z "${GITHUB_PERSONAL_ACCESS_TOKEN-}" ]; then
   echo 'authentication required' >&2
   exit 20
 fi
-if [ "$GITHUB_PERSONAL_ACCESS_TOKEN" != "` + expected + `" ]; then
+if [ "$GITHUB_PERSONAL_ACCESS_TOKEN" = "explicitly-invalid-fake-value" ]; then
   echo 'authentication rejected' >&2
   exit 21
 fi
@@ -294,42 +291,113 @@ IFS= read -r call
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}'
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fixture_read"}]}}'
 printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"structuredContent":{"ok":true}}}'
-`
-	write(t, descriptor.Command, script)
-	if err := os.Chmod(descriptor.Command, 0o755); err != nil {
+`)
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "github-mcp-server", "version": "1.8.0", "name": "Fake GitHub MCP", "description": "Credential-free native MCP fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://github.com/github/github-mcp-server", "revision": "v1.8.0"},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary",
+			"source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID}, "executable": "github-mcp-server",
+			"arguments": []string{"stdio"}, "working_directory": ".", "environment": map[string]string{},
+			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
+			"harnesses": []any{
+				map[string]any{"name": "claude", "startup": "optional", "trust": "native-project"},
+				map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"},
+			},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
 		t.Fatal(err)
 	}
-	return descriptor
+	write(t, filepath.Join(packageRoot, "integration.json"), string(manifest)+"\n")
+	write(t, filepath.Join(packageRoot, "payload", "github-mcp-server"), string(payload))
+	storeRoot := t.TempDir()
+	store := integration.NewStore(storeRoot, nil)
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := resolved.LaunchDescriptor(harness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return descriptor, packageRoot, storeRoot
 }
 
-func generatedGitHubCommand(t *testing.T, root, harness string) (string, []string, string, []string) {
+func testNativeConfigHarness(t *testing.T, harness string) string {
 	t.Helper()
+	executable := filepath.Join(t.TempDir(), harness)
+	trust := `#!/bin/sh
+set -eu
+[ "${FAKE_PROJECT_TRUST-}" = approved ] || { echo 'project approval required' >&2; exit 30; }
+[ "${FAKE_SERVER_TRUST-}" = approved ] || { echo 'server approval required' >&2; exit 31; }
+`
+	var parse string
 	if harness == "claude" {
-		var config struct {
-			Servers map[string]struct {
-				Command string   `json:"command"`
-				Args    []string `json:"args"`
-			} `json:"mcpServers"`
-		}
-		if err := json.Unmarshal([]byte(read(t, filepath.Join(root, ".mcp.json"))), &config); err != nil {
-			t.Fatal(err)
-		}
-		server := config.Servers["github"]
-		return server.Command, server.Args, root, nil
+		parse = `config="$FAKE_WORKSPACE/.mcp.json"
+grep -F '"github": {' "$config" >/dev/null
+grep -F '"command": "/usr/bin/env"' "$config" >/dev/null
+cwd=$(awk '/"github": \{/{github=1} github && /"args": \[/{args=1; next} args {line=$0; gsub(/^[[:space:]]*"|",?[[:space:]]*$/, "", line); n++; if(n==2){print line; exit}}' "$config")
+server=$(awk '/"github": \{/{github=1} github && /"args": \[/{args=1; next} args {line=$0; gsub(/^[[:space:]]*"|",?[[:space:]]*$/, "", line); n++; if(n==4){print line; exit}}' "$config")
+grep -F '"stdio"' "$config" >/dev/null
+`
+	} else {
+		parse = `config="$FAKE_WORKSPACE/.codex/config.toml"
+grep -F '[mcp_servers."github"]' "$config" >/dev/null
+grep -F 'enabled = true' "$config" >/dev/null
+grep -F 'required = false' "$config" >/dev/null
+grep -F 'default_tools_approval_mode = "prompt"' "$config" >/dev/null
+grep -F 'env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]' "$config" >/dev/null
+server=$(awk '/^\[mcp_servers\."github"\]$/{github=1; next} github && /^command = /{line=$0; sub(/^command = "/, "", line); sub(/"$/, "", line); print line; exit}' "$config")
+cwd=$(awk '/^\[mcp_servers\."github"\]$/{github=1; next} github && /^cwd = /{line=$0; sub(/^cwd = "/, "", line); sub(/"$/, "", line); print line; exit}' "$config")
+grep -F 'args = ["stdio"]' "$config" >/dev/null
+`
 	}
-	var config struct {
-		Servers map[string]struct {
-			Command string   `toml:"command"`
-			Args    []string `toml:"args"`
-			CWD     string   `toml:"cwd"`
-			EnvVars []string `toml:"env_vars"`
-		} `toml:"mcp_servers"`
-	}
-	if err := toml.Unmarshal([]byte(read(t, filepath.Join(root, ".codex", "config.toml"))), &config); err != nil {
+	run := `failure=$(mktemp)
+trap 'rm -f "$failure"' EXIT
+set +e
+output=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fixture_read","arguments":{}}}' | /usr/bin/env -C "$cwd" -- "$server" stdio 2>"$failure")
+status=$?
+set -e
+if [ "$status" -ne 0 ]; then
+  printf 'github optional startup failed: %s\n' "$(cat "$failure")" >&2
+  exit 0
+fi
+printf '%s\n' "$output"
+`
+	write(t, executable, trust+parse+run)
+	if err := os.Chmod(executable, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	server := config.Servers["github"]
-	return server.Command, server.Args, server.CWD, server.EnvVars
+	return executable
+}
+
+func assertTreeOmits(t *testing.T, root, value string) {
+	t.Helper()
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr == nil && bytes.Contains(data, []byte(value)) {
+			t.Fatalf("resolved environment value entered %s", path)
+		}
+		return readErr
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestApplyMoreThanEightSkillsForBothHarnesses(t *testing.T) {

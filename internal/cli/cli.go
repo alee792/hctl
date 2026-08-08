@@ -71,7 +71,7 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 	case "channel":
 		return runChannel(args[1:], input, output, stderr)
 	case "schedule":
-		return runSchedule(args[1:], output, stderr)
+		return runSchedule(args[1:], output, stderr, self)
 	case "mcp":
 		return runMCP(args[1:], input, output, stderr)
 	case "hook":
@@ -253,14 +253,14 @@ func runHook(args []string, input io.Reader, output io.Writer) error {
 	return claude.RunDeferredHook(input, output, os.Getenv(claude.DeferredBrokerEnv))
 }
 
-func runSchedule(args []string, output, stderr io.Writer) error {
+func runSchedule(args []string, output, stderr io.Writer, self string) error {
 	const usage = "Usage:\n  hctl schedule trigger AGENT NAME [--workspace DIR] --harness <claude|codex> --input-id ID [--command PATH] [--timeout DURATION] [--turn-timeout DURATION]\n  hctl schedule run AGENT [--workspace DIR] --harness <claude|codex> [--command PATH] [--turn-timeout DURATION] [--max-active-turns N]\n"
 	if len(args) > 0 && isHelp(args[len(args)-1]) {
 		_, err := io.WriteString(output, usage)
 		return err
 	}
 	if len(args) >= 1 && args[0] == "run" {
-		return runScheduleClock(args[1:], output, stderr)
+		return runScheduleClock(args[1:], output, stderr, self)
 	}
 	if len(args) < 3 || args[0] != "trigger" {
 		return errors.New("usage: hctl schedule trigger AGENT NAME --harness <claude|codex> --input-id ID")
@@ -292,9 +292,6 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := setup.Verify(p); err != nil {
-		return err
-	}
 	driver, err := newDriver(*harnessName, *command)
 	if err != nil {
 		return err
@@ -304,7 +301,11 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 	if err := driver.Verify(ctx); err != nil {
 		return err
 	}
-	result, triggerErr := schedule.TriggerWithTurnTimeout(ctx, p, driver, args[2], *inputID, *turnTimeout)
+	if err := ensureApplied(p, self, stderr); err != nil {
+		return err
+	}
+	currentDriver := &currentSetupDriver{Driver: driver, project: p, self: self, diagnostics: stderr}
+	result, triggerErr := schedule.TriggerWithTurnTimeout(ctx, p, currentDriver, args[2], *inputID, *turnTimeout)
 	if result.Status != "" {
 		if _, err := fmt.Fprintf(output, "schedule=%q input_id=%q status=%s duplicate=%t", result.Name, result.InputID, result.Status, result.Duplicate); err != nil {
 			return err
@@ -337,13 +338,13 @@ func runSchedule(args []string, output, stderr io.Writer) error {
 	return nil
 }
 
-func runScheduleClock(args []string, output, stderr io.Writer) error {
+func runScheduleClock(args []string, output, stderr io.Writer, self string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runScheduleClockContext(ctx, args, output, stderr, nil)
+	return runScheduleClockContext(ctx, args, output, stderr, self, nil)
 }
 
-func runScheduleClockContext(ctx context.Context, args []string, output, stderr io.Writer, clock schedule.Clock) error {
+func runScheduleClockContext(ctx context.Context, args []string, output, stderr io.Writer, self string, clock schedule.Clock) error {
 	if len(args) == 0 {
 		return errors.New("usage: hctl schedule run AGENT --harness <claude|codex>")
 	}
@@ -373,9 +374,6 @@ func runScheduleClockContext(ctx context.Context, args []string, output, stderr 
 	if len(p.Schedules) == 0 {
 		return errors.New("agent project defines no schedules")
 	}
-	if err := setup.Verify(p); err != nil {
-		return err
-	}
 	driver, err := newDriver(*harnessName, *command)
 	if err != nil {
 		return err
@@ -385,12 +383,16 @@ func runScheduleClockContext(ctx context.Context, args []string, output, stderr 
 	if err := driver.Verify(verifyCtx); err != nil {
 		return err
 	}
+	if err := ensureApplied(p, self, stderr); err != nil {
+		return err
+	}
 	lock, err := schedule.AcquireRuntimeLock(p)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	runtime, err := dispatch.NewTaskRuntime(p, driver, *turnTimeout, *maxActive)
+	currentDriver := &currentSetupDriver{Driver: driver, project: p, self: self, diagnostics: stderr}
+	runtime, err := dispatch.NewTaskRuntime(p, currentDriver, *turnTimeout, *maxActive)
 	if err != nil {
 		return err
 	}
@@ -413,6 +415,20 @@ func runScheduleClockContext(ctx context.Context, args []string, output, stderr 
 		return err
 	}
 	return schedule.RunForeground(ctx, p.Schedules, runtime, schedule.RunnerOptions{Clock: clock, Emit: emit})
+}
+
+type currentSetupDriver struct {
+	harness.Driver
+	project     *project.Project
+	self        string
+	diagnostics io.Writer
+}
+
+func (d *currentSetupDriver) Open(ctx context.Context, request harness.OpenRequest) (harness.Session, error) {
+	if err := ensureApplied(d.project, d.self, d.diagnostics); err != nil {
+		return nil, err
+	}
+	return d.Driver.Open(ctx, request)
 }
 
 func runChannel(args []string, input io.Reader, output, stderr io.Writer) error {
@@ -718,7 +734,7 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 	if err != nil {
 		return err
 	}
-	runtime, err := discord.New(p, driver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, MaxResident: *maxResident, MaxActive: *maxActive, Audit: stderr, Executable: hctlExecutable})
+	runtime, err := discord.New(p, driver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, MaxResident: *maxResident, MaxActive: *maxActive, Audit: stderr, Executable: hctlExecutable, NativeMCP: resolveProjectNativeMCP})
 	if err != nil {
 		return err
 	}

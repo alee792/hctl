@@ -117,6 +117,12 @@ func ApplyWritableChannel(p *project.Project, executable string) (Result, error)
 	return apply(p, executable, true, p.WorkspaceRoot, nil)
 }
 
+// ApplyWritableChannelWithNativeMCP preserves exact native package selection
+// when channel work is relocated into a writable conversation worktree.
+func ApplyWritableChannelWithNativeMCP(p *project.Project, executable string, servers []integration.NativeMCPLaunchDescriptor) (Result, error) {
+	return apply(p, executable, true, p.WorkspaceRoot, servers)
+}
+
 func apply(p *project.Project, executable string, channelWritable bool, workspaceRoot string, nativeMCP []integration.NativeMCPLaunchDescriptor) (Result, error) {
 	if !filepath.IsAbs(executable) {
 		return Result{}, errors.New("managed MCP executable path must be absolute")

@@ -91,6 +91,7 @@ type Config struct {
 	AuditPrefix     string
 	Interactions    InteractionAdapter
 	InitialSurfaces []InitialSurface
+	NativeMCP       worktree.NativeMCPResolver
 }
 
 type Status struct {
@@ -176,7 +177,7 @@ func New(ctx context.Context, config Config, delivery Delivery) (*Controller, er
 		c.handleDispatch(conversation, event)
 		return nil
 	}
-	workspaceManager, _ := worktree.New(controllerCtx, config.Project, config.Executable)
+	workspaceManager, _ := worktree.NewWithNativeMCP(controllerCtx, config.Project, config.Executable, config.NativeMCP)
 	var managed *dispatch.Manager
 	var configured interactionManager
 	configure := func(manager *dispatch.Manager) error {

@@ -384,6 +384,11 @@ package. The superseded anonymous managed GitHub client and tool definitions
 have been removed; the managed server, authored tools, channel input, and
 plugin-native MCP behavior remain unchanged. Full local/headless maintainer
 journey evidence remains #71 and the documented operator journey remains #72.
+Every hctl-owned scheduled process start re-resolves and verifies current
+offline package state before opening the harness, so disablement, removal,
+updates, or corruption cannot reuse stale native configuration. Writable
+Discord conversation promotion and reuse carry the same capability-generic
+resolver into the relocated worktree rather than dropping its GitHub entry.
 
 ADR 0032 and the dependency-free `hctl/channeladapter` module now define the
 second closed capability and its version-1 process protocol. Package metadata

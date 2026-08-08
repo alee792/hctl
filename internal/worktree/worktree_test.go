@@ -2,13 +2,18 @@ package worktree
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
+	"hctl/internal/integration"
 	"hctl/internal/project"
 	"hctl/internal/setup"
 )
@@ -41,6 +46,67 @@ func TestProvisionCreatesAndResolvesIsolatedBranchWorktree(t *testing.T) {
 	resolved, err := manager.Resolve(context.Background(), "discord-conversation", assignment)
 	if err != nil || resolved.WorkspaceRoot != assignment.Root || resolved.AgentID != base.AgentID {
 		t.Fatalf("resolved project = %#v, %v", resolved, err)
+	}
+}
+
+func TestGitHubDiscordWritablePromotionKeepsCurrentNativeMCP(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeInstructions(t, repo)
+	writeWorktreeFile(t, filepath.Join(repo, "connections", "github.md"), "Use discovered GitHub tools.\n")
+	writeWorktreeFile(t, filepath.Join(repo, "channels", "discord.md"), "---\nmode: ambient\n---\n\nParticipate when useful.\n")
+	git(t, repo, "init", "--quiet")
+	git(t, repo, "config", "user.email", "hctl@example.invalid")
+	git(t, repo, "config", "user.name", "hctl test")
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "--quiet", "-m", "fixture")
+	base, err := project.Load(repo, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := integration.NewStore(t.TempDir(), nil)
+	installWorktreeGitHubPackage(t, store, "1.8.0", "first")
+	resolver := func(ctx context.Context, p *project.Project) ([]integration.NativeMCPLaunchDescriptor, error) {
+		resolved, err := store.ResolveNativeMCP(ctx, "github-mcp-server", "github")
+		if err != nil {
+			return nil, err
+		}
+		descriptor, err := resolved.LaunchDescriptor(p.Harness)
+		if err != nil {
+			return nil, err
+		}
+		return []integration.NativeMCPLaunchDescriptor{descriptor}, nil
+	}
+	manager, err := NewWithNativeMCP(context.Background(), base, "/usr/bin/true", resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, assignment, err := manager.Provision(context.Background(), "discord-github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Remove(context.Background(), assignment) })
+	firstConfig := readWorktreeFile(t, filepath.Join(assignment.Root, ".codex", "config.toml"))
+	if !strings.Contains(firstConfig, `[mcp_servers."github"]`) || !strings.Contains(firstConfig, `env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]`) || !strings.Contains(firstConfig, `required = false`) {
+		t.Fatalf("promoted native config = %s", firstConfig)
+	}
+	if err := setup.VerifyWritableChannel(prepared); err != nil {
+		t.Fatal(err)
+	}
+
+	installWorktreeGitHubPackage(t, store, "1.8.1", "second")
+	resolved, err := manager.Resolve(context.Background(), "discord-github", assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondConfig := readWorktreeFile(t, filepath.Join(assignment.Root, ".codex", "config.toml"))
+	if secondConfig == firstConfig || !strings.Contains(secondConfig, storeExecutable(t, store)) {
+		t.Fatalf("reused writable worktree did not select current exact executable:\n%s", secondConfig)
+	}
+	if resolved.WorkspaceRoot != assignment.Root || resolved.DiscordChannel == nil || resolved.GitHubConnection == nil {
+		t.Fatalf("combined relocated project = %#v", resolved)
 	}
 }
 
@@ -533,6 +599,71 @@ func writeInstructions(t *testing.T, root string) {
 	if err := os.WriteFile(filepath.Join(root, "instructions.md"), []byte("---\ndescription: test agent\n---\nHelp with tests.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func installWorktreeGitHubPackage(t *testing.T, store *integration.Store, version, marker string) {
+	t.Helper()
+	root := t.TempDir()
+	payload := []byte("#!/bin/sh\n# " + marker + "\nexit 0\n")
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "github-mcp-server", "version": version, "name": "GitHub fixture", "description": "Credential-free worktree fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://github.com/github/github-mcp-server", "revision": "v" + version},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary",
+			"source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID}, "executable": "github-mcp-server", "arguments": []string{"stdio"}, "working_directory": ".", "environment": map[string]string{},
+			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
+			"harnesses":            []any{map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"}},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorktreeFile(t, filepath.Join(root, "integration.json"), string(manifest)+"\n")
+	writeWorktreeFile(t, filepath.Join(root, "payload", "github-mcp-server"), string(payload))
+	options := integration.InstallOptions{Source: root, Trust: integration.TrustOperator}
+	if version != "1.8.0" {
+		options.UpdatePackageID = "github-mcp-server"
+	}
+	if _, err := store.Install(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func storeExecutable(t *testing.T, store *integration.Store) string {
+	t.Helper()
+	resolved, err := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved.Executable
+}
+
+func writeWorktreeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readWorktreeFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func git(t *testing.T, root string, args ...string) {

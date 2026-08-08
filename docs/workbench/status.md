@@ -469,6 +469,7 @@ status/reset, interaction answer and cancellation, exact render receipt,
 delivered-interaction restore, ambiguous no-retry delivery, child failure,
 negotiated frame/outstanding and fixed queue bounds, stream-safe
 credential-redacted stderr, signal-aware operation process-tree cancellation,
+real-terminal foreground ownership and restoration, startup pipe backpressure,
 non-evicting reply-target saturation, interprocess-safe selection updates, and
 bounded forced cleanup. #85 removes
 the retained old code and Discord-only root dependencies.

@@ -339,10 +339,16 @@ func (runtime *Runtime) readLoop() {
 		err   error
 	}
 	decodedFrames := make(chan decoded, 1)
+	decodePermit := make(chan struct{}, 1)
 	stopDecode := make(chan struct{})
 	defer close(stopDecode)
 	go func() {
 		for {
+			select {
+			case <-decodePermit:
+			case <-stopDecode:
+				return
+			}
 			frame, err := runtime.decoder.Read(channeladapter.FromAdapter)
 			select {
 			case decodedFrames <- decoded{frame: frame, err: err}:
@@ -357,6 +363,7 @@ func (runtime *Runtime) readLoop() {
 	recoveryDone := runtime.recoveryDone
 	recovered := recoveryDone == nil
 	deferred := frameQueue{}
+	readPending := false
 	for {
 		if recovered && len(deferred.frames) > 0 {
 			frame, _ := deferred.pop()
@@ -366,11 +373,27 @@ func (runtime *Runtime) readLoop() {
 			}
 			continue
 		}
+		if !readPending && (recovered || deferred.canAdmit(runtime.limits)) {
+			decodePermit <- struct{}{}
+			readPending = true
+		}
+		if !recovered && !readPending {
+			select {
+			case <-recoveryDone:
+				recovered = true
+				recoveryDone = nil
+			case <-runtime.config.after(channeladapter.DeliveryTimeout):
+				runtime.fail(errors.New("channel-adapter startup recovery remained at bounded queue capacity"))
+				return
+			}
+			continue
+		}
 		select {
 		case <-recoveryDone:
 			recovered = true
 			recoveryDone = nil
 		case result := <-decodedFrames:
+			readPending = false
 			if result.err != nil {
 				runtime.fail(errors.New("channel-adapter protocol failed"))
 				return
@@ -379,7 +402,7 @@ func (runtime *Runtime) readLoop() {
 				continue
 			}
 			if !recovered {
-				if err := deferred.add(result.frame); err != nil {
+				if err := deferred.add(result.frame, runtime.limits); err != nil {
 					runtime.fail(err)
 					return
 				}
@@ -393,13 +416,18 @@ func (runtime *Runtime) readLoop() {
 	}
 }
 
-func (queue *frameQueue) add(frame channeladapter.Envelope) error {
+func (queue *frameQueue) canAdmit(limits channeladapter.Limits) bool {
+	frameLimit := min(channeladapter.MaxQueuedFrames, limits.MaxOutstanding)
+	return len(queue.frames) < frameLimit && queue.bytes+limits.MaxFrameBytes+1 <= channeladapter.MaxQueuedBytes
+}
+
+func (queue *frameQueue) add(frame channeladapter.Envelope, limits channeladapter.Limits) error {
 	encoded, err := channeladapter.MarshalFrame(frame, channeladapter.FromAdapter)
 	if err != nil {
 		return err
 	}
 	size := len(encoded) + 1
-	if len(queue.frames) >= channeladapter.MaxQueuedFrames || queue.bytes+size > channeladapter.MaxQueuedBytes {
+	if len(queue.frames) >= min(channeladapter.MaxQueuedFrames, limits.MaxOutstanding) || queue.bytes+size > channeladapter.MaxQueuedBytes {
 		return errors.New("channel-adapter startup replay exceeded bounded queue capacity")
 	}
 	queue.frames = append(queue.frames, queuedFrame{frame: frame, size: size})

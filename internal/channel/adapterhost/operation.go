@@ -6,12 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 
 	"hctl/channeladapter"
 	"hctl/internal/integration"
@@ -19,10 +23,12 @@ import (
 
 const setupOperationTimeout = 10 * time.Minute
 
+var foregroundOperationMutex sync.Mutex
+
 // RunOperation executes one exact bounded setup/status/remove mode. Setup and
 // remove may use trusted input and the diagnostic terminal, while stdout
 // remains one closed non-secret result object.
-func RunOperation(ctx context.Context, mode integration.ChannelAdapterMode, launch Launch, environment []string, input io.Reader, terminal io.Writer) (channeladapter.OperationResult, error) {
+func RunOperation(ctx context.Context, mode integration.ChannelAdapterMode, launch Launch, environment []string, input io.Reader, terminal io.Writer) (result channeladapter.OperationResult, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return channeladapter.OperationResult{}, err
 	}
@@ -41,6 +47,17 @@ func RunOperation(ctx context.Context, mode integration.ChannelAdapterMode, laun
 	command.Env = append([]string(nil), environment...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Stdin = input
+	foreground, err := prepareForegroundOperation(command, input)
+	if err != nil {
+		return channeladapter.OperationResult{}, err
+	}
+	if foreground != nil {
+		defer func() {
+			if err := foreground.restore(); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}()
+	}
 	diagnostics := newDiagnosticWriter(terminal, environment)
 	defer diagnostics.Flush()
 	command.Stderr = diagnostics
@@ -74,11 +91,57 @@ func RunOperation(ctx context.Context, mode integration.ChannelAdapterMode, laun
 		return channeladapter.OperationResult{}, errors.New("channel-adapter operation returned an invalid non-secret result")
 	}
 	data := bytes.TrimSpace(output.data)
-	result, err := channeladapter.DecodeOperationResult(data)
+	result, err = channeladapter.DecodeOperationResult(data)
 	if err != nil {
 		return channeladapter.OperationResult{}, errors.New("channel-adapter operation returned an invalid non-secret result")
 	}
 	return result, nil
+}
+
+// foregroundOperation preserves direct terminal input while the adapter runs
+// in its own process group. The child performs the foreground handoff during
+// fork/exec; hctl restores the original owner after every exit path.
+type foregroundOperation struct {
+	file  *os.File
+	owner int
+}
+
+func prepareForegroundOperation(command *exec.Cmd, input io.Reader) (*foregroundOperation, error) {
+	file, ok := input.(*os.File)
+	if !ok {
+		return nil, nil
+	}
+	foregroundOperationMutex.Lock()
+	fd := int(file.Fd())
+	owner, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP)
+	if errors.Is(err, unix.ENOTTY) {
+		foregroundOperationMutex.Unlock()
+		return nil, nil
+	}
+	if err != nil {
+		foregroundOperationMutex.Unlock()
+		return nil, errors.New("cannot inspect channel-adapter operation terminal")
+	}
+	if owner != syscall.Getpgrp() {
+		foregroundOperationMutex.Unlock()
+		return nil, errors.New("channel-adapter operation requires a foreground terminal")
+	}
+	command.SysProcAttr = &syscall.SysProcAttr{Foreground: true, Ctty: fd}
+	return &foregroundOperation{file: file, owner: owner}, nil
+}
+
+func (foreground *foregroundOperation) restore() error {
+	defer foregroundOperationMutex.Unlock()
+	wasIgnored := signal.Ignored(syscall.SIGTTOU)
+	signal.Ignore(syscall.SIGTTOU)
+	err := unix.IoctlSetPointerInt(int(foreground.file.Fd()), unix.TIOCSPGRP, foreground.owner)
+	if !wasIgnored {
+		signal.Reset(syscall.SIGTTOU)
+	}
+	if err != nil {
+		return errors.New("cannot restore channel-adapter operation terminal")
+	}
+	return nil
 }
 
 func killOperationTree(command *exec.Cmd, done <-chan error, diagnostic io.Writer) {
@@ -163,6 +226,11 @@ func (writer *diagnosticWriter) consume(data []byte) {
 		if writer.atLineStart {
 			if value == ' ' || value == '\t' || value == '\r' {
 				writer.linePrefix = append(writer.linePrefix, value)
+				if len(writer.linePrefix) >= channeladapter.MaxFrameBytes {
+					writer.feedSecret(writer.linePrefix)
+					writer.linePrefix = nil
+					writer.atLineStart = false
+				}
 				continue
 			}
 			if value == '{' || value == '[' {

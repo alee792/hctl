@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"hctl/channeladapter"
 	"hctl/internal/channel/controller"
@@ -233,23 +237,37 @@ func TestSanitizedStderrOutputCapIncludesPrefixes(t *testing.T) {
 	if output.Len() != channeladapter.MaxStderrBytes {
 		t.Fatalf("sanitized stderr bytes = %d", output.Len())
 	}
+	writer = newDiagnosticWriter(io.Discard, nil)
+	_, _ = writer.Write(bytes.Repeat([]byte(" "), channeladapter.MaxFrameBytes*2))
+	if len(writer.linePrefix) != 0 || writer.atLineStart {
+		t.Fatalf("leading whitespace retained beyond the frame bound: bytes=%d line_start=%t", len(writer.linePrefix), writer.atLineStart)
+	}
 }
 
 func TestStartupReplayQueueAndReplyTargetsFailWithoutEviction(t *testing.T) {
 	frame := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.connection.1", Payload: channeladapter.Connection{State: channeladapter.ConnectionReady}}
+	limits := channeladapter.Limits{MaxFrameBytes: channeladapter.MaxFrameBytes, MaxOutstanding: channeladapter.MaxQueuedFrames}
 	queue := frameQueue{}
 	for index := 0; index < channeladapter.MaxQueuedFrames; index++ {
 		frame.ID = fmt.Sprintf("adapter.connection.%d", index+1)
-		if err := queue.add(frame); err != nil {
+		if err := queue.add(frame, limits); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := queue.add(frame); err == nil {
+	if err := queue.add(frame, limits); err == nil {
 		t.Fatal("startup replay frame ceiling was not enforced")
 	}
 	queue = frameQueue{bytes: channeladapter.MaxQueuedBytes}
-	if err := queue.add(frame); err == nil {
+	if err := queue.add(frame, limits); err == nil {
 		t.Fatal("startup replay byte ceiling was not enforced")
+	}
+	queue = frameQueue{bytes: channeladapter.MaxQueuedBytes - limits.MaxFrameBytes - 1}
+	if !queue.canAdmit(limits) {
+		t.Fatal("startup replay rejected a safely reserved frame")
+	}
+	queue.bytes++
+	if queue.canAdmit(limits) {
+		t.Fatal("startup replay did not reserve the negotiated maximum frame")
 	}
 
 	runtime, encoder, controlled := regressionRuntime(1)
@@ -271,6 +289,67 @@ func TestStartupReplayQueueAndReplyTargetsFailWithoutEviction(t *testing.T) {
 	runtime.forget("input-1")
 	if err := runtime.remember("input-2", target{route: incoming.Route}); err != nil {
 		t.Fatal("released reply-target capacity was not reusable")
+	}
+}
+
+type startupGateDecoder struct{ reads atomic.Int32 }
+
+func (decoder *startupGateDecoder) Read(channeladapter.Direction) (channeladapter.Envelope, error) {
+	if decoder.reads.Add(1) == 1 {
+		return channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.connection.1", Payload: &channeladapter.Connection{State: channeladapter.ConnectionReady}}, nil
+	}
+	return channeladapter.Envelope{}, io.EOF
+}
+
+func (*startupGateDecoder) SetMaxFrameBytes(int) error { return nil }
+
+func TestStartupReplayStopsDecoderAtNegotiatedCapacity(t *testing.T) {
+	running, _, _ := regressionRuntime(1)
+	decoder := &startupGateDecoder{}
+	running.decoder = decoder
+	running.recoveryDone = make(chan struct{})
+	go running.readLoop()
+	waitFor(t, func() bool { return decoder.reads.Load() == 1 }, "first startup frame")
+	time.Sleep(100 * time.Millisecond)
+	if got := decoder.reads.Load(); got != 1 {
+		t.Fatalf("startup decoder consumed past negotiated capacity: reads=%d", got)
+	}
+	close(running.recoveryDone)
+	waitFor(t, func() bool { return decoder.reads.Load() == 2 }, "post-recovery decoder admission")
+	waitFor(t, func() bool {
+		select {
+		case <-running.done:
+			return true
+		default:
+			return false
+		}
+	}, "post-recovery decoder completion")
+
+	running, _, _ = regressionRuntime(1)
+	decoder = &startupGateDecoder{}
+	running.decoder = decoder
+	running.recoveryDone = make(chan struct{})
+	deadline := make(chan time.Time, 1)
+	running.config.after = func(time.Duration) <-chan time.Time { return deadline }
+	go running.readLoop()
+	waitFor(t, func() bool { return decoder.reads.Load() == 1 }, "deadline startup frame")
+	deadline <- time.Now()
+	waitFor(t, func() bool {
+		select {
+		case <-running.done:
+			return true
+		default:
+			return false
+		}
+	}, "startup capacity deadline")
+	if got := decoder.reads.Load(); got != 1 {
+		t.Fatalf("startup deadline consumed an overflow frame: reads=%d", got)
+	}
+	running.mu.Lock()
+	err := running.err
+	running.mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "recovery remained at bounded queue capacity") {
+		t.Fatalf("startup capacity deadline error = %v", err)
 	}
 }
 
@@ -324,6 +403,62 @@ printf '{"schema_version":1,"operation":"%s","profile_id":"default","status":"%s
 		t.Fatal("cancelled operation did not stop")
 	}
 	waitFor(t, func() bool { return errors.Is(syscall.Kill(childPID, 0), syscall.ESRCH) }, "cancelled operation child cleanup")
+}
+
+func TestOperationOwnsAndRestoresForegroundTerminal(t *testing.T) {
+	if os.Getenv("HCTL_FOREGROUND_TERMINAL_HELPER") == "1" {
+		executable := os.Getenv("HCTL_FOREGROUND_ADAPTER")
+		result, err := RunOperation(context.Background(), integration.ChannelAdapterSetup, Launch{Command: executable, Arguments: []string{"setup"}, WorkingDirectory: filepath.Dir(executable)}, AdapterEnvironment(""), os.Stdin, os.Stderr)
+		if err != nil || result.Operation != "setup" {
+			t.Fatalf("foreground operation = %#v, %v", result, err)
+		}
+		owner, err := unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP)
+		if err != nil || owner != syscall.Getpgrp() {
+			t.Fatalf("foreground terminal owner = %d, %v; process group=%d", owner, err, syscall.Getpgrp())
+		}
+		if _, err := fmt.Fprintln(os.Stdout, "foreground-terminal-restored"); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	script, err := exec.LookPath("script")
+	if err != nil {
+		t.Skip("script utility is required for a real pseudo-terminal regression")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	adapter := filepath.Join(root, "adapter")
+	writeFile(t, adapter, "#!/bin/sh\nIFS= read -r answer || exit 8\n[ \"$answer\" = trusted-input ] || exit 9\nprintf '%s\\n' '{\"schema_version\":1,\"operation\":\"setup\",\"profile_id\":\"default\",\"status\":\"ready\",\"message\":\"ok\"}'\n", 0o755)
+	runner := filepath.Join(root, "runner")
+	writeFile(t, runner, "#!/bin/sh\nexec \"$HCTL_TEST_EXECUTABLE\" -test.run=^TestOperationOwnsAndRestoresForegroundTerminal$\n", 0o755)
+	var arguments []string
+	if runtime.GOOS == "darwin" {
+		arguments = []string{"-q", "/dev/null", runner}
+	} else {
+		arguments = []string{"-qefc", runner, "/dev/null"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, script, arguments...)
+	command.Env = append(os.Environ(), "HCTL_FOREGROUND_TERMINAL_HELPER=1", "HCTL_FOREGROUND_ADAPTER="+adapter, "HCTL_TEST_EXECUTABLE="+executable)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
+	command.Stdin = reader
+	if _, err := io.WriteString(writer, "trusted-input\n"); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Run(); err != nil || !strings.Contains(output.String(), "foreground-terminal-restored") {
+		t.Fatalf("pseudo-terminal operation = %v, output=%q", err, output.String())
+	}
 }
 
 type stuckProcess struct{ kills atomic.Int32 }

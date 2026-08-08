@@ -904,7 +904,9 @@ Channel setup retains trusted terminal input and has a separate ten-minute
 human enrollment deadline. Remove also retains trusted input, while status has
 no stdin; status and remove remain bounded to 30 seconds. Interrupt or caller
 cancellation kills the complete private operation process group and bounds
-reaping. The generic per-agent/channel selection store locks the complete
+reaping. For a controlling terminal, the adapter process group owns the
+foreground during the operation and hctl restores the original group on every
+exit path. The generic per-agent/channel selection store locks the complete
 read-modify-write transaction across processes before atomically replacing its
 owner-only file.
 
@@ -942,9 +944,11 @@ Ordinary commands and deliveries have 30-second deadlines, attachments 60
 seconds, and graceful shutdown five seconds before forced tree cleanup.
 The narrowed frame ceiling applies to reads and writes, and the narrowed
 outstanding ceiling bounds correlations and retained route/event state.
-Startup recovery separately admits at most 64 frames and 8 MiB before replay,
-and target saturation rejects new input without evicting an older accepted
-reply target.
+Startup recovery separately admits no more than the negotiated outstanding
+limit, 64 frames, or 8 MiB before replay. It reserves a negotiated maximum frame
+before reading and applies pipe backpressure at capacity until recovery or its
+deadline. Target saturation rejects new input without evicting an older
+accepted reply target.
 
 An adapter keeps an event id and exact bytes stable until hctl acknowledges a
 durable acceptance, duplicate, or rejection. Exact same-content replay is

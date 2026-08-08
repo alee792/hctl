@@ -140,12 +140,33 @@ func (s *Store) Consumers(ctx context.Context, packageID string) ([]Consumption,
 }
 
 func (s *Store) removeConsumption(packageID string) error {
-	directory := filepath.Join(s.root, "consumers", packageID)
-	items, err := os.ReadDir(directory)
-	if errors.Is(err, os.ErrNotExist) {
+	relativeDirectory := "consumers/" + packageID
+	directory := filepath.Join(s.root, filepath.FromSlash(relativeDirectory))
+	if _, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
 		return nil
+	} else if err != nil {
+		return errors.New("cannot inspect integration consumption receipts")
 	}
+	if err := rootfs.RequirePrivateDir(s.root, relativeDirectory); err != nil {
+		return errors.New("refusing to remove unsafe integration consumption receipts")
+	}
+	storeRoot, err := os.OpenRoot(s.root)
 	if err != nil {
+		return errors.New("cannot confine integration consumption removal")
+	}
+	defer func() { _ = storeRoot.Close() }()
+	consumerRoot, err := storeRoot.OpenRoot(relativeDirectory)
+	if err != nil {
+		return errors.New("refusing to remove unsafe integration consumption receipts")
+	}
+	defer func() { _ = consumerRoot.Close() }()
+	handle, err := consumerRoot.Open(".")
+	if err != nil {
+		return errors.New("cannot inspect integration consumption receipts")
+	}
+	items, err := handle.ReadDir(-1)
+	closeErr := handle.Close()
+	if err != nil || closeErr != nil {
 		return errors.New("cannot inspect integration consumption receipts")
 	}
 	for _, item := range items {
@@ -155,12 +176,9 @@ func (s *Store) removeConsumption(packageID string) error {
 		}
 	}
 	for _, item := range items {
-		if err := os.Remove(filepath.Join(directory, item.Name())); err != nil {
+		if err := consumerRoot.Remove(item.Name()); err != nil {
 			return errors.New("cannot remove integration consumption receipt")
 		}
-	}
-	if err := os.Remove(directory); err != nil {
-		return errors.New("cannot remove integration consumption directory")
 	}
 	return nil
 }

@@ -169,6 +169,44 @@ func TestStoreConcurrentInstallPublishesOneExactEntry(t *testing.T) {
 	}
 }
 
+func TestStorePreparedCacheIncludesTransformationIdentity(t *testing.T) {
+	payload := []byte("identical raw binary")
+	firstRoot := t.TempDir()
+	writePackageFixture(t, firstRoot, fixtureOptions{ID: "fixture-first", Artifacts: []fixtureArtifact{{ID: "primary", PayloadPath: "payload/server", ExecutablePath: "bin/first", Data: payload}}})
+	secondRoot := t.TempDir()
+	writePackageFixture(t, secondRoot, fixtureOptions{ID: "fixture-second", Artifacts: []fixtureArtifact{{ID: "primary", PayloadPath: "payload/server", ExecutablePath: "bin/second", Data: payload}}})
+	store := NewStore(t.TempDir(), nil)
+	ctx := context.Background()
+	if _, err := store.Install(ctx, InstallOptions{Source: firstRoot, Trust: TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Install(ctx, InstallOptions{Source: secondRoot, Trust: TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.Resolve(ctx, "fixture-first")
+	if err != nil {
+		t.Fatalf("first Resolve() error = %v", err)
+	}
+	second, err := store.Resolve(ctx, "fixture-second")
+	if err != nil {
+		t.Fatalf("second Resolve() error = %v", err)
+	}
+	if first.Artifacts[0].Root == second.Artifacts[0].Root {
+		t.Fatalf("different executable transformations share prepared root %q", first.Artifacts[0].Root)
+	}
+	if filepath.Base(first.Artifacts[0].Executable) != "first" || filepath.Base(second.Artifacts[0].Executable) != "second" {
+		t.Fatalf("resolved executables = %q, %q", first.Artifacts[0].Executable, second.Artifacts[0].Executable)
+	}
+	prepared, err := os.ReadDir(filepath.Join(store.root, "prepared"))
+	if err != nil || len(prepared) != 2 {
+		t.Fatalf("prepared transformations = %#v, %v", prepared, err)
+	}
+	blobs, err := os.ReadDir(filepath.Join(store.root, "blobs"))
+	if err != nil || len(blobs) != 1 {
+		t.Fatalf("shared raw blobs = %#v, %v", blobs, err)
+	}
+}
+
 func TestStoreInterruptedFetchDoesNotPublishInstallation(t *testing.T) {
 	payload := []byte("never delivered")
 	started := make(chan struct{})
@@ -221,6 +259,43 @@ func TestStoreUpdateRequiresExactIntentAndPreservesOldCache(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(store.root, "blobs", digestHex(payload))); err != nil {
 			t.Fatalf("immutable cache %s missing: %v", digestHex(payload), err)
 		}
+	}
+}
+
+func TestStoreRemoveRefusesSymlinkedConsumptionDirectory(t *testing.T) {
+	packageRoot := t.TempDir()
+	payload := []byte("consumer cleanup fixture")
+	writePackageFixture(t, packageRoot, fixtureOptions{Artifacts: []fixtureArtifact{{ID: "primary", PayloadPath: "payload/server", ExecutablePath: "bin/server", Data: payload}}})
+	store := NewStore(t.TempDir(), nil)
+	ctx := context.Background()
+	if _, err := store.Install(ctx, InstallOptions{Source: packageRoot, Trust: TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	agentID := "sample-agent@0123456789abcdef"
+	if err := store.RecordConsumption(ctx, "fixture-package", agentID, "sample-agent", []string{"primary"}); err != nil {
+		t.Fatal(err)
+	}
+	consumerDirectory := filepath.Join(store.root, "consumers", "fixture-package")
+	if err := os.Remove(filepath.Join(consumerDirectory, consumerFilename(agentID))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(consumerDirectory); err != nil {
+		t.Fatal(err)
+	}
+	external := t.TempDir()
+	externalReceipt := filepath.Join(external, consumerFilename(agentID))
+	writeTestBytes(t, externalReceipt, []byte("must remain"), 0o600)
+	if err := os.Symlink(external, consumerDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove(ctx, "fixture-package"); err == nil || !strings.Contains(err.Error(), "unsafe integration consumption") {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	if data, err := os.ReadFile(externalReceipt); err != nil || string(data) != "must remain" {
+		t.Fatalf("external receipt was changed: %q, %v", data, err)
+	}
+	if _, err := store.Inspect(ctx, "fixture-package"); err != nil {
+		t.Fatalf("failed removal retired installation state: %v", err)
 	}
 }
 
@@ -374,6 +449,7 @@ func TestStoreRejectsMismatchAndUnsupportedCapabilityBeforePayloadAccess(t *test
 }
 
 type fixtureOptions struct {
+	ID          string
 	Version     string
 	Minimum     string
 	Before      string
@@ -409,6 +485,9 @@ func writePackageFixture(t *testing.T, root string, options fixtureOptions) []by
 }
 
 func fixtureDocument(options fixtureOptions) map[string]any {
+	if options.ID == "" {
+		options.ID = "fixture-package"
+	}
 	if options.Version == "" {
 		options.Version = "1.0.0"
 	}
@@ -453,8 +532,8 @@ func fixtureDocument(options fixtureOptions) map[string]any {
 		})
 	}
 	return map[string]any{
-		"schema_version": 1, "id": "fixture-package", "version": options.Version, "name": "Fixture package", "description": "Credentialless installer fixture.", "license": "MIT",
-		"provenance":    map[string]any{"source": "https://example.invalid/fixture", "revision": "fixture-" + options.Version},
+		"schema_version": 1, "id": options.ID, "version": options.Version, "name": "Fixture package", "description": "Credentialless installer fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://example.invalid/fixture", "revision": options.ID + "-" + options.Version},
 		"compatibility": map[string]any{"minimum": options.Minimum, "before": options.Before}, "artifacts": artifacts, "capabilities": capabilities,
 	}
 }

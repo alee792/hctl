@@ -753,6 +753,10 @@ OS-user integration store shared across agents and workspaces. Raw and prepared
 entries are content-addressed, verified before reuse, and published atomically
 under a store lock. The prepared closure includes a deterministic file receipt
 so later corruption of the executable or a sibling runtime file fails closed.
+Its cache identity binds the raw artifact size and SHA-256, archive format, and
+expected executable path, size, and SHA-256; two transformation contracts over
+the same raw bytes therefore cannot alias or replace one another. A valid
+immutable prepared entry is reused rather than replaced.
 Only the small installation-state record selects the current exact package;
 interruption before that atomic write can leave inert unreferenced cache bytes
 but cannot publish a partial installation. `hctl integration update ID SOURCE

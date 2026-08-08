@@ -484,7 +484,18 @@ type preparedFile struct {
 type preparedArtifactReceipt struct {
 	SchemaVersion int            `json:"schema_version"`
 	Artifact      string         `json:"artifact_sha256"`
+	Preparation   string         `json:"preparation_sha256"`
 	Files         []preparedFile `json:"files"`
+}
+
+type preparedArtifactIdentity struct {
+	SchemaVersion    int            `json:"schema_version"`
+	ArtifactSize     int64          `json:"artifact_size"`
+	ArtifactSHA256   string         `json:"artifact_sha256"`
+	Format           ArtifactFormat `json:"format"`
+	ExecutablePath   string         `json:"executable_path"`
+	ExecutableSize   int64          `json:"executable_size"`
+	ExecutableSHA256 string         `json:"executable_sha256"`
 }
 
 func (s *Store) prepareArtifact(ctx context.Context, artifact Artifact, data []byte) error {
@@ -519,7 +530,8 @@ func (s *Store) prepareArtifact(ctx context.Context, artifact Artifact, data []b
 	if err := normalizeExecutable(temporary, artifact.Executable); err != nil {
 		return err
 	}
-	receipt, err := collectPrepared(temporary, artifact.SHA256)
+	preparation := preparedArtifactKey(artifact)
+	receipt, err := collectPrepared(temporary, artifact.SHA256, preparation)
 	if err != nil {
 		return err
 	}
@@ -530,11 +542,12 @@ func (s *Store) prepareArtifact(ctx context.Context, artifact Artifact, data []b
 	if err := writePreparedFile(temporary, preparedReceipt, append(receiptBytes, '\n'), 0o400); err != nil {
 		return err
 	}
-	target := filepath.Join(parent, artifact.SHA256)
+	target := filepath.Join(parent, preparation)
 	if _, err := os.Lstat(target); err == nil {
-		if err := os.RemoveAll(target); err != nil {
-			return errors.New("cannot retire corrupt prepared integration artifact")
+		if err := s.verifyPreparedArtifact(artifact); err == nil {
+			return nil
 		}
+		return errors.New("prepared integration artifact cache is corrupt; refusing to replace its immutable identity")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("cannot inspect prepared integration artifact")
 	}
@@ -552,7 +565,8 @@ func (s *Store) verifyCachedArtifact(artifact Artifact) error {
 }
 
 func (s *Store) verifyPreparedArtifact(artifact Artifact) error {
-	root := filepath.Join(s.root, "prepared", artifact.SHA256)
+	preparation := preparedArtifactKey(artifact)
+	root := filepath.Join(s.root, "prepared", preparation)
 	if err := requireOwnedDirectory(root, false); err != nil {
 		return errors.New("prepared integration artifact is missing or unsafe")
 	}
@@ -561,7 +575,7 @@ func (s *Store) verifyPreparedArtifact(artifact Artifact) error {
 		return errors.New("prepared integration artifact receipt is missing")
 	}
 	var receipt preparedArtifactReceipt
-	if err := decodeStrict(receiptData, &receipt); err != nil || receipt.SchemaVersion != 1 || receipt.Artifact != artifact.SHA256 || len(receipt.Files) == 0 || len(receipt.Files) > maxPreparedEntries {
+	if err := decodeStrict(receiptData, &receipt); err != nil || receipt.SchemaVersion != 1 || receipt.Artifact != artifact.SHA256 || receipt.Preparation != preparation || len(receipt.Files) == 0 || len(receipt.Files) > maxPreparedEntries {
 		return errors.New("prepared integration artifact receipt is invalid")
 	}
 	seen := map[string]bool{}
@@ -607,8 +621,8 @@ func (s *Store) verifyPreparedArtifact(artifact Artifact) error {
 	return nil
 }
 
-func collectPrepared(root, artifactHash string) (preparedArtifactReceipt, error) {
-	receipt := preparedArtifactReceipt{SchemaVersion: 1, Artifact: artifactHash}
+func collectPrepared(root, artifactHash, preparation string) (preparedArtifactReceipt, error) {
+	receipt := preparedArtifactReceipt{SchemaVersion: 1, Artifact: artifactHash, Preparation: preparation}
 	total := int64(0)
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -638,6 +652,18 @@ func collectPrepared(root, artifactHash string) (preparedArtifactReceipt, error)
 	}
 	sort.Slice(receipt.Files, func(i, j int) bool { return receipt.Files[i].Path < receipt.Files[j].Path })
 	return receipt, nil
+}
+
+func preparedArtifactKey(artifact Artifact) string {
+	identity := preparedArtifactIdentity{
+		SchemaVersion: 1, ArtifactSize: artifact.Size, ArtifactSHA256: artifact.SHA256, Format: artifact.Format,
+		ExecutablePath: artifact.Executable.Path, ExecutableSize: artifact.Executable.Size, ExecutableSHA256: artifact.Executable.SHA256,
+	}
+	data, err := json.Marshal(identity)
+	if err != nil {
+		panic("integration prepared artifact identity is not encodable")
+	}
+	return rootfs.SHA256(data)
 }
 
 func extractTarGZ(ctx context.Context, root string, data []byte) error {

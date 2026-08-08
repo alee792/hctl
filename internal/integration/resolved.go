@@ -75,7 +75,7 @@ func (s *Store) Resolve(ctx context.Context, id string) (ResolvedPackage, error)
 			if err := s.verifyCachedArtifact(artifact); err != nil {
 				return fmt.Errorf("integration package %q cache is corrupt; reinstall or update it from the exact trusted source", id)
 			}
-			root := filepath.Join(s.root, "prepared", artifact.SHA256)
+			root := filepath.Join(s.root, "prepared", preparedArtifactKey(artifact))
 			artifacts = append(artifacts, ResolvedArtifact{Artifact: artifact, Root: root, Executable: filepath.Join(root, filepath.FromSlash(artifact.Executable.Path))})
 		}
 		sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Artifact.ID < artifacts[j].Artifact.ID })

@@ -141,7 +141,10 @@ One owner-only OS-user store is shared across agents and workspaces. It keeps
 exact manifests and raw platform artifacts by SHA-256 and prepares binary,
 zip, and tar.gz artifacts into immutable content-addressed regular-file trees.
 Every prepared tree carries a bounded receipt of its paths, sizes, hashes, and
-normalized modes. Install validates the current hctl compatibility interval,
+normalized modes. Its content key includes the raw artifact size and SHA-256,
+format, and expected executable path, size, and SHA-256, so distinct
+transformations of the same raw bytes never alias and a valid immutable entry
+is never replaced. Install validates the current hctl compatibility interval,
 host platform, source ownership, archive containment, raw identity, prepared
 executable identity, and every closed capability before atomically replacing
 the small installation-state record under a store lock. It never executes a

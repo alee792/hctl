@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "hctl-discord",
+  "version": "@VERSION@",
+  "name": "Official hctl Discord channel adapter",
+  "description": "Process-isolated Discord Gateway transport for hctl channel runtimes.",
+  "license": "BSD-3-Clause AND MIT",
+  "provenance": {
+    "source": "https://github.com/alee792/hctl",
+    "revision": "@REVISION@"
+  },
+  "compatibility": {
+    "minimum": "0.1.0-dev",
+    "before": "1.0.0"
+  },
+  "artifacts": [
+    {
+      "id": "@TARGET@",
+      "os": "@OS@",
+      "architecture": "@ARCH@",
+      "format": "binary",
+      "source": {"kind": "package", "path": "payload/hctl-discord"},
+      "size": @SIZE@,
+      "sha256": "@SHA256@",
+      "executable": {"path": "bin/hctl-discord", "size": @SIZE@, "sha256": "@SHA256@"}
+    }
+  ],
+  "capabilities": [
+    {
+      "type": "channel-adapter",
+      "version": 1,
+      "id": "discord",
+      "channel_kind": "discord",
+      "artifacts": ["@TARGET@"],
+      "executable": "bin/hctl-discord",
+      "runtime": {"arguments": ["run", "--stdio"]},
+      "setup": {"arguments": ["setup"]},
+      "status": {"arguments": ["status"]},
+      "remove": {"arguments": ["remove"]},
+      "protocol": {"minimum": 1, "before": 2},
+      "profile_selector": "opaque-id-v1",
+      "features": ["typing", "replies", "edits", "reactions", "attachments", "interactive-components", "text-fallback"]
+    }
+  ]
+}

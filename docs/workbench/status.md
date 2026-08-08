@@ -385,9 +385,20 @@ shutdown. Deterministic and independent no-op fixtures prove the capability
 seam without a vendor SDK or credential. Replay, ambiguous-delivery no-retry,
 backpressure, deadlines,
 process cleanup, credential ownership, same-user limitations, and dependency
-direction are explicit. The production Discord code has not moved and no
-generic process host exists yet; #83 and #84 consume this contract before #85
-removes the in-process implementation and Discord-only root dependencies.
+direction are explicit. ADR 0033 and the separately locked
+`hctl/discordadapter` module now provide the official `hctl-discord`
+executable. It owns DiscordGo, Gateway/REST transport, application locking,
+keyring access, adapter profiles, rendering, callbacks, reconnects,
+attachments, and safe diagnostics. The `hctl.discord` keyring identity is
+unchanged; selected legacy non-secret profiles migrate atomically, and ambient
+`HCTL_DISCORD_TOKEN` remains an adapter-only compatibility input. A
+credential-free fake runtime proves setup/status/remove, identity, handshake,
+inbound messages, replies, interactions, reconnect, cancellation, ambiguous
+delivery, malformed/oversized input, and shutdown. Its exact reproducible package builds,
+installs, resolves offline, and selectively stages through #76. The generic
+process host does not exist yet and production still uses the in-process
+adapter; #84 consumes this module before #85 removes old code and Discord-only
+root dependencies.
 
 The package CLI now requires explicit operator
 trust for local directory/archive installation and exact selected updates,

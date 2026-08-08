@@ -42,6 +42,24 @@ func TestFrameCodecIsClosedBoundedAndDirectional(t *testing.T) {
 	}
 }
 
+func TestDecoderCanNarrowRawFrameLimitAfterNegotiation(t *testing.T) {
+	t.Parallel()
+	frame, err := MarshalFrame(Envelope{ProtocolVersion: 1, ID: "host.shutdown.1", Payload: Shutdown{Reason: "test complete"}}, FromHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := NewDecoder(bytes.NewReader(append(append([]byte(nil), frame...), '\n')))
+	if err := decoder.SetMaxFrameBytes(len(frame) - 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decoder.Read(FromHost); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds %d bytes", len(frame)-1)) {
+		t.Fatalf("narrowed decoder error = %v", err)
+	}
+	if err := decoder.SetMaxFrameBytes(MaxFrameBytes + 1); err == nil {
+		t.Fatal("decoder accepted a limit above the protocol ceiling")
+	}
+}
+
 func TestInteractionValidationMatchesCanonicalBounds(t *testing.T) {
 	t.Parallel()
 	valid := func() SemanticInteractionRequest {

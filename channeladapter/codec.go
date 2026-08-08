@@ -177,10 +177,23 @@ func rejectDuplicateKeys(data []byte) error {
 	return nil
 }
 
-type Decoder struct{ reader *bufio.Reader }
+type Decoder struct {
+	reader        *bufio.Reader
+	maxFrameBytes int
+}
 
 func NewDecoder(reader io.Reader) *Decoder {
-	return &Decoder{reader: bufio.NewReaderSize(reader, MaxAttachmentChunkBytes)}
+	return &Decoder{reader: bufio.NewReaderSize(reader, MaxAttachmentChunkBytes), maxFrameBytes: MaxFrameBytes}
+}
+
+// SetMaxFrameBytes narrows the decoder after protocol negotiation. It must be
+// called only between reads.
+func (decoder *Decoder) SetMaxFrameBytes(maximum int) error {
+	if maximum < 1 || maximum > decoder.maxFrameBytes {
+		return errors.New("channel-adapter frame limit is invalid")
+	}
+	decoder.maxFrameBytes = maximum
+	return nil
 }
 
 // Read reads one newline-delimited frame without ever retaining more than the
@@ -189,8 +202,8 @@ func (decoder *Decoder) Read(direction Direction) (Envelope, error) {
 	var frame []byte
 	for {
 		part, err := decoder.reader.ReadSlice('\n')
-		if len(frame)+len(part) > MaxFrameBytes+1 {
-			return Envelope{}, fmt.Errorf("channel-adapter frame exceeds %d bytes", MaxFrameBytes)
+		if len(frame)+len(part) > decoder.maxFrameBytes+1 {
+			return Envelope{}, fmt.Errorf("channel-adapter frame exceeds %d bytes", decoder.maxFrameBytes)
 		}
 		frame = append(frame, part...)
 		if err == nil {

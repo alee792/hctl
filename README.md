@@ -107,6 +107,7 @@ configuration. The harness discovers the live tool catalog and the server reads
 an ambient `GITHUB_PERSONAL_ACCESS_TOKEN`; hctl does not read or persist the
 value and does not filter, confirm, authorize, or audit native GitHub effects.
 Native Git and `gh` authentication remain separately operator-owned. See the
+[complete native GitHub MCP journey](docs/github-native-mcp.md),
 [minimal example](examples/minimal), [plugin example](examples/plugins),
 [public GitHub example](examples/github),
 [Discord source example](examples/discord), and the

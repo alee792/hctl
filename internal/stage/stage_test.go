@@ -174,6 +174,25 @@ func TestCreateSelectivelyStagesGitHubNativeMCPClosure(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+
+	if err := os.RemoveAll(filepath.Join(source, "connections")); err != nil {
+		t.Fatal(err)
+	}
+	withoutGitHub, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutOutput := filepath.Join(t.TempDir(), "staged-without-github")
+	if _, err := Create(context.Background(), Request{Project: withoutGitHub, Output: withoutOutput, HCTLExecutable: hctl, HarnessExecutable: harness, HarnessVersion: "1.2.3", IntegrationStore: store}); err != nil {
+		t.Fatal(err)
+	}
+	withoutConfig := readTestFile(t, filepath.Join(withoutOutput, "workspace", ".codex", "config.toml"))
+	if bytes.Contains(withoutConfig, []byte(`[mcp_servers."github"]`)) || bytes.Contains(withoutConfig, []byte("GITHUB_PERSONAL_ACCESS_TOKEN")) {
+		t.Fatalf("GitHub-free counterpart contains native GitHub configuration: %s", withoutConfig)
+	}
+	if _, err := os.Stat(filepath.Join(withoutOutput, "opt", "hctl", "integrations")); !os.IsNotExist(err) {
+		t.Fatalf("GitHub-free counterpart staged integration artifacts: %v", err)
+	}
 }
 
 func testGitHubPackage(t *testing.T) string {
@@ -183,17 +202,25 @@ func testGitHubPackage(t *testing.T) string {
 	digest := sha256.Sum256(payload)
 	checksum := hex.EncodeToString(digest[:])
 	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	otherOS, otherArch := "linux", "amd64"
+	if runtime.GOOS == otherOS && runtime.GOARCH == otherArch {
+		otherOS, otherArch = "darwin", "arm64"
+	}
+	otherArtifactID := otherOS + "-" + otherArch
+	artifact := func(id, targetOS, targetArch string) map[string]any {
+		return map[string]any{
+			"id": id, "os": targetOS, "architecture": targetArch, "format": "binary",
+			"source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
+		}
+	}
 	document := map[string]any{
 		"schema_version": 1, "id": "github-mcp-server", "version": "1.8.0", "name": "Fake GitHub MCP", "description": "Credential-free native MCP fixture.", "license": "MIT",
 		"provenance":    map[string]any{"source": "https://github.com/github/github-mcp-server", "revision": "v1.8.0"},
 		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
-		"artifacts": []any{map[string]any{
-			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary",
-			"source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
-			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
-		}},
+		"artifacts":     []any{artifact(artifactID, runtime.GOOS, runtime.GOARCH), artifact(otherArtifactID, otherOS, otherArch)},
 		"capabilities": []any{map[string]any{
-			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID}, "executable": "github-mcp-server",
+			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID, otherArtifactID}, "executable": "github-mcp-server",
 			"arguments": []string{"stdio"}, "working_directory": ".", "environment": map[string]string{},
 			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
 			"harnesses":            []any{map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"}},

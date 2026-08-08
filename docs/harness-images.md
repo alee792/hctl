@@ -98,6 +98,15 @@ context, staged tree, or registry layer. OpenAI's current
 documents API-key login, headless login, cache locations, and credential-store
 options.
 
+An agent with `connections/github.md` separately needs runtime-only
+`GITHUB_PERSONAL_ACCESS_TOKEN` injection. Pass the variable when the container
+starts; never place it in an image `ARG`, `ENV`, build secret, source tree, or
+staged filesystem. The harness/model may read it and hctl does not govern its
+GitHub effects. Follow the [native GitHub MCP journey](github-native-mcp.md).
+The Linux/amd64 image check builds both GitHub-bearing direct/staged images and
+a GitHub-free counterpart with a conspicuous runtime-only fake marker; it never
+starts the official server or uses a live credential.
+
 ## Release identity and verification
 
 The release workflow publishes the already-checked Codex source image, not a

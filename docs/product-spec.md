@@ -346,11 +346,13 @@ does not configure in this delivery. Invalid, expired, or insufficient
 authorization remains an official-server, GitHub, and native-harness runtime
 failure; hctl does not intercept or reclassify it.
 
-Every local or headless harness process receives the ambient variable from its
-own operator-controlled launch environment. A resumed process, a replacement
-after hibernation, a restart, and each concurrent conversation therefore see
-the environment present when that native process starts; hctl neither snapshots
-the value during apply nor propagates an in-process credential update. A
+Direct local Claude and Codex processes inherit the shell environment present
+when the operator launches them. Hctl-owned headless, concurrent, resumed, and
+hibernation-replacement harness children inherit the unchanged environment of
+their owning hctl service or container. Rotating external injection therefore
+requires restarting that owner; merely opening a replacement child does not
+refresh it. Hctl neither snapshots the value during apply nor propagates an
+in-process credential update. A
 missing PAT, Claude project-server approval, or Codex server/tool approval
 leaves the optional GitHub server unavailable while the already-trusted native
 session and unrelated managed tools remain usable. Codex project trust is
@@ -360,12 +362,27 @@ disabled, untrusted, incompatible, or corrupt installed package likewise fails
 offline setup verification before hctl starts a headless process, rather than
 launching against stale executable configuration.
 
+That current-package guard applies to hctl-owned process opens. A plain
+`claude` or `codex` launch reads the path already embedded by the last apply and
+does not resolve package state through hctl. After an update, the operator must
+reapply every consuming workspace before restarting its harness or owning
+service; direct and staged images must be rebuilt from the updated package.
+Safe removal first removes `connections/github.md`, then reapplies local
+consumers and rebuilds staged outputs to remove generated configuration and
+closure, then removes the package and restarts or redeploys. Removing or
+disabling the package first makes the still-declared connection fail reapply
+while old generated configuration can remain on disk.
+
 The PAT is the only supported hctl authentication input for this first native
 delivery. The official server's OAuth and GitHub App modes remain separate
 follow-up work. Native Git and `gh` authentication are separately operator-owned
 and unmanaged: the MCP PAT does not promise either, and the MCP surface does not
 promise exact branch publication with local Git history. See
 [ADR 0031](adr/0031-use-the-official-github-server-as-native-unmanaged-mcp.md).
+The [native GitHub MCP journey](github-native-mcp.md) is the canonical local,
+service/container, package-lifecycle, troubleshooting, and optional live
+acceptance procedure. Live acceptance is not part of the credential-free
+repository gate and requires separate authorization.
 
 The optional `channels/discord.md` file contains strict `mode: ambient`
 frontmatter and a 1-1024 character UTF-8 Markdown participation policy. Its

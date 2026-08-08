@@ -59,6 +59,11 @@ done <"$work/metadata.tsv"
 hctl_version=${hctl_version_override:-$manifest_hctl_version}
 (cd "$repo_root" && go run -mod=readonly ./scripts/image-inputs validate-version "$hctl_version")
 base_image="$base_reference@$base_digest"
+github_linux_sha256=$(awk -F '\t' '$1 == "linux-amd64" { print $11 }' "$repo_root/integrations/github-mcp-server/sources.tsv")
+[ "${#github_linux_sha256}" -eq 64 ] || {
+  echo "the pinned Linux GitHub executable SHA-256 is invalid" >&2
+  exit 1
+}
 
 "$repo_root/scripts/prepare-codex-image-context.sh" --hctl "$hctl_executable" --version "$hctl_version" --output "$work/context"
 
@@ -148,6 +153,8 @@ docker run --rm --network none --entrypoint /bin/sh "$direct_image" -c '
   test -z "$(find /home/hctl/.codex -mindepth 1 -print -quit)"
   hctl integration verify github-mcp-server >/dev/null
   test ! -e /workspace/.hctl/integrations
+  ! grep -F "GITHUB_PERSONAL_ACCESS_TOKEN" /workspace/.codex/config.toml
+  ! grep -F "[mcp_servers.\"github\"]" /workspace/.codex/config.toml
 '
 
 docker build --platform linux/amd64 \
@@ -171,6 +178,8 @@ docker run --rm --entrypoint /bin/sh "$staged_image" -c '
   test ! -e /home/hctl/.config/hctl/integrations
   grep -F "\"runtimes\": []" /opt/hctl/artifact.json >/dev/null
   test -f /workspace/.codex/config.toml
+  ! grep -F "GITHUB_PERSONAL_ACCESS_TOKEN" /workspace/.codex/config.toml
+  ! grep -F "[mcp_servers.\"github\"]" /workspace/.codex/config.toml
   test -s /etc/ssl/certs/ca-certificates.crt
   test -z "$(find /home/hctl/.codex -mindepth 1 -print -quit)"
   printf "%s\n" \
@@ -179,6 +188,45 @@ docker run --rm --entrypoint /bin/sh "$staged_image" -c '
     | timeout 10 /opt/hctl/bin/hctl mcp serve /opt/hctl/agents/agent --workspace /workspace --harness codex \
     | grep -F "\"name\":\"hctl-managed\"" >/dev/null
 '
+
+github_context="$work/github"
+mkdir -p "$github_context/agent"
+cp -R "$repo_root/images/codex/acceptance/fixtures/github/." "$github_context/agent/"
+github_direct_image="hctl-codex-github-direct:acceptance"
+github_staged_image="hctl-codex-github-staged:acceptance"
+github_image_check="$repo_root/images/codex/acceptance/check-github-image.sh"
+
+docker build --platform linux/amd64 \
+  --build-arg "SOURCE_IMAGE=$source_image" \
+  --tag "$github_direct_image" \
+  --file "$repo_root/images/codex/acceptance/github-direct.Dockerfile" \
+  "$github_context"
+
+docker run --rm --network none --entrypoint /bin/sh \
+  --mount "type=bind,src=$github_image_check,dst=/tmp/check-github-image.sh,readonly" \
+  --env GITHUB_PERSONAL_ACCESS_TOKEN=hctl-ci-fake-github-token-must-not-persist \
+  --env "EXPECTED_GITHUB_SHA256=$github_linux_sha256" \
+  "$github_direct_image" /tmp/check-github-image.sh direct /
+
+docker build --platform linux/amd64 \
+  --build-arg "SOURCE_IMAGE=$source_image" \
+  --build-arg "BASE_IMAGE=$base_image" \
+  --tag "$github_staged_image" \
+  --file "$repo_root/images/codex/acceptance/runtime-staged.Dockerfile" \
+  "$github_context"
+
+docker run --rm --network none --entrypoint /bin/sh \
+  --mount "type=bind,src=$github_image_check,dst=/tmp/check-github-image.sh,readonly" \
+  --env GITHUB_PERSONAL_ACCESS_TOKEN=hctl-ci-fake-github-token-must-not-persist \
+  --env "EXPECTED_GITHUB_SHA256=$github_linux_sha256" \
+  "$github_staged_image" /tmp/check-github-image.sh staged /
+
+for image in "$github_direct_image" "$github_staged_image"; do
+  if docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | grep -F "hctl-ci-fake-github-token-must-not-persist"; then
+    echo "GitHub acceptance image contains the runtime-only fake marker" >&2
+    exit 1
+  fi
+done
 
 for runtime in deno python go; do
   context="$work/runtime-$runtime"
@@ -267,4 +315,4 @@ for runtime in deno python go; do
   '
 done
 
-printf '%s\n' "PASS Codex source, direct, tool-free, Deno-only, Python-only, and Go-only staged images"
+printf '%s\n' "PASS Codex source, GitHub-bearing direct/staged, GitHub-free, Deno-only, Python-only, and Go-only staged images"

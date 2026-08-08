@@ -392,7 +392,27 @@ a successful managed echo through ordinary bounded harness output. They also
 prove that missing Codex project trust fails the harness launch instead of
 being misclassified as optional GitHub unavailability. A deterministic eligible
 tracker fixture verifies the maintainer's claim-first guidance without claiming
-hctl authorization. The complete documented operator journey remains #72.
+hctl authorization. The #72 operator journey is now recorded in
+[`docs/github-native-mcp.md`](../github-native-mcp.md): one explicit curated
+install/trust step, offline apply, runtime-only PAT injection, native
+Claude/Codex trust, discovered-tool use, service/container injection, package
+lifecycle, cache reuse, selective omission, and bounded troubleshooting. Its
+prominent warning states that the harness/model can access the PAT and that
+hctl neither governs nor audits native GitHub effects; native Git and `gh`
+remain separate. The credential-free
+[acceptance record](github-native-mcp-acceptance.md) maps Darwin/arm64,
+Linux/amd64, local/headless, direct/staged, restart, hibernation, concurrency,
+removal, corruption, optional failure, and non-persistence claims to existing
+tests. It distinguishes plain native launches, which retain generated paths
+until reapply, from hctl-owned scheduled/channel/continuation opens, which
+re-resolve package state. Direct harnesses must restart after local credential
+rotation; hctl-owned concurrent and hibernation-replacement children inherit
+their owning service/container environment, so rotation requires restarting
+that owner. Safe removal drops the authored connection and reapplies consumers
+before retiring package state. Live GitHub acceptance was not executed because no temporary PAT,
+allowlisted test repository, read/write scope, or native-approval exercise was
+explicitly authorized; the record supplies the exact opt-in and redaction
+contract instead.
 Every hctl-owned scheduled or channel session open, channel reopen, and native
 continuation process start re-resolves and verifies current offline package
 state before opening the harness, so disablement, removal, updates, or

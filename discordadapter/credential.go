@@ -11,6 +11,10 @@ import (
 // to resolve after extraction from the hctl root module.
 const KeyringService = "hctl.discord"
 
+// ErrCredentialNotFound distinguishes an unenrolled profile from a credential
+// store failure that must not be treated as permission to replace state.
+var ErrCredentialNotFound = errors.New("Discord credential not found")
+
 type CredentialStore interface {
 	Get(string) (string, error)
 	Set(string, string) error
@@ -21,6 +25,9 @@ type OSKeyring struct{}
 
 func (OSKeyring) Get(profile string) (string, error) {
 	value, err := keyring.Get(KeyringService, profile)
+	if errors.Is(err, keyring.ErrNotFound) {
+		return "", ErrCredentialNotFound
+	}
 	if err != nil {
 		return "", errors.New("Discord credential is unavailable; run setup or inject HCTL_DISCORD_TOKEN")
 	}
@@ -50,7 +57,7 @@ func resolveCredential(store CredentialStore, profile string) (string, error) {
 	}
 	token, err := store.Get(profile)
 	if err != nil {
-		return "", err
+		return "", errors.New("Discord credential is unavailable; run setup or inject HCTL_DISCORD_TOKEN")
 	}
 	if err := validateTokenShape(token); err != nil {
 		return "", errors.New("stored Discord credential is malformed; run setup")

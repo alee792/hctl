@@ -37,6 +37,9 @@ func NewDiscord(token string) (Discord, error) {
 		return nil, errors.New("cannot initialize Discord client")
 	}
 	session.Client.Timeout = 10 * time.Second
+	// Serial dispatch lets the bounded protocol writer apply Gateway
+	// backpressure without accumulating one blocked goroutine per event.
+	session.SyncEvents = true
 	session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentsMessageContent
 	return session, nil
 }

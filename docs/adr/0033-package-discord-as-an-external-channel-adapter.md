@@ -44,6 +44,14 @@ The adapter owns:
 - exact/ambiguous effect classification, with no automatic retry after an
   uncertain Discord write.
 
+The runtime narrows raw frame reads after negotiation, serializes Gateway
+admission behind the bounded protocol queue, expires unfetched attachment
+handles and pending adapter interaction state, and shares the four-transfer
+ceiling across both transfer directions. READY and RESUMED both restore the
+protocol connection state and replay stable unacknowledged event bytes.
+Shutdown closes vendor admission, cancels and retires transfers, drains prior
+protocol output, and only then emits shutdown completion.
+
 Hctl will continue to own portable participation policy, controller and
 dispatcher state, model execution, sessions, worktrees, capacity, hibernation,
 and durable generic interaction state. This issue deliberately does not wire
@@ -62,7 +70,9 @@ atomically migrate only that selected non-secret profile.
 Setup reads a token through the inherited trusted terminal (hidden when it is
 a terminal), validates bot identity and authorization scope, and uses a
 compensating rollback for credential replacement when profile publication
-fails. Remove likewise attempts to restore the profile if keyring deletion
+fails. Only the credential store's explicit not-found result means no prior
+credential; any other read failure aborts before replacement. Remove likewise
+attempts to restore the profile if keyring deletion
 fails. Either operation reports an explicit actionable error if its rollback
 also fails instead of claiming that the prior state was restored.
 `HCTL_DISCORD_TOKEN` remains an explicit

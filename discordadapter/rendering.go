@@ -1,6 +1,7 @@
 package discordadapter
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -14,13 +15,20 @@ import (
 
 const componentPrefix = "h1"
 
-func (runtime *Runtime) renderInteraction(hostFrameID string, request channeladapter.InteractionRequest) {
+func (runtime *Runtime) renderInteraction(hostFrameID string, request channeladapter.InteractionRequest) error {
 	handle := opaqueHandle("interaction", request.InteractionID)
-	pending := pendingInteraction{hostFrameID: hostFrameID, request: request, handle: handle}
+	expiryContext, cancelExpiry := context.WithCancel(context.Background())
+	pending := pendingInteraction{hostFrameID: hostFrameID, request: request, handle: handle, expiryCancel: cancelExpiry}
 	runtime.mu.Lock()
+	if _, exists := runtime.interactions[request.InteractionID]; exists || len(runtime.interactions) >= runtime.limits.MaxOutstanding {
+		runtime.mu.Unlock()
+		cancelExpiry()
+		return errors.New("Discord adapter interaction capacity is exhausted")
+	}
 	runtime.interactions[request.InteractionID] = pending
 	runtime.handles[handle] = request.InteractionID
 	runtime.mu.Unlock()
+	go runtime.expireInteraction(expiryContext, request.InteractionID, handle, time.Duration(request.Request.Policy.ExpiresAfterSeconds)*time.Second)
 	var message *discordgo.MessageSend
 	var err error
 	if runtime.supports(channeladapter.FeatureInteractiveComponents) {
@@ -33,11 +41,26 @@ func (runtime *Runtime) renderInteraction(hostFrameID string, request channelada
 	}
 	if err != nil {
 		_ = runtime.writer.send(channeladapter.Diagnostic{Class: channeladapter.DiagnosticConfiguration, Severity: channeladapter.SeverityWarning, Code: "interaction_fallback_failed", Message: "Discord could not render the interactive request."}, hostFrameID)
-		return
+		return nil
 	}
 	if _, err := runtime.client.ChannelMessageSendComplex(request.Route.Handle, message); err != nil {
 		_ = runtime.writer.send(channeladapter.Diagnostic{Class: channeladapter.DiagnosticConnection, Severity: channeladapter.SeverityWarning, Code: "interaction_delivery_uncertain", Message: "Discord interaction delivery may have failed."}, hostFrameID)
 	}
+	return nil
+}
+
+func (runtime *Runtime) expireInteraction(ctx context.Context, interactionID, handle string, duration time.Duration) {
+	select {
+	case <-runtime.after(duration):
+	case <-ctx.Done():
+		return
+	}
+	runtime.mu.Lock()
+	if pending, ok := runtime.interactions[interactionID]; ok && pending.handle == handle {
+		delete(runtime.interactions, interactionID)
+		delete(runtime.handles, handle)
+	}
+	runtime.mu.Unlock()
 }
 
 func interactionMessage(pending pendingInteraction) (*discordgo.MessageSend, error) {
@@ -131,6 +154,10 @@ func parseCustomID(value string) (string, string, bool) {
 }
 
 func (runtime *Runtime) handleInteraction(incoming *discordgo.InteractionCreate) {
+	if !runtime.beginVendorAdmission() {
+		return
+	}
+	defer runtime.endVendorAdmission()
 	if incoming == nil || incoming.Interaction == nil || !runtime.authorizedInteraction(incoming) {
 		return
 	}
@@ -312,6 +339,14 @@ func (runtime *Runtime) finishInteraction(pending pendingInteraction, answer cha
 	delete(runtime.interactions, pending.request.InteractionID)
 	delete(runtime.handles, pending.handle)
 	runtime.mu.Unlock()
+	if pending.expiryCancel != nil {
+		pending.expiryCancel()
+	}
+	var callbackContext context.Context
+	var cancelCallback context.CancelFunc
+	if callback != (pendingCallback{}) {
+		callbackContext, cancelCallback = context.WithCancel(context.Background())
+	}
 	eventID, err := runtime.writer.sendEventRegistered("interaction:"+pending.request.InteractionID, channeladapter.InteractionResult{InteractionID: pending.request.InteractionID, Answer: answer}, pending.hostFrameID, func(id string, add bool) {
 		if callback == (pendingCallback{}) {
 			return
@@ -319,16 +354,22 @@ func (runtime *Runtime) finishInteraction(pending pendingInteraction, answer cha
 		runtime.mu.Lock()
 		if add {
 			runtime.callbacks[id] = callback
+			runtime.callbackExpiry[id] = cancelCallback
 		} else {
 			delete(runtime.callbacks, id)
+			delete(runtime.callbackExpiry, id)
+			cancelCallback()
 		}
 		runtime.mu.Unlock()
 	})
 	if err != nil {
+		if cancelCallback != nil {
+			cancelCallback()
+		}
 		return err
 	}
 	if callback != (pendingCallback{}) {
-		go runtime.expireCallback(eventID)
+		go runtime.expireCallback(callbackContext, eventID)
 	}
 	return nil
 }
@@ -345,7 +386,7 @@ func (runtime *Runtime) cancelInteraction(hostFrameID string, cancel channeladap
 }
 
 func (runtime *Runtime) handleFallback(incoming *discordgo.MessageCreate) bool {
-	if incoming == nil || incoming.ReferencedMessage == nil {
+	if incoming == nil || incoming.ReferencedMessage == nil || incoming.ReferencedMessage.Author == nil || incoming.ReferencedMessage.Author.ID != runtime.profile.BotUserID {
 		return false
 	}
 	content := incoming.ReferencedMessage.Content
@@ -375,13 +416,18 @@ func (runtime *Runtime) handleFallback(incoming *discordgo.MessageCreate) bool {
 	return true
 }
 
-func (runtime *Runtime) expireCallback(eventID string) {
-	<-runtime.after(channeladapter.CommandTimeout)
+func (runtime *Runtime) expireCallback(ctx context.Context, eventID string) {
+	select {
+	case <-runtime.after(channeladapter.CommandTimeout):
+	case <-ctx.Done():
+		return
+	}
 	runtime.mu.Lock()
 	_, pending := runtime.callbacks[eventID]
 	if pending {
 		delete(runtime.callbacks, eventID)
 	}
+	delete(runtime.callbackExpiry, eventID)
 	runtime.mu.Unlock()
 	if pending {
 		select {
@@ -394,8 +440,13 @@ func (runtime *Runtime) expireCallback(eventID string) {
 func (runtime *Runtime) acknowledgeInteraction(eventID, disposition string) {
 	runtime.mu.Lock()
 	callback, ok := runtime.callbacks[eventID]
+	cancel := runtime.callbackExpiry[eventID]
 	delete(runtime.callbacks, eventID)
+	delete(runtime.callbackExpiry, eventID)
 	runtime.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if !ok {
 		return
 	}

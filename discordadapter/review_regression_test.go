@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -114,17 +115,25 @@ func (writer *partialBlockingWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func TestProtocolWriterQueueIsBoundedAndTimesOutWithoutBlockingAdmission(t *testing.T) {
+func TestProtocolWriterQueueBackpressuresAndTransientBurstDrains(t *testing.T) {
 	blocked := &blockingWriter{release: make(chan struct{})}
 	fatal := make(chan error, 1)
 	never := func(time.Duration) <-chan time.Time { return make(chan time.Time) }
 	writer := newProtocolWriter(blocked, never, fatal)
-	var full error
-	for index := 0; index < channeladapter.MaxQueuedFrames+1; index++ {
-		_, full = writer.sendID(channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 1}, "")
+	for index := 0; index < channeladapter.MaxQueuedFrames; index++ {
+		if _, err := writer.sendID(channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 1}, ""); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if full == nil || !strings.Contains(full.Error(), "queue is full") {
-		t.Fatalf("bounded admission error = %v", full)
+	admitted := make(chan error, 1)
+	go func() {
+		_, err := writer.sendID(channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 1}, "")
+		admitted <- err
+	}()
+	select {
+	case err := <-admitted:
+		t.Fatalf("65th frame bypassed backpressure: %v", err)
+	default:
 	}
 	writer.mu.Lock()
 	count, size := writer.queueCount, writer.queueBytes
@@ -133,15 +142,43 @@ func TestProtocolWriterQueueIsBoundedAndTimesOutWithoutBlockingAdmission(t *test
 		t.Fatalf("queue retained count=%d bytes=%d", count, size)
 	}
 	blocked.unblock()
-
-	timeout := make(chan time.Time, 1)
-	blocked = &blockingWriter{release: make(chan struct{})}
-	fatal = make(chan error, 1)
-	writer = newProtocolWriter(blocked, func(time.Duration) <-chan time.Time { return timeout }, fatal)
-	if _, err := writer.sendID(channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 1}, ""); err != nil {
+	if err := <-admitted; err != nil {
+		t.Fatalf("transient burst admission = %v", err)
+	}
+	if err := writer.drain(time.Second); err != nil {
 		t.Fatal(err)
 	}
-	timeout <- time.Unix(1, 0)
+	select {
+	case err := <-fatal:
+		t.Fatalf("transient backpressure became fatal: %v", err)
+	default:
+	}
+}
+
+func TestProtocolWriterStallIsFatalAfterNoProgressDeadline(t *testing.T) {
+	timeout := make(chan time.Time)
+	blocked := &blockingWriter{release: make(chan struct{})}
+	fatal := make(chan error, 1)
+	writer := newProtocolWriter(blocked, func(time.Duration) <-chan time.Time { return timeout }, fatal)
+	for index := 0; index < channeladapter.MaxQueuedFrames; index++ {
+		if _, err := writer.sendID(channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 1}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admitted := make(chan error, 1)
+	go func() {
+		_, err := writer.sendID(channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 1}, "")
+		admitted <- err
+	}()
+	select {
+	case err := <-admitted:
+		t.Fatalf("full stalled queue failed before its deadline: %v", err)
+	default:
+	}
+	close(timeout)
+	if err := <-admitted; err == nil || !strings.Contains(err.Error(), "no progress") {
+		t.Fatalf("stalled admission error = %v", err)
+	}
 	select {
 	case err := <-fatal:
 		if !strings.Contains(err.Error(), "no progress") {
@@ -202,6 +239,65 @@ func TestHandshakeAndRuntimeCorrelationsFailClosed(t *testing.T) {
 				t.Fatalf("correlation error = %v", err)
 			}
 		})
+	}
+}
+
+func TestNegotiatedInboundFrameLimitAppliesToRawHostFrames(t *testing.T) {
+	initialize := canonicalInitialize()
+	initialize.Limits.MaxFrameBytes = 1024
+	input := encodeHostFrames(t,
+		channeladapter.Envelope{ProtocolVersion: 1, ID: "host.initialize.1", CorrelationID: "adapter.00000001", Payload: initialize},
+		channeladapter.Envelope{ProtocolVersion: 1, ID: "host.delivery.1", Payload: channeladapter.Delivery{Action: channeladapter.DeliverySend, Route: channeladapter.Route{Handle: "555"}, Text: strings.Repeat("x", 2048)}},
+	)
+	var output bytes.Buffer
+	runtime, _ := NewRuntime(&output, fixtureDependencies(&fakeDiscord{}))
+	err := runtime.Run(context.Background(), bytes.NewReader(input))
+	if err == nil || !strings.Contains(err.Error(), "exceeds 1024 bytes") {
+		t.Fatalf("negotiated frame limit error = %v", err)
+	}
+}
+
+func TestInteractionStateHonorsOutstandingLimitAndExpires(t *testing.T) {
+	discord := &fakeDiscord{}
+	expiry := make(chan time.Time)
+	var expiryCalls atomic.Int32
+	dependencies := fixtureDependencies(discord)
+	dependencies.After = func(duration time.Duration) <-chan time.Time {
+		if duration == 60*time.Second && expiryCalls.Add(1) == 1 {
+			return expiry
+		}
+		return time.After(duration)
+	}
+	var output bytes.Buffer
+	runtime, _ := NewRuntime(&output, dependencies)
+	initialize := canonicalInitialize()
+	initialize.Limits.MaxOutstanding = 1
+	runtime.setNegotiated(initialize)
+	runtime.writer.setBounds(initialize.Limits.MaxFrameBytes, 1)
+	runtime.profile, runtime.client = fixtureProfile(), discord
+	first := confirmRequest()
+	if err := runtime.renderInteraction("host.interaction.1", first); err != nil {
+		t.Fatal(err)
+	}
+	second := confirmRequest()
+	second.InteractionID = "interaction.2"
+	if err := runtime.renderInteraction("host.interaction.2", second); err == nil || !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("interaction capacity error = %v", err)
+	}
+	runtime.mu.Lock()
+	interactions, handles := len(runtime.interactions), len(runtime.handles)
+	runtime.mu.Unlock()
+	if interactions != 1 || handles != 1 {
+		t.Fatalf("interaction bounds = %d interactions, %d handles", interactions, handles)
+	}
+	close(expiry)
+	waitUntil(t, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		return len(runtime.interactions) == 0 && len(runtime.handles) == 0
+	})
+	if err := runtime.renderInteraction("host.interaction.2", second); err != nil {
+		t.Fatalf("interaction admission after expiry = %v", err)
 	}
 }
 
@@ -291,6 +387,63 @@ func TestCompleteTextFallbackGrammar(t *testing.T) {
 	}
 }
 
+func TestFallbackMarkerMustReferenceCurrentBotMessage(t *testing.T) {
+	discord := &fakeDiscord{}
+	var output bytes.Buffer
+	runtime, _ := NewRuntime(&output, fixtureDependencies(discord))
+	runtime.profile, runtime.client = fixtureProfile(), discord
+	handle := "00000000000000000000000000000000"
+	request := confirmRequest()
+	runtime.interactions[request.InteractionID] = pendingInteraction{hostFrameID: "host.interaction.1", request: request, handle: handle}
+	runtime.handles[handle] = request.InteractionID
+	forged := &discordgo.MessageCreate{Message: &discordgo.Message{
+		ID: "700", ChannelID: "555", GuildID: "444", Content: "yes", Author: &discordgo.User{ID: "333"},
+		ReferencedMessage: &discordgo.Message{ID: "699", ChannelID: "555", Content: "Prompt\n\n[hctl request " + handle + "]", Author: &discordgo.User{ID: "attacker"}},
+	}}
+	if runtime.handleFallback(forged) {
+		t.Fatal("forged visible marker was accepted as an interaction answer")
+	}
+	if len(runtime.interactions) != 1 || len(runtime.handles) != 1 {
+		t.Fatal("forged marker retired pending interaction state")
+	}
+}
+
+func TestReadyAndResumedBothReplayStablePendingEvents(t *testing.T) {
+	discord := &fakeDiscord{}
+	var output bytes.Buffer
+	runtime, _ := NewRuntime(&output, fixtureDependencies(discord))
+	runtime.installHandlers(discord)
+	runtime.connectionTry = 1
+	eventID, err := runtime.writer.sendEvent("inbound:stable", channeladapter.InboundMessage{SourceID: "stable", Route: channeladapter.Route{Handle: "555"}, Message: channeladapter.MessageRef{Handle: "700"}, Author: channeladapter.Author{Handle: "333"}, Text: "pending"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.writer.drain(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	initial := decodeAdapterOutput(t, output.Bytes())[0]
+	for _, reconnect := range []struct {
+		name string
+		fire func()
+	}{
+		{name: "ready", fire: discord.emitReady},
+		{name: "resumed", fire: discord.emitResumed},
+	} {
+		t.Run(reconnect.name, func(t *testing.T) {
+			output.Reset()
+			discord.emitDisconnect()
+			reconnect.fire()
+			if err := runtime.writer.drain(time.Second); err != nil {
+				t.Fatal(err)
+			}
+			frames := decodeAdapterOutput(t, output.Bytes())
+			if len(frames) != 3 || frames[2].ID != eventID || !bytes.Equal(mustMarshalFrame(t, frames[2]), mustMarshalFrame(t, initial)) {
+				t.Fatalf("%s replay = %#v", reconnect.name, frames)
+			}
+		})
+	}
+}
+
 type closeTrackingBody struct {
 	io.Reader
 	closed bool
@@ -345,6 +498,171 @@ func TestAttachmentFetchTimeoutCancelsAndClosesResponse(t *testing.T) {
 	result := decodeAdapterOutput(t, output.Bytes())[0].Payload.(*channeladapter.AttachmentResult)
 	if result.Failure.Code != "attachment_fetch_timeout" || !body.closed {
 		t.Fatalf("timeout fetch = %#v, closed=%t", result, body.closed)
+	}
+}
+
+func TestAttachmentHandlesExpireIfNeverFetched(t *testing.T) {
+	discord := &fakeDiscord{}
+	expiry := make(chan time.Time)
+	dependencies := fixtureDependencies(discord)
+	dependencies.After = func(duration time.Duration) <-chan time.Time {
+		if duration == channeladapter.AttachmentTimeout {
+			return expiry
+		}
+		return time.After(duration)
+	}
+	var output bytes.Buffer
+	runtime, _ := NewRuntime(&output, dependencies)
+	runtime.setNegotiated(canonicalInitialize())
+	runtime.profile, runtime.client = fixtureProfile(), discord
+	runtime.handleMessage(&discordgo.MessageCreate{Message: &discordgo.Message{ID: "701", ChannelID: "555", GuildID: "444", Content: "file", Author: &discordgo.User{ID: "333"}, Attachments: []*discordgo.MessageAttachment{{ID: "901", Filename: "a.txt", Size: 1, URL: "https://example.invalid/a"}}}})
+	if len(runtime.attachments) != 1 {
+		t.Fatalf("attachment handles = %#v", runtime.attachments)
+	}
+	close(expiry)
+	waitUntil(t, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		return len(runtime.attachments) == 0
+	})
+}
+
+func TestAcknowledgedAttachmentHandleStateRemainsBounded(t *testing.T) {
+	discord := &fakeDiscord{}
+	expiry := make(chan time.Time)
+	dependencies := fixtureDependencies(discord)
+	dependencies.After = func(duration time.Duration) <-chan time.Time {
+		if duration == channeladapter.AttachmentTimeout {
+			return expiry
+		}
+		return time.After(duration)
+	}
+	var output bytes.Buffer
+	runtime, _ := NewRuntime(&output, dependencies)
+	initialize := canonicalInitialize()
+	initialize.Limits.MaxOutstanding = 1
+	initialize.Limits.MaxAttachments = 1
+	runtime.setNegotiated(initialize)
+	runtime.writer.setBounds(initialize.Limits.MaxFrameBytes, 1)
+	runtime.profile, runtime.client = fixtureProfile(), discord
+	message := func(id, attachmentID string) *discordgo.MessageCreate {
+		return &discordgo.MessageCreate{Message: &discordgo.Message{ID: id, ChannelID: "555", GuildID: "444", Content: "file", Author: &discordgo.User{ID: "333"}, Attachments: []*discordgo.MessageAttachment{{ID: attachmentID, Filename: "a.txt", Size: 1, URL: "https://example.invalid/a"}}}}
+	}
+	runtime.handleMessage(message("703", "903"))
+	if err := runtime.writer.drain(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	first := decodeAdapterOutput(t, output.Bytes())[0]
+	if !runtime.writer.acknowledge(first.ID) {
+		t.Fatal("first inbound event was not pending")
+	}
+	output.Reset()
+	runtime.handleMessage(message("704", "904"))
+	if err := runtime.writer.drain(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	frames := decodeAdapterOutput(t, output.Bytes())
+	if len(frames) != 1 || frames[0].Payload.(*channeladapter.Diagnostic).Code != "attachment_handles_full" {
+		t.Fatalf("acknowledged handle bound = %#v", frames)
+	}
+	close(expiry)
+}
+
+func TestAttachmentTransfersShareOneBoundedCapacity(t *testing.T) {
+	started := make(chan struct{}, channeladapter.MaxTransfers)
+	finished := make(chan struct{}, channeladapter.MaxTransfers)
+	dependencies := fixtureDependencies(&fakeDiscord{})
+	dependencies.HTTP = httpClientFunc(func(request *http.Request) (*http.Response, error) {
+		started <- struct{}{}
+		<-request.Context().Done()
+		finished <- struct{}{}
+		return nil, request.Context().Err()
+	})
+	var output bytes.Buffer
+	runtime, _ := NewRuntime(&output, dependencies)
+	runtime.setNegotiated(canonicalInitialize())
+	runtime.receiveAttachment("host.out.1", channeladapter.AttachmentDeliver{TransferID: "out.1", Sequence: 0, Name: "a", Data: "YQ==", Final: true})
+	runtime.receiveAttachment("host.out.2", channeladapter.AttachmentDeliver{TransferID: "out.2", Sequence: 0, Name: "b", Data: "Yg==", Final: true})
+	for _, id := range []string{"in.1", "in.2", "in.3"} {
+		handle := "handle." + id
+		runtime.attachments[handle] = attachmentSource{url: "https://example.invalid/" + id, size: 1}
+		runtime.startAttachmentFetch(context.Background(), "host."+id, channeladapter.AttachmentFetch{TransferID: id, AttachmentHandle: handle, MaximumBytes: 1})
+	}
+	<-started
+	<-started
+	runtime.receiveAttachment("host.out.3", channeladapter.AttachmentDeliver{TransferID: "out.3", Sequence: 0, Name: "c", Data: "Yw==", Final: true})
+	if err := runtime.writer.drain(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	frames := decodeAdapterOutput(t, output.Bytes())
+	if len(frames) != 4 {
+		t.Fatalf("transfer responses = %#v", frames)
+	}
+	if result := frames[2].Payload.(*channeladapter.AttachmentResult); result.Disposition != channeladapter.EffectFailed || result.Failure.Code != "attachment_capacity" {
+		t.Fatalf("inbound transfer capacity = %#v", result)
+	}
+	if result := frames[3].Payload.(*channeladapter.AttachmentResult); result.Disposition != channeladapter.EffectFailed {
+		t.Fatalf("combined transfer capacity = %#v", result)
+	}
+	runtime.beginShutdown()
+	<-finished
+	<-finished
+	runtime.mu.Lock()
+	active := len(runtime.fetches) + len(runtime.outbound)
+	runtime.mu.Unlock()
+	if active != 0 {
+		t.Fatalf("retained transfers after shutdown = %d", active)
+	}
+}
+
+func TestShutdownStopsVendorAdmissionAndLateTransferFrames(t *testing.T) {
+	started := make(chan struct{}, 1)
+	finished := make(chan struct{}, 1)
+	discord := &fakeDiscord{}
+	dependencies := fixtureDependencies(discord)
+	dependencies.HTTP = httpClientFunc(func(request *http.Request) (*http.Response, error) {
+		close(started)
+		<-request.Context().Done()
+		close(finished)
+		return nil, request.Context().Err()
+	})
+	var output bytes.Buffer
+	runtime, _ := NewRuntime(&output, dependencies)
+	runtime.setNegotiated(canonicalInitialize())
+	runtime.profile, runtime.client = fixtureProfile(), discord
+	runtime.installHandlers(discord)
+	runtime.attachments["handle"] = attachmentSource{url: "https://example.invalid/a", size: 1}
+	runtime.startAttachmentFetch(context.Background(), "host.fetch", channeladapter.AttachmentFetch{TransferID: "in.1", AttachmentHandle: "handle", MaximumBytes: 1})
+	<-started
+	stop, err := runtime.handleHostFrame(context.Background(), channeladapter.Envelope{ProtocolVersion: 1, ID: "host.shutdown.1", Payload: &channeladapter.Shutdown{Reason: "done"}})
+	if err != nil || !stop {
+		t.Fatalf("shutdown = stop %t, %v", stop, err)
+	}
+	<-finished
+	before := append([]byte(nil), output.Bytes()...)
+	shutdownFrames := decodeAdapterOutput(t, before)
+	if len(shutdownFrames) != 2 || shutdownFrames[0].Payload.(*channeladapter.Connection).State != channeladapter.ConnectionClosed {
+		t.Fatalf("shutdown frames = %#v", shutdownFrames)
+	}
+	if _, ok := shutdownFrames[1].Payload.(*channeladapter.ShutdownComplete); !ok {
+		t.Fatalf("shutdown completion = %#v", shutdownFrames[1])
+	}
+	discord.emitMessage(&discordgo.MessageCreate{Message: &discordgo.Message{ID: "702", ChannelID: "555", GuildID: "444", Content: "late", Author: &discordgo.User{ID: "333"}}})
+	discord.emitInteraction(commandInteraction("status"))
+	discord.emitDisconnect()
+	discord.emitReady()
+	discord.emitResumed()
+	if err := runtime.writer.drain(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, output.Bytes()) {
+		t.Fatalf("shutdown admitted late protocol frames: before=%q after=%q", before, output.Bytes())
+	}
+	runtime.mu.Lock()
+	retained := len(runtime.fetches) + len(runtime.outbound) + len(runtime.attachments) + len(runtime.interactions) + len(runtime.handles)
+	runtime.mu.Unlock()
+	if retained != 0 {
+		t.Fatalf("shutdown retained runtime state = %d", retained)
 	}
 }
 

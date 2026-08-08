@@ -114,6 +114,9 @@ func setup(ctx context.Context, profileID string, input io.Reader, terminal io.W
 		return channeladapter.OperationResult{}, err
 	}
 	oldToken, oldTokenErr := dependencies.Credentials.Get(profileID)
+	if oldTokenErr != nil && !errors.Is(oldTokenErr, ErrCredentialNotFound) {
+		return channeladapter.OperationResult{}, errors.New("cannot read the existing Discord credential; no setup state was changed")
+	}
 	if err := dependencies.Credentials.Set(profileID, token); err != nil {
 		return channeladapter.OperationResult{}, err
 	}

@@ -52,6 +52,7 @@ func (store *memoryProfiles) Delete(id string) error {
 type memoryCredentials struct {
 	mu        sync.Mutex
 	values    map[string]string
+	getErr    error
 	setErr    error
 	deleteErr error
 	setCalls  int
@@ -61,9 +62,12 @@ type memoryCredentials struct {
 func (store *memoryCredentials) Get(id string) (string, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.getErr != nil {
+		return "", store.getErr
+	}
 	value, ok := store.values[id]
 	if !ok {
-		return "", errors.New("missing")
+		return "", ErrCredentialNotFound
 	}
 	return value, nil
 }
@@ -124,7 +128,11 @@ func (*fakeDiscord) Channel(string, ...discordgo.RequestOption) (*discordgo.Chan
 func (*fakeDiscord) GuildMember(string, string, ...discordgo.RequestOption) (*discordgo.Member, error) {
 	return &discordgo.Member{User: &discordgo.User{ID: "333"}}, nil
 }
-func (discord *fakeDiscord) Open() error  { discord.opened = true; return nil }
+func (discord *fakeDiscord) Open() error {
+	discord.opened = true
+	discord.emitReady()
+	return nil
+}
 func (discord *fakeDiscord) Close() error { discord.closed = true; return nil }
 func (discord *fakeDiscord) AddHandler(handler any) func() {
 	discord.handlers = append(discord.handlers, handler)
@@ -172,28 +180,35 @@ func (discord *fakeDiscord) InteractionRespond(_ *discordgo.Interaction, respons
 func (discord *fakeDiscord) emitMessage(message *discordgo.MessageCreate) {
 	for _, handler := range discord.handlers {
 		if typed, ok := handler.(func(*discordgo.Session, *discordgo.MessageCreate)); ok {
-			go typed(nil, message)
+			typed(nil, message)
 		}
 	}
 }
 func (discord *fakeDiscord) emitInteraction(interaction *discordgo.InteractionCreate) {
 	for _, handler := range discord.handlers {
 		if typed, ok := handler.(func(*discordgo.Session, *discordgo.InteractionCreate)); ok {
-			go typed(nil, interaction)
+			typed(nil, interaction)
 		}
 	}
 }
 func (discord *fakeDiscord) emitDisconnect() {
 	for _, handler := range discord.handlers {
 		if typed, ok := handler.(func(*discordgo.Session, *discordgo.Disconnect)); ok {
-			go typed(nil, &discordgo.Disconnect{})
+			typed(nil, &discordgo.Disconnect{})
 		}
 	}
 }
 func (discord *fakeDiscord) emitResumed() {
 	for _, handler := range discord.handlers {
 		if typed, ok := handler.(func(*discordgo.Session, *discordgo.Resumed)); ok {
-			go typed(nil, &discordgo.Resumed{})
+			typed(nil, &discordgo.Resumed{})
+		}
+	}
+}
+func (discord *fakeDiscord) emitReady() {
+	for _, handler := range discord.handlers {
+		if typed, ok := handler.(func(*discordgo.Session, *discordgo.Ready)); ok {
+			typed(nil, &discordgo.Ready{})
 		}
 	}
 }
@@ -212,6 +227,17 @@ func fixtureDependencies(discord *fakeDiscord) Dependencies {
 	profiles := &memoryProfiles{profiles: map[string]Profile{"default": fixtureProfile()}}
 	credentials := &memoryCredentials{values: map[string]string{"default": "fake-token"}}
 	return Dependencies{Profiles: profiles, Credentials: credentials, Discord: func(string) (Discord, error) { return discord, nil }, Locks: func(string) (ApplicationLock, error) { return &fakeLock{}, nil }, After: time.After}
+}
+
+func TestDiscordGatewayDispatchUsesBoundedSynchronousAdmission(t *testing.T) {
+	client, err := NewDiscord("fake-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, ok := client.(*discordgo.Session)
+	if !ok || !session.SyncEvents {
+		t.Fatal("Discord Gateway events can bypass adapter backpressure")
+	}
 }
 
 func TestSetupStatusRemoveAndCredentialRedaction(t *testing.T) {
@@ -304,6 +330,21 @@ func TestSetupReportsCredentialRollbackFailure(t *testing.T) {
 	}
 }
 
+func TestSetupAbortsOnCredentialReadFailure(t *testing.T) {
+	t.Setenv("HCTL_DISCORD_TOKEN", "")
+	original := fixtureProfile()
+	profiles := &memoryProfiles{profiles: map[string]Profile{"default": original}}
+	credentials := &memoryCredentials{values: map[string]string{"default": "old-token"}, getErr: errors.New("transient keyring failure")}
+	dependencies := Dependencies{Profiles: profiles, Credentials: credentials, Discord: func(string) (Discord, error) { return &fakeDiscord{}, nil }, Locks: func(string) (ApplicationLock, error) { return &fakeLock{}, nil }}
+	err := RunCommand(context.Background(), []string{"setup", "--profile", "default"}, strings.NewReader("new-token\n333\n444\n555\n"), io.Discard, io.Discard, dependencies)
+	if err == nil || !strings.Contains(err.Error(), "no setup state was changed") {
+		t.Fatalf("credential read error = %v", err)
+	}
+	if credentials.setCalls != 0 || credentials.values["default"] != "old-token" || profiles.profiles["default"] != original {
+		t.Fatalf("transient read failure mutated state: sets=%d credential=%q profile=%#v", credentials.setCalls, credentials.values["default"], profiles.profiles["default"])
+	}
+}
+
 func TestRemoveReportsProfileRollbackFailure(t *testing.T) {
 	profiles := &memoryProfiles{profiles: map[string]Profile{"default": fixtureProfile()}, putErr: errors.New("restore failed")}
 	credentials := &memoryCredentials{values: map[string]string{"default": "fake-token"}, deleteErr: errors.New("keyring unavailable")}
@@ -384,7 +425,7 @@ func TestRuntimeProtocolCoversGatewayDeliveryInteractionReconnectAndShutdown(t *
 	}
 	discord.emitDisconnect()
 	assertConnection(t, readAdapterFrame(t, decoder), channeladapter.ConnectionReconnecting)
-	discord.emitResumed()
+	discord.emitReady()
 	assertConnection(t, readAdapterFrame(t, decoder), channeladapter.ConnectionReady)
 	replayed := readAdapterFrame(t, decoder)
 	if replayed.ID != inbound.ID || !bytes.Equal(mustMarshalFrame(t, replayed), mustMarshalFrame(t, inbound)) {

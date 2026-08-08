@@ -40,19 +40,20 @@ var discordLimits = channeladapter.Limits{
 }
 
 type protocolWriter struct {
-	mu             sync.Mutex
-	output         io.Writer
-	after          func(time.Duration) <-chan time.Time
-	fatal          chan<- error
-	queue          chan queuedProtocolFrame
-	progress       chan struct{}
-	queueCount     int
-	queueBytes     int
-	maxFrameBytes  int
-	maxOutstanding int
-	next           atomic.Uint64
-	pending        map[string]channeladapter.Envelope
-	eventKeys      map[string]string
+	mu              sync.Mutex
+	output          io.Writer
+	after           func(time.Duration) <-chan time.Time
+	fatal           chan<- error
+	queue           chan queuedProtocolFrame
+	capacityChanged chan struct{}
+	queueCount      int
+	queueBytes      int
+	maxFrameBytes   int
+	maxOutstanding  int
+	failed          error
+	next            atomic.Uint64
+	pending         map[string]channeladapter.Envelope
+	eventKeys       map[string]string
 }
 
 type queuedProtocolFrame struct {
@@ -62,7 +63,7 @@ type queuedProtocolFrame struct {
 func newProtocolWriter(output io.Writer, after func(time.Duration) <-chan time.Time, fatal chan<- error) *protocolWriter {
 	writer := &protocolWriter{
 		output: output, after: after, fatal: fatal,
-		queue: make(chan queuedProtocolFrame, channeladapter.MaxQueuedFrames), progress: make(chan struct{}, 1),
+		queue: make(chan queuedProtocolFrame, channeladapter.MaxQueuedFrames), capacityChanged: make(chan struct{}),
 		maxFrameBytes: channeladapter.MaxFrameBytes, maxOutstanding: channeladapter.MaxOutstanding,
 		pending: map[string]channeladapter.Envelope{}, eventKeys: map[string]string{},
 	}
@@ -91,13 +92,16 @@ func (writer *protocolWriter) run() {
 		writer.mu.Lock()
 		writer.queueCount--
 		writer.queueBytes -= len(item.data)
-		writer.mu.Unlock()
-		select {
-		case writer.progress <- struct{}{}:
-		default:
-		}
 		if err != nil {
-			writer.fail(err)
+			writer.failed = err
+		}
+		terminal := writer.failed
+		writer.notifyCapacityLocked()
+		writer.mu.Unlock()
+		if terminal != nil {
+			if err != nil {
+				writer.fail(err)
+			}
 			return
 		}
 	}
@@ -128,17 +132,30 @@ func (writer *protocolWriter) fail(err error) {
 	}
 }
 
+func (writer *protocolWriter) notifyCapacityLocked() {
+	close(writer.capacityChanged)
+	writer.capacityChanged = make(chan struct{})
+}
+
 func (writer *protocolWriter) send(payload channeladapter.Payload, correlation string) error {
-	_, err := writer.sendID(payload, correlation)
+	return writer.sendContext(context.Background(), payload, correlation)
+}
+
+func (writer *protocolWriter) sendContext(ctx context.Context, payload channeladapter.Payload, correlation string) error {
+	_, err := writer.sendIDContext(ctx, payload, correlation)
 	return err
 }
 
 func (writer *protocolWriter) sendID(payload channeladapter.Payload, correlation string) (string, error) {
+	return writer.sendIDContext(context.Background(), payload, correlation)
+}
+
+func (writer *protocolWriter) sendIDContext(ctx context.Context, payload channeladapter.Payload, correlation string) (string, error) {
 	id := fmt.Sprintf("adapter.%08x", writer.next.Add(1))
 	envelope := channeladapter.Envelope{ProtocolVersion: channeladapter.ProtocolVersion, ID: id, CorrelationID: correlation, Payload: payload}
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
-	err := writer.enqueueLocked(envelope)
+	err := writer.enqueueLockedContext(ctx, envelope)
 	return id, err
 }
 
@@ -162,6 +179,8 @@ func (writer *protocolWriter) sendEventRegistered(key string, payload channelada
 	}
 	if len(writer.pending) >= writer.maxOutstanding {
 		err := errors.New("Discord adapter has too many unacknowledged events")
+		writer.failed = err
+		writer.notifyCapacityLocked()
 		writer.fail(err)
 		return "", err
 	}
@@ -181,6 +200,13 @@ func (writer *protocolWriter) sendEventRegistered(key string, payload channelada
 }
 
 func (writer *protocolWriter) enqueueLocked(envelope channeladapter.Envelope) error {
+	return writer.enqueueLockedContext(context.Background(), envelope)
+}
+
+func (writer *protocolWriter) enqueueLockedContext(ctx context.Context, envelope channeladapter.Envelope) error {
+	if writer.failed != nil {
+		return writer.failed
+	}
 	data, err := channeladapter.MarshalFrame(envelope, channeladapter.FromAdapter)
 	if err != nil {
 		return err
@@ -188,13 +214,32 @@ func (writer *protocolWriter) enqueueLocked(envelope channeladapter.Envelope) er
 	data = append(data, '\n')
 	if len(data)-1 > writer.maxFrameBytes {
 		err := errors.New("Discord adapter frame exceeds the negotiated frame limit")
+		writer.failed = err
+		writer.notifyCapacityLocked()
 		writer.fail(err)
 		return err
 	}
-	if writer.queueCount >= channeladapter.MaxQueuedFrames || writer.queueBytes+len(data) > channeladapter.MaxQueuedBytes {
-		err := errors.New("Discord adapter protocol output queue is full")
-		writer.fail(err)
-		return err
+	for writer.queueCount >= channeladapter.MaxQueuedFrames || writer.queueBytes+len(data) > channeladapter.MaxQueuedBytes {
+		changed := writer.capacityChanged
+		writer.mu.Unlock()
+		select {
+		case <-changed:
+			writer.mu.Lock()
+			if writer.failed != nil {
+				return writer.failed
+			}
+			continue
+		case <-ctx.Done():
+			writer.mu.Lock()
+			return errors.New("Discord adapter protocol output admission deadline elapsed")
+		case <-writer.after(channeladapter.CommandTimeout):
+			writer.mu.Lock()
+			err := errors.New("Discord adapter protocol output queue made no progress")
+			writer.failed = err
+			writer.notifyCapacityLocked()
+			writer.fail(err)
+			return err
+		}
 	}
 	item := queuedProtocolFrame{data: data}
 	select {
@@ -203,7 +248,9 @@ func (writer *protocolWriter) enqueueLocked(envelope channeladapter.Envelope) er
 		writer.queueBytes += len(data)
 		return nil
 	default:
-		err := errors.New("Discord adapter protocol output queue is full")
+		err := errors.New("Discord adapter protocol output queue invariant failed")
+		writer.failed = err
+		writer.notifyCapacityLocked()
 		writer.fail(err)
 		return err
 	}
@@ -253,14 +300,34 @@ func (writer *protocolWriter) drain(timeout time.Duration) error {
 	for {
 		writer.mu.Lock()
 		count := writer.queueCount
-		writer.mu.Unlock()
 		if count == 0 {
+			writer.mu.Unlock()
 			return nil
 		}
+		changed := writer.capacityChanged
+		writer.mu.Unlock()
 		select {
-		case <-writer.progress:
+		case <-changed:
 		case <-deadline:
 			return errors.New("Discord adapter protocol output did not drain")
+		}
+	}
+}
+
+func (writer *protocolWriter) drainContext(ctx context.Context) error {
+	for {
+		writer.mu.Lock()
+		count := writer.queueCount
+		if count == 0 {
+			writer.mu.Unlock()
+			return nil
+		}
+		changed := writer.capacityChanged
+		writer.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return errors.New("Discord adapter protocol output did not drain before shutdown")
 		}
 	}
 }
@@ -271,9 +338,10 @@ type pendingControl struct {
 }
 
 type pendingInteraction struct {
-	hostFrameID string
-	request     channeladapter.InteractionRequest
-	handle      string
+	hostFrameID  string
+	request      channeladapter.InteractionRequest
+	handle       string
+	expiryCancel context.CancelFunc
 }
 
 type pendingCallback struct {
@@ -284,16 +352,20 @@ type pendingCallback struct {
 }
 
 type attachmentSource struct {
-	url  string
-	size int64
+	url          string
+	size         int64
+	generation   uint64
+	expiryCancel context.CancelFunc
 }
 
 type outboundTransfer struct {
-	content   bytes.Buffer
-	next      int
-	name      string
-	mediaType string
-	complete  bool
+	content      bytes.Buffer
+	next         int
+	name         string
+	mediaType    string
+	complete     bool
+	generation   uint64
+	expiryCancel context.CancelFunc
 }
 
 type HTTPClient interface {
@@ -309,22 +381,29 @@ type Runtime struct {
 	http        HTTPClient
 	after       func(time.Duration) <-chan time.Time
 
-	mu            sync.Mutex
-	profile       Profile
-	client        Discord
-	controls      map[string]pendingControl
-	interactions  map[string]pendingInteraction
-	callbacks     map[string]pendingCallback
-	handles       map[string]string
-	attachments   map[string]attachmentSource
-	outbound      map[string]*outboundTransfer
-	lock          ApplicationLock
-	closed        bool
-	connectionTry int
-	fatal         chan error
-	features      map[channeladapter.Feature]bool
-	limits        channeladapter.Limits
-	policy        channeladapter.RuntimePolicy
+	admissionMu    sync.RWMutex
+	mu             sync.Mutex
+	profile        Profile
+	client         Discord
+	controls       map[string]pendingControl
+	interactions   map[string]pendingInteraction
+	callbacks      map[string]pendingCallback
+	callbackExpiry map[string]context.CancelFunc
+	handles        map[string]string
+	attachments    map[string]attachmentSource
+	attachmentSeq  atomic.Uint64
+	transferSeq    atomic.Uint64
+	fetches        map[string]context.CancelFunc
+	outbound       map[string]*outboundTransfer
+	lock           ApplicationLock
+	closed         bool
+	shuttingDown   bool
+	runCancel      context.CancelFunc
+	connectionTry  int
+	fatal          chan error
+	features       map[channeladapter.Feature]bool
+	limits         channeladapter.Limits
+	policy         channeladapter.RuntimePolicy
 }
 
 func (runtime *Runtime) setNegotiated(initialize channeladapter.Initialize) {
@@ -382,12 +461,17 @@ func NewRuntime(output io.Writer, dependencies Dependencies) (*Runtime, error) {
 	return &Runtime{
 		profiles: dependencies.Profiles, credentials: dependencies.Credentials, factory: dependencies.Discord, locks: dependencies.Locks,
 		writer: writer, http: client, after: after,
-		controls: map[string]pendingControl{}, interactions: map[string]pendingInteraction{}, callbacks: map[string]pendingCallback{}, handles: map[string]string{}, attachments: map[string]attachmentSource{}, outbound: map[string]*outboundTransfer{},
+		controls: map[string]pendingControl{}, interactions: map[string]pendingInteraction{}, callbacks: map[string]pendingCallback{}, callbackExpiry: map[string]context.CancelFunc{}, handles: map[string]string{}, attachments: map[string]attachmentSource{}, fetches: map[string]context.CancelFunc{}, outbound: map[string]*outboundTransfer{},
 		fatal: fatal,
 	}, nil
 }
 
 func (runtime *Runtime) Run(ctx context.Context, input io.Reader) error {
+	runContext, cancel := context.WithCancel(ctx)
+	runtime.mu.Lock()
+	runtime.runCancel = cancel
+	runtime.mu.Unlock()
+	defer cancel()
 	hello := channeladapter.Hello{ChannelKind: "discord", Protocol: channeladapter.ProtocolRange{Minimum: 1, Before: 2}, Features: append([]channeladapter.Feature(nil), discordFeatures...), Limits: discordLimits}
 	helloID, err := runtime.writer.sendID(hello, "")
 	if err != nil {
@@ -406,7 +490,7 @@ func (runtime *Runtime) Run(ctx context.Context, input io.Reader) error {
 	}()
 	var initialization channeladapter.Envelope
 	select {
-	case <-ctx.Done():
+	case <-runContext.Done():
 		return nil
 	case <-runtime.after(channeladapter.HandshakeTimeout):
 		return errors.New("Discord adapter initialization timed out")
@@ -427,17 +511,20 @@ func (runtime *Runtime) Run(ctx context.Context, input io.Reader) error {
 	if err := channeladapter.ValidateNegotiation(hello, *initialize, ready); err != nil {
 		return err
 	}
+	if err := decoder.SetMaxFrameBytes(initialize.Limits.MaxFrameBytes); err != nil {
+		return err
+	}
 	runtime.setNegotiated(*initialize)
 	runtime.writer.setBounds(initialize.Limits.MaxFrameBytes, initialize.Limits.MaxOutstanding)
 	if err := runtime.writer.send(ready, initialization.ID); err != nil {
 		return err
 	}
-	if err := runtime.connect(ctx, initialize.ProfileID); err != nil {
+	if err := runtime.connect(runContext, initialize.ProfileID); err != nil {
 		_ = runtime.writer.send(channeladapter.Diagnostic{Class: diagnosticClass(err), Severity: channeladapter.SeverityError, Code: "startup_failed", Message: safeRuntimeMessage(err)}, "")
 		return err
 	}
 	defer runtime.close()
-	readContext, stopReading := context.WithCancel(ctx)
+	readContext, stopReading := context.WithCancel(runContext)
 	defer stopReading()
 	frames := make(chan readResult, 1)
 	go func() {
@@ -456,20 +543,20 @@ func (runtime *Runtime) Run(ctx context.Context, input io.Reader) error {
 	for {
 		var frame channeladapter.Envelope
 		select {
-		case <-ctx.Done():
+		case <-runContext.Done():
 			return nil
 		case err := <-runtime.fatal:
 			return err
 		case result := <-frames:
 			if result.err != nil {
-				if ctx.Err() != nil || errors.Is(result.err, io.EOF) {
+				if runContext.Err() != nil || errors.Is(result.err, io.EOF) {
 					return nil
 				}
 				return result.err
 			}
 			frame = result.frame
 		}
-		stop, err := runtime.handleHostFrame(ctx, frame)
+		stop, err := runtime.handleHostFrame(runContext, frame)
 		if err != nil {
 			return err
 		}
@@ -532,7 +619,6 @@ func (runtime *Runtime) connect(ctx context.Context, profileID string) error {
 		return errors.New("cannot connect to the Discord Gateway")
 	}
 	keep = true
-	_ = runtime.writer.send(channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: runtime.connectionTry}, "")
 	return nil
 }
 
@@ -540,22 +626,51 @@ func (runtime *Runtime) installHandlers(client Discord) {
 	client.AddHandler(func(_ *discordgo.Session, event *discordgo.MessageCreate) { runtime.handleMessage(event) })
 	client.AddHandler(func(_ *discordgo.Session, event *discordgo.InteractionCreate) { runtime.handleInteraction(event) })
 	client.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) {
+		if !runtime.beginVendorAdmission() {
+			return
+		}
+		defer runtime.endVendorAdmission()
 		runtime.mu.Lock()
 		runtime.connectionTry++
 		attempt := runtime.connectionTry
 		runtime.mu.Unlock()
 		_ = runtime.writer.send(channeladapter.Connection{State: channeladapter.ConnectionReconnecting, Attempt: attempt}, "")
 	})
-	client.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) {
+	ready := func() {
+		if !runtime.beginVendorAdmission() {
+			return
+		}
+		defer runtime.endVendorAdmission()
 		runtime.mu.Lock()
 		attempt := runtime.connectionTry
 		runtime.mu.Unlock()
 		_ = runtime.writer.send(channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: attempt}, "")
 		_ = runtime.writer.replayEvents()
-	})
+	}
+	client.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { ready() })
+	client.AddHandler(func(_ *discordgo.Session, _ *discordgo.Ready) { ready() })
+}
+
+func (runtime *Runtime) beginVendorAdmission() bool {
+	runtime.admissionMu.RLock()
+	runtime.mu.Lock()
+	admitted := !runtime.shuttingDown
+	runtime.mu.Unlock()
+	if !admitted {
+		runtime.admissionMu.RUnlock()
+	}
+	return admitted
+}
+
+func (runtime *Runtime) endVendorAdmission() {
+	runtime.admissionMu.RUnlock()
 }
 
 func (runtime *Runtime) handleMessage(incoming *discordgo.MessageCreate) {
+	if !runtime.beginVendorAdmission() {
+		return
+	}
+	defer runtime.endVendorAdmission()
 	if !eligibleMessage(runtime.profile, incoming) || runtime.handleFallback(incoming) {
 		return
 	}
@@ -572,17 +687,52 @@ func (runtime *Runtime) handleMessage(incoming *discordgo.MessageCreate) {
 		runtime.vendorDiagnostic("attachments_too_many", "Discord message exceeds the negotiated attachment count.")
 		return
 	}
-	attachments := make([]channeladapter.AttachmentDescriptor, 0, len(incoming.Attachments))
 	for _, attachment := range incoming.Attachments {
 		if attachment == nil || attachment.Size < 0 || attachment.Size > attachmentBytes {
 			runtime.vendorDiagnostic("attachment_too_large", "Discord attachment exceeds the negotiated size limit.")
 			return
 		}
-		handle := opaqueHandle("attachment", attachment.ID)
-		runtime.mu.Lock()
-		runtime.attachments[handle] = attachmentSource{url: attachment.URL, size: int64(attachment.Size)}
+	}
+	attachments := make([]channeladapter.AttachmentDescriptor, 0, len(incoming.Attachments))
+	type expiringHandle struct {
+		handle     string
+		generation uint64
+		ctx        context.Context
+	}
+	expiring := make([]expiringHandle, 0, len(incoming.Attachments))
+	runtime.mu.Lock()
+	maximumHandles := runtime.limits.MaxOutstanding * attachmentCount
+	if len(runtime.attachments)+len(incoming.Attachments) > maximumHandles {
 		runtime.mu.Unlock()
+		runtime.vendorDiagnostic("attachment_handles_full", "Discord attachment input is temporarily at capacity.")
+		return
+	}
+	seenHandles := make(map[string]bool, len(incoming.Attachments))
+	for _, attachment := range incoming.Attachments {
+		handle := opaqueHandle("attachment", attachment.ID)
+		if seenHandles[handle] {
+			runtime.mu.Unlock()
+			runtime.vendorDiagnostic("attachment_handle_conflict", "Discord attachment identifiers were duplicated.")
+			return
+		}
+		if _, exists := runtime.attachments[handle]; exists {
+			runtime.mu.Unlock()
+			runtime.vendorDiagnostic("attachment_handle_conflict", "Discord attachment identifier is already pending.")
+			return
+		}
+		seenHandles[handle] = true
+	}
+	for _, attachment := range incoming.Attachments {
+		handle := opaqueHandle("attachment", attachment.ID)
+		generation := runtime.attachmentSeq.Add(1)
+		expiryContext, cancelExpiry := context.WithCancel(context.Background())
+		runtime.attachments[handle] = attachmentSource{url: attachment.URL, size: int64(attachment.Size), generation: generation, expiryCancel: cancelExpiry}
+		expiring = append(expiring, expiringHandle{handle: handle, generation: generation, ctx: expiryContext})
 		attachments = append(attachments, channeladapter.AttachmentDescriptor{Handle: handle, Name: safeAttachmentName(attachment.Filename), MediaType: attachment.ContentType, Size: int64(attachment.Size)})
+	}
+	runtime.mu.Unlock()
+	for _, source := range expiring {
+		go runtime.expireAttachment(source.ctx, source.handle, source.generation)
 	}
 	message := channeladapter.InboundMessage{
 		SourceID: incoming.ID, Route: channeladapter.Route{Handle: incoming.ChannelID}, Message: channeladapter.MessageRef{Handle: incoming.ID},
@@ -595,6 +745,19 @@ func (runtime *Runtime) handleMessage(incoming *discordgo.MessageCreate) {
 		default:
 		}
 	}
+}
+
+func (runtime *Runtime) expireAttachment(ctx context.Context, handle string, generation uint64) {
+	select {
+	case <-runtime.after(channeladapter.AttachmentTimeout):
+	case <-ctx.Done():
+		return
+	}
+	runtime.mu.Lock()
+	if source, ok := runtime.attachments[handle]; ok && source.generation == generation {
+		delete(runtime.attachments, handle)
+	}
+	runtime.mu.Unlock()
 }
 
 func (runtime *Runtime) vendorDiagnostic(code, message string) {
@@ -633,22 +796,34 @@ func (runtime *Runtime) handleHostFrame(ctx context.Context, frame channeladapte
 		if !runtime.supports(channeladapter.FeatureInteractiveComponents) && !runtime.supports(channeladapter.FeatureTextFallback) {
 			return false, errors.New("Discord adapter received an interaction without a negotiated renderer")
 		}
-		runtime.renderInteraction(frame.ID, *payload)
+		if err := runtime.renderInteraction(frame.ID, *payload); err != nil {
+			return false, err
+		}
 	case *channeladapter.InteractionCancel:
 		runtime.cancelInteraction(frame.ID, *payload)
 	case *channeladapter.AttachmentFetch:
 		if !runtime.supports(channeladapter.FeatureAttachments) {
 			return false, errors.New("Discord adapter received attachment fetch without a negotiated feature")
 		}
-		go runtime.fetchAttachment(ctx, frame.ID, *payload)
+		runtime.startAttachmentFetch(ctx, frame.ID, *payload)
 	case *channeladapter.AttachmentDeliver:
 		if !runtime.supports(channeladapter.FeatureAttachments) {
 			return false, errors.New("Discord adapter received attachment delivery without a negotiated feature")
 		}
 		runtime.receiveAttachment(frame.ID, *payload)
 	case *channeladapter.Shutdown:
-		runtime.close()
-		if err := runtime.writer.send(channeladapter.ShutdownComplete{}, frame.ID); err != nil {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), channeladapter.ShutdownTimeout)
+		defer cancel()
+		if err := runtime.closeWithContext(shutdownContext); err != nil {
+			return false, err
+		}
+		if err := runtime.writer.drainContext(shutdownContext); err != nil {
+			return false, err
+		}
+		if err := runtime.writer.sendContext(shutdownContext, channeladapter.ShutdownComplete{}, frame.ID); err != nil {
+			return false, err
+		}
+		if err := runtime.writer.drainContext(shutdownContext); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -656,6 +831,34 @@ func (runtime *Runtime) handleHostFrame(ctx context.Context, frame channeladapte
 		return false, errors.New("Discord adapter received an unsupported host command")
 	}
 	return false, nil
+}
+
+func (runtime *Runtime) startAttachmentFetch(ctx context.Context, correlation string, fetch channeladapter.AttachmentFetch) {
+	runtime.mu.Lock()
+	if runtime.shuttingDown {
+		runtime.mu.Unlock()
+		return
+	}
+	_, duplicateFetch := runtime.fetches[fetch.TransferID]
+	_, duplicateOutbound := runtime.outbound[fetch.TransferID]
+	duplicate := duplicateFetch || duplicateOutbound
+	if duplicate || len(runtime.fetches)+len(runtime.outbound) >= channeladapter.MaxTransfers {
+		runtime.mu.Unlock()
+		_ = runtime.writer.send(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticProtocol, Code: "attachment_capacity"}}, correlation)
+		return
+	}
+	fetchContext, cancel := context.WithCancel(ctx)
+	runtime.fetches[fetch.TransferID] = cancel
+	runtime.mu.Unlock()
+	go func() {
+		defer cancel()
+		defer func() {
+			runtime.mu.Lock()
+			delete(runtime.fetches, fetch.TransferID)
+			runtime.mu.Unlock()
+		}()
+		runtime.fetchAttachment(fetchContext, correlation, fetch)
+	}()
 }
 
 func (runtime *Runtime) delivery(correlation string, delivery channeladapter.Delivery) {
@@ -700,6 +903,9 @@ func (runtime *Runtime) delivery(correlation string, delivery channeladapter.Del
 			transfer := runtime.outbound[transferID]
 			delete(runtime.outbound, transferID)
 			runtime.mu.Unlock()
+			if transfer != nil && transfer.expiryCancel != nil {
+				transfer.expiryCancel()
+			}
 			if transfer == nil || !transfer.complete {
 				err = errors.New("outbound attachment is unavailable")
 				break
@@ -780,10 +986,13 @@ func (runtime *Runtime) fetchAttachment(ctx context.Context, correlation string,
 	source, ok := runtime.attachments[fetch.AttachmentHandle]
 	delete(runtime.attachments, fetch.AttachmentHandle)
 	runtime.mu.Unlock()
+	if source.expiryCancel != nil {
+		source.expiryCancel()
+	}
 	_, negotiatedBytes := runtime.attachmentLimits()
 	maximum := min(fetch.MaximumBytes, negotiatedBytes)
 	if !ok || maximum < 1 || source.size > int64(maximum) {
-		_ = runtime.writer.send(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticConfiguration, Code: "attachment_unavailable"}}, correlation)
+		_ = runtime.sendConcurrentFrame(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticConfiguration, Code: "attachment_unavailable"}}, correlation)
 		return
 	}
 	fetchContext, cancel := context.WithCancel(ctx)
@@ -799,7 +1008,7 @@ func (runtime *Runtime) fetchAttachment(ctx context.Context, correlation string,
 	}()
 	request, err := http.NewRequestWithContext(fetchContext, http.MethodGet, source.url, nil)
 	if err != nil {
-		_ = runtime.writer.send(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticConfiguration, Code: "attachment_request_invalid"}}, correlation)
+		_ = runtime.sendConcurrentFrame(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticConfiguration, Code: "attachment_request_invalid"}}, correlation)
 		return
 	}
 	response, err := runtime.http.Do(request)
@@ -813,13 +1022,13 @@ func (runtime *Runtime) fetchAttachment(ctx context.Context, correlation string,
 			code = "attachment_fetch_timeout"
 		default:
 		}
-		_ = runtime.writer.send(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticConnection, Code: code}}, correlation)
+		_ = runtime.sendConcurrentFrame(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticConnection, Code: code}}, correlation)
 		return
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, int64(maximum)+1))
 	select {
 	case <-timedOut:
-		_ = runtime.writer.send(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticConnection, Code: "attachment_fetch_timeout"}}, correlation)
+		_ = runtime.sendConcurrentFrame(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticConnection, Code: "attachment_fetch_timeout"}}, correlation)
 		return
 	default:
 	}
@@ -828,22 +1037,30 @@ func (runtime *Runtime) fetchAttachment(ctx context.Context, correlation string,
 		if len(data) > maximum {
 			code = "attachment_fetch_oversized"
 		}
-		_ = runtime.writer.send(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticConnection, Code: code}}, correlation)
+		_ = runtime.sendConcurrentFrame(channeladapter.AttachmentResult{TransferID: fetch.TransferID, Disposition: channeladapter.EffectFailed, Failure: channeladapter.Failure{Class: channeladapter.DiagnosticConnection, Code: code}}, correlation)
 		return
 	}
 	sequence := 0
 	for len(data) > 0 {
 		count := min(len(data), channeladapter.MaxAttachmentChunkBytes)
 		chunk := channeladapter.AttachmentChunk{TransferID: fetch.TransferID, Sequence: sequence, Data: base64.StdEncoding.EncodeToString(data[:count]), Final: count == len(data)}
-		if err := runtime.writer.send(chunk, correlation); err != nil {
+		if err := runtime.sendConcurrentFrame(chunk, correlation); err != nil {
 			return
 		}
 		data = data[count:]
 		sequence++
 	}
 	if sequence == 0 {
-		_ = runtime.writer.send(channeladapter.AttachmentChunk{TransferID: fetch.TransferID, Sequence: 0, Data: "", Final: true}, correlation)
+		_ = runtime.sendConcurrentFrame(channeladapter.AttachmentChunk{TransferID: fetch.TransferID, Sequence: 0, Data: "", Final: true}, correlation)
 	}
+}
+
+func (runtime *Runtime) sendConcurrentFrame(payload channeladapter.Payload, correlation string) error {
+	if !runtime.beginVendorAdmission() {
+		return context.Canceled
+	}
+	defer runtime.endVendorAdmission()
+	return runtime.writer.send(payload, correlation)
 }
 
 func (runtime *Runtime) receiveAttachment(correlation string, chunk channeladapter.AttachmentDeliver) {
@@ -851,10 +1068,20 @@ func (runtime *Runtime) receiveAttachment(correlation string, chunk channeladapt
 	result := channeladapter.AttachmentResult{TransferID: chunk.TransferID, Disposition: channeladapter.EffectExact}
 	_, maximum := runtime.attachmentLimits()
 	runtime.mu.Lock()
+	if runtime.shuttingDown {
+		runtime.mu.Unlock()
+		return
+	}
 	transfer := runtime.outbound[chunk.TransferID]
-	if transfer == nil && len(runtime.outbound) < channeladapter.MaxTransfers && chunk.Sequence == 0 {
-		transfer = &outboundTransfer{name: chunk.Name, mediaType: chunk.MediaType}
+	_, fetching := runtime.fetches[chunk.TransferID]
+	created := false
+	var expiryContext context.Context
+	if transfer == nil && !fetching && len(runtime.outbound)+len(runtime.fetches) < channeladapter.MaxTransfers && chunk.Sequence == 0 {
+		var cancelExpiry context.CancelFunc
+		expiryContext, cancelExpiry = context.WithCancel(context.Background())
+		transfer = &outboundTransfer{name: chunk.Name, mediaType: chunk.MediaType, generation: runtime.transferSeq.Add(1), expiryCancel: cancelExpiry}
 		runtime.outbound[chunk.TransferID] = transfer
+		created = true
 	}
 	if transfer == nil || transfer.complete || chunk.Sequence != transfer.next {
 		err = errors.New("attachment sequence is invalid")
@@ -872,17 +1099,40 @@ func (runtime *Runtime) receiveAttachment(correlation string, chunk channeladapt
 		runtime.mu.Lock()
 		delete(runtime.outbound, chunk.TransferID)
 		runtime.mu.Unlock()
+		if transfer != nil && transfer.expiryCancel != nil {
+			transfer.expiryCancel()
+		}
 		result.Disposition = channeladapter.EffectFailed
 		result.Failure = channeladapter.Failure{Class: channeladapter.DiagnosticProtocol, Code: "attachment_invalid"}
+	} else if created {
+		go runtime.expireOutboundTransfer(expiryContext, chunk.TransferID, transfer.generation)
 	}
 	_ = runtime.writer.send(result, correlation)
 }
 
+func (runtime *Runtime) expireOutboundTransfer(ctx context.Context, transferID string, generation uint64) {
+	select {
+	case <-runtime.after(channeladapter.AttachmentTimeout):
+	case <-ctx.Done():
+		return
+	}
+	runtime.mu.Lock()
+	if transfer := runtime.outbound[transferID]; transfer != nil && transfer.generation == generation {
+		delete(runtime.outbound, transferID)
+	}
+	runtime.mu.Unlock()
+}
+
 func (runtime *Runtime) close() {
+	_ = runtime.closeWithContext(context.Background())
+}
+
+func (runtime *Runtime) closeWithContext(ctx context.Context) error {
+	runtime.beginShutdown()
 	runtime.mu.Lock()
 	if runtime.closed {
 		runtime.mu.Unlock()
-		return
+		return nil
 	}
 	runtime.closed = true
 	client, lock := runtime.client, runtime.lock
@@ -893,7 +1143,52 @@ func (runtime *Runtime) close() {
 	if lock != nil {
 		_ = lock.Unlock()
 	}
-	_ = runtime.writer.send(channeladapter.Connection{State: channeladapter.ConnectionClosed, Attempt: max(1, runtime.connectionTry)}, "")
+	return runtime.writer.sendContext(ctx, channeladapter.Connection{State: channeladapter.ConnectionClosed, Attempt: max(1, runtime.connectionTry)}, "")
+}
+
+func (runtime *Runtime) beginShutdown() {
+	runtime.admissionMu.Lock()
+	runtime.mu.Lock()
+	if runtime.shuttingDown {
+		runtime.mu.Unlock()
+		runtime.admissionMu.Unlock()
+		return
+	}
+	runtime.shuttingDown = true
+	if runtime.runCancel != nil {
+		runtime.runCancel()
+	}
+	for _, cancel := range runtime.fetches {
+		cancel()
+	}
+	for _, source := range runtime.attachments {
+		if source.expiryCancel != nil {
+			source.expiryCancel()
+		}
+	}
+	for _, transfer := range runtime.outbound {
+		if transfer.expiryCancel != nil {
+			transfer.expiryCancel()
+		}
+	}
+	for _, interaction := range runtime.interactions {
+		if interaction.expiryCancel != nil {
+			interaction.expiryCancel()
+		}
+	}
+	for _, cancel := range runtime.callbackExpiry {
+		cancel()
+	}
+	runtime.fetches = map[string]context.CancelFunc{}
+	runtime.outbound = map[string]*outboundTransfer{}
+	runtime.attachments = map[string]attachmentSource{}
+	runtime.interactions = map[string]pendingInteraction{}
+	runtime.handles = map[string]string{}
+	runtime.controls = map[string]pendingControl{}
+	runtime.callbacks = map[string]pendingCallback{}
+	runtime.callbackExpiry = map[string]context.CancelFunc{}
+	runtime.mu.Unlock()
+	runtime.admissionMu.Unlock()
 }
 
 func opaqueHandle(namespace, value string) string {

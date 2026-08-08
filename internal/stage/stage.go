@@ -183,7 +183,7 @@ func Create(ctx context.Context, request Request) (Result, error) {
 		return Result{}, err
 	}
 	if len(nativeDescriptor) == 1 {
-		staged, stageErr := request.IntegrationStore.StageArtifacts(ctx, "github-mcp-server", nativeResolution.Selection.Capability.Artifacts, temporary)
+		staged, stageErr := request.IntegrationStore.StageArtifacts(ctx, "github-mcp-server", []string{nativeResolution.Selection.Artifact.ID}, temporary)
 		if stageErr != nil {
 			return Result{}, stageErr
 		}

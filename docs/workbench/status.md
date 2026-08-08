@@ -1,6 +1,6 @@
 # Working status
 
-- Updated: 2026-08-07
+- Updated: 2026-08-08
 - Repository: GitHub-backed `hctl` experiment; publication remains pending and
   product naming remains deferred
 - Purpose: let a clean session resume without depending on chat history or the
@@ -31,6 +31,9 @@ The repository contains a small Go CLI that:
   harness-specific native files to an
   independently selected workspace as native Claude Code and Codex files
   without overwriting hand-authored files;
+- validates bounded metadata-first integration package manifests, immutable
+  manifest/artifact/executable identities, and the closed `native-mcp` v1
+  capability without loading or executing package code;
 - keeps one apply record, migrates legacy projection records, and removes the
   obsolete duplicated runtime manifest;
 - discovers, prepares, validates, and exposes TypeScript, Python, and Go tool
@@ -322,6 +325,17 @@ sandbox authoring is still deferred because the
 native harnesses do not expose equivalent
 sandbox contracts. Do not implement proposal capture, image deployment,
 sandbox source, or broker code merely to exercise future seams.
+
+ADR 0030 now defines the shared metadata-first envelope for operator-installed
+process-isolated integration packages and its first closed `native-mcp` v1
+capability. Exact manifest bytes, platform artifacts, and post-preparation
+executables have immutable identities; capability artifact references form the
+selective runtime/staging closure. A credentialless fixture and official
+`github-mcp-server` metadata use the same vendor-neutral validation and
+selection path, while a future `channel-adapter` tag is rejected without
+artifact access or execution. No installer, cache, CLI, package execution,
+credential flow, native generation, or channel protocol is present yet. #76,
+#65, and #82 are the next independent consumers of that merged contract.
 
 The channel runtime now owns explicit independent managed session lifecycles
 for its configured Discord guild and DM surfaces. Idle lifecycles release their

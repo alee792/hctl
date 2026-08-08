@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "github-mcp-server",
+  "version": "1.0.0",
+  "name": "Official GitHub MCP server",
+  "description": "Package metadata for the external github-mcp-server executable.",
+  "license": "MIT",
+  "provenance": {
+    "source": "https://github.com/github/github-mcp-server",
+    "revision": "fixture-v1"
+  },
+  "compatibility": {
+    "minimum": "0.1.0-dev",
+    "before": "1.0.0"
+  },
+  "artifacts": [
+    {
+      "id": "darwin-arm64",
+      "os": "darwin",
+      "architecture": "arm64",
+      "format": "binary",
+      "source": {
+        "kind": "package",
+        "path": "payload/github-mcp-server"
+      },
+      "size": 8192,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "executable": {
+        "path": "bin/github-mcp-server",
+        "size": 8192,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    }
+  ],
+  "capabilities": [
+    {
+      "type": "native-mcp",
+      "version": 1,
+      "id": "github",
+      "server_name": "github",
+      "collision": "reject",
+      "artifacts": ["darwin-arm64"],
+      "executable": "bin/github-mcp-server",
+      "arguments": ["stdio"],
+      "working_directory": ".",
+      "environment": {},
+      "required_environment": [
+        {
+          "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+          "description": "Ambient GitHub authentication required by the server at runtime."
+        }
+      ],
+      "harnesses": [
+        {
+          "name": "claude",
+          "startup": "optional",
+          "trust": "native-project"
+        },
+        {
+          "name": "codex",
+          "startup": "optional",
+          "trust": "native-project"
+        }
+      ]
+    }
+  ]
+}

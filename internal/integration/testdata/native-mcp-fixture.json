@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "id": "fixture-native-mcp",
+  "version": "1.0.0",
+  "name": "Credentialless native MCP fixture",
+  "description": "A deterministic metadata-only fixture for the native MCP package contract.",
+  "license": "MIT",
+  "provenance": {
+    "source": "https://example.invalid/hctl/native-mcp-fixture",
+    "revision": "fixture-v1"
+  },
+  "compatibility": {
+    "minimum": "0.1.0-dev",
+    "before": "1.0.0"
+  },
+  "artifacts": [
+    {
+      "id": "darwin-arm64",
+      "os": "darwin",
+      "architecture": "arm64",
+      "format": "binary",
+      "source": {
+        "kind": "package",
+        "path": "payload/fixture-mcp"
+      },
+      "size": 4096,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "executable": {
+        "path": "bin/fixture-mcp",
+        "size": 4096,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ],
+  "capabilities": [
+    {
+      "type": "native-mcp",
+      "version": 1,
+      "id": "fixture",
+      "server_name": "fixture",
+      "collision": "reject",
+      "artifacts": ["darwin-arm64"],
+      "executable": "bin/fixture-mcp",
+      "arguments": ["serve", "--stdio"],
+      "working_directory": ".",
+      "environment": {
+        "FIXTURE_MODE": "deterministic"
+      },
+      "required_environment": [],
+      "harnesses": [
+        {
+          "name": "claude",
+          "startup": "optional",
+          "trust": "native-project"
+        },
+        {
+          "name": "codex",
+          "startup": "optional",
+          "trust": "native-project"
+        }
+      ]
+    }
+  ]
+}

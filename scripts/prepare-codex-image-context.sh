@@ -94,6 +94,7 @@ cp "$manifest" "$rootfs/opt/hctl/image-inputs.json"
   --platform linux-amd64 \
   --output "$downloads/github-mcp-server-package"
 HOME="$rootfs/home/hctl" XDG_CONFIG_HOME="$rootfs/home/hctl/.config" \
+  GITHUB_PERSONAL_ACCESS_TOKEN=hctl-ci-fake-github-token-must-not-persist \
   "$hctl_executable" integration install "$downloads/github-mcp-server-package" --trust operator >/dev/null
 chmod 755 \
   "$rootfs/opt/hctl/bin/hctl" \

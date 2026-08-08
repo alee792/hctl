@@ -160,10 +160,14 @@ func (writer *protocolWriter) sendIDContext(ctx context.Context, payload channel
 }
 
 func (writer *protocolWriter) sendEvent(key string, payload channeladapter.Payload, correlation string) (string, error) {
-	return writer.sendEventRegistered(key, payload, correlation, nil)
+	return writer.sendEventContext(context.Background(), key, payload, correlation)
 }
 
-func (writer *protocolWriter) sendEventRegistered(key string, payload channeladapter.Payload, correlation string, register func(string, bool)) (string, error) {
+func (writer *protocolWriter) sendEventContext(ctx context.Context, key string, payload channeladapter.Payload, correlation string) (string, error) {
+	return writer.sendEventRegisteredContext(ctx, key, payload, correlation, nil)
+}
+
+func (writer *protocolWriter) sendEventRegisteredContext(ctx context.Context, key string, payload channeladapter.Payload, correlation string, register func(string, bool)) (string, error) {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
 	if id := writer.eventKeys[key]; id != "" {
@@ -175,7 +179,7 @@ func (writer *protocolWriter) sendEventRegistered(key string, payload channelada
 		if oldErr != nil || newErr != nil || !bytes.Equal(oldBytes, newBytes) {
 			return "", errors.New("Discord replay changed content under a stable source id")
 		}
-		return id, writer.enqueueLocked(stored)
+		return id, writer.enqueueLockedContext(ctx, stored)
 	}
 	if len(writer.pending) >= writer.maxOutstanding {
 		err := errors.New("Discord adapter has too many unacknowledged events")
@@ -189,7 +193,7 @@ func (writer *protocolWriter) sendEventRegistered(key string, payload channelada
 	if register != nil {
 		register(id, true)
 	}
-	if err := writer.enqueueLocked(envelope); err != nil {
+	if err := writer.enqueueLockedContext(ctx, envelope); err != nil {
 		if register != nil {
 			register(id, false)
 		}
@@ -199,13 +203,14 @@ func (writer *protocolWriter) sendEventRegistered(key string, payload channelada
 	return id, nil
 }
 
-func (writer *protocolWriter) enqueueLocked(envelope channeladapter.Envelope) error {
-	return writer.enqueueLockedContext(context.Background(), envelope)
-}
-
 func (writer *protocolWriter) enqueueLockedContext(ctx context.Context, envelope channeladapter.Envelope) error {
 	if writer.failed != nil {
 		return writer.failed
+	}
+	select {
+	case <-ctx.Done():
+		return errors.New("Discord adapter protocol output admission was cancelled")
+	default:
 	}
 	data, err := channeladapter.MarshalFrame(envelope, channeladapter.FromAdapter)
 	if err != nil {
@@ -279,7 +284,7 @@ func (writer *protocolWriter) acknowledge(id string) bool {
 	return found
 }
 
-func (writer *protocolWriter) replayEvents() error {
+func (writer *protocolWriter) replayEventsContext(ctx context.Context) error {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
 	ids := make([]string, 0, len(writer.pending))
@@ -288,7 +293,7 @@ func (writer *protocolWriter) replayEvents() error {
 	}
 	slices.Sort(ids)
 	for _, id := range ids {
-		if err := writer.enqueueLocked(writer.pending[id]); err != nil {
+		if err := writer.enqueueLockedContext(ctx, writer.pending[id]); err != nil {
 			return err
 		}
 	}
@@ -381,29 +386,31 @@ type Runtime struct {
 	http        HTTPClient
 	after       func(time.Duration) <-chan time.Time
 
-	admissionMu    sync.RWMutex
-	mu             sync.Mutex
-	profile        Profile
-	client         Discord
-	controls       map[string]pendingControl
-	interactions   map[string]pendingInteraction
-	callbacks      map[string]pendingCallback
-	callbackExpiry map[string]context.CancelFunc
-	handles        map[string]string
-	attachments    map[string]attachmentSource
-	attachmentSeq  atomic.Uint64
-	transferSeq    atomic.Uint64
-	fetches        map[string]context.CancelFunc
-	outbound       map[string]*outboundTransfer
-	lock           ApplicationLock
-	closed         bool
-	shuttingDown   bool
-	runCancel      context.CancelFunc
-	connectionTry  int
-	fatal          chan error
-	features       map[channeladapter.Feature]bool
-	limits         channeladapter.Limits
-	policy         channeladapter.RuntimePolicy
+	mu               sync.Mutex
+	activeAdmissions int
+	admissionIdle    chan struct{}
+	profile          Profile
+	client           Discord
+	controls         map[string]pendingControl
+	interactions     map[string]pendingInteraction
+	callbacks        map[string]pendingCallback
+	callbackExpiry   map[string]context.CancelFunc
+	handles          map[string]string
+	attachments      map[string]attachmentSource
+	attachmentSeq    atomic.Uint64
+	transferSeq      atomic.Uint64
+	fetches          map[string]context.CancelFunc
+	outbound         map[string]*outboundTransfer
+	lock             ApplicationLock
+	closed           bool
+	shuttingDown     bool
+	runCancel        context.CancelFunc
+	runContext       context.Context
+	connectionTry    int
+	fatal            chan error
+	features         map[channeladapter.Feature]bool
+	limits           channeladapter.Limits
+	policy           channeladapter.RuntimePolicy
 }
 
 func (runtime *Runtime) setNegotiated(initialize channeladapter.Initialize) {
@@ -458,17 +465,20 @@ func NewRuntime(output io.Writer, dependencies Dependencies) (*Runtime, error) {
 	}
 	fatal := make(chan error, 1)
 	writer := newProtocolWriter(output, writeAfter, fatal)
+	runContext, runCancel := context.WithCancel(context.Background())
 	return &Runtime{
 		profiles: dependencies.Profiles, credentials: dependencies.Credentials, factory: dependencies.Discord, locks: dependencies.Locks,
 		writer: writer, http: client, after: after,
 		controls: map[string]pendingControl{}, interactions: map[string]pendingInteraction{}, callbacks: map[string]pendingCallback{}, callbackExpiry: map[string]context.CancelFunc{}, handles: map[string]string{}, attachments: map[string]attachmentSource{}, fetches: map[string]context.CancelFunc{}, outbound: map[string]*outboundTransfer{},
-		fatal: fatal,
+		fatal: fatal, runContext: runContext, runCancel: runCancel,
 	}, nil
 }
 
 func (runtime *Runtime) Run(ctx context.Context, input io.Reader) error {
 	runContext, cancel := context.WithCancel(ctx)
 	runtime.mu.Lock()
+	runtime.runCancel()
+	runtime.runContext = runContext
 	runtime.runCancel = cancel
 	runtime.mu.Unlock()
 	defer cancel()
@@ -634,7 +644,7 @@ func (runtime *Runtime) installHandlers(client Discord) {
 		runtime.connectionTry++
 		attempt := runtime.connectionTry
 		runtime.mu.Unlock()
-		_ = runtime.writer.send(channeladapter.Connection{State: channeladapter.ConnectionReconnecting, Attempt: attempt}, "")
+		_ = runtime.writer.sendContext(runtime.admissionContext(), channeladapter.Connection{State: channeladapter.ConnectionReconnecting, Attempt: attempt}, "")
 	})
 	ready := func() {
 		if !runtime.beginVendorAdmission() {
@@ -644,26 +654,39 @@ func (runtime *Runtime) installHandlers(client Discord) {
 		runtime.mu.Lock()
 		attempt := runtime.connectionTry
 		runtime.mu.Unlock()
-		_ = runtime.writer.send(channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: attempt}, "")
-		_ = runtime.writer.replayEvents()
+		ctx := runtime.admissionContext()
+		_ = runtime.writer.sendContext(ctx, channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: attempt}, "")
+		_ = runtime.writer.replayEventsContext(ctx)
 	}
 	client.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { ready() })
 	client.AddHandler(func(_ *discordgo.Session, _ *discordgo.Ready) { ready() })
 }
 
-func (runtime *Runtime) beginVendorAdmission() bool {
-	runtime.admissionMu.RLock()
+func (runtime *Runtime) admissionContext() context.Context {
 	runtime.mu.Lock()
-	admitted := !runtime.shuttingDown
-	runtime.mu.Unlock()
-	if !admitted {
-		runtime.admissionMu.RUnlock()
+	defer runtime.mu.Unlock()
+	return runtime.runContext
+}
+
+func (runtime *Runtime) beginVendorAdmission() bool {
+	runtime.mu.Lock()
+	if runtime.shuttingDown {
+		runtime.mu.Unlock()
+		return false
 	}
-	return admitted
+	runtime.activeAdmissions++
+	runtime.mu.Unlock()
+	return true
 }
 
 func (runtime *Runtime) endVendorAdmission() {
-	runtime.admissionMu.RUnlock()
+	runtime.mu.Lock()
+	runtime.activeAdmissions--
+	if runtime.activeAdmissions == 0 && runtime.admissionIdle != nil {
+		close(runtime.admissionIdle)
+		runtime.admissionIdle = nil
+	}
+	runtime.mu.Unlock()
 }
 
 func (runtime *Runtime) handleMessage(incoming *discordgo.MessageCreate) {
@@ -738,8 +761,9 @@ func (runtime *Runtime) handleMessage(incoming *discordgo.MessageCreate) {
 		SourceID: incoming.ID, Route: channeladapter.Route{Handle: incoming.ChannelID}, Message: channeladapter.MessageRef{Handle: incoming.ID},
 		Author: channeladapter.Author{Handle: incoming.Author.ID, Label: safeLabel(incoming.Author.Username)}, Text: incoming.Content, Attachments: attachments,
 	}
-	if _, err := runtime.writer.sendEvent("inbound:"+incoming.ID, message, ""); err != nil {
-		_ = runtime.writer.send(channeladapter.Diagnostic{Class: channeladapter.DiagnosticProtocol, Severity: channeladapter.SeverityError, Code: "event_replay_conflict", Message: "Discord replay changed a pending event."}, "")
+	ctx := runtime.admissionContext()
+	if _, err := runtime.writer.sendEventContext(ctx, "inbound:"+incoming.ID, message, ""); err != nil {
+		_ = runtime.writer.sendContext(ctx, channeladapter.Diagnostic{Class: channeladapter.DiagnosticProtocol, Severity: channeladapter.SeverityError, Code: "event_replay_conflict", Message: "Discord replay changed a pending event."}, "")
 		select {
 		case runtime.fatal <- err:
 		default:
@@ -761,7 +785,7 @@ func (runtime *Runtime) expireAttachment(ctx context.Context, handle string, gen
 }
 
 func (runtime *Runtime) vendorDiagnostic(code, message string) {
-	_ = runtime.writer.send(channeladapter.Diagnostic{Class: channeladapter.DiagnosticConfiguration, Severity: channeladapter.SeverityWarning, Code: code, Message: message}, "")
+	_ = runtime.writer.sendContext(runtime.admissionContext(), channeladapter.Diagnostic{Class: channeladapter.DiagnosticConfiguration, Severity: channeladapter.SeverityWarning, Code: code, Message: message}, "")
 }
 
 func eligibleMessage(profile Profile, incoming *discordgo.MessageCreate) bool {
@@ -1060,7 +1084,7 @@ func (runtime *Runtime) sendConcurrentFrame(payload channeladapter.Payload, corr
 		return context.Canceled
 	}
 	defer runtime.endVendorAdmission()
-	return runtime.writer.send(payload, correlation)
+	return runtime.writer.sendContext(runtime.admissionContext(), payload, correlation)
 }
 
 func (runtime *Runtime) receiveAttachment(correlation string, chunk channeladapter.AttachmentDeliver) {
@@ -1124,11 +1148,13 @@ func (runtime *Runtime) expireOutboundTransfer(ctx context.Context, transferID s
 }
 
 func (runtime *Runtime) close() {
-	_ = runtime.closeWithContext(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), channeladapter.ShutdownTimeout)
+	defer cancel()
+	_ = runtime.closeWithContext(ctx)
 }
 
 func (runtime *Runtime) closeWithContext(ctx context.Context) error {
-	runtime.beginShutdown()
+	wait := runtime.prepareShutdown()
 	runtime.mu.Lock()
 	if runtime.closed {
 		runtime.mu.Unlock()
@@ -1143,21 +1169,25 @@ func (runtime *Runtime) closeWithContext(ctx context.Context) error {
 	if lock != nil {
 		_ = lock.Unlock()
 	}
+	if wait != nil {
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return errors.New("Discord adapter vendor admission did not stop before shutdown")
+		}
+	}
 	return runtime.writer.sendContext(ctx, channeladapter.Connection{State: channeladapter.ConnectionClosed, Attempt: max(1, runtime.connectionTry)}, "")
 }
 
-func (runtime *Runtime) beginShutdown() {
-	runtime.admissionMu.Lock()
+func (runtime *Runtime) prepareShutdown() <-chan struct{} {
 	runtime.mu.Lock()
 	if runtime.shuttingDown {
+		wait := runtime.admissionIdle
 		runtime.mu.Unlock()
-		runtime.admissionMu.Unlock()
-		return
+		return wait
 	}
 	runtime.shuttingDown = true
-	if runtime.runCancel != nil {
-		runtime.runCancel()
-	}
+	runtime.runCancel()
 	for _, cancel := range runtime.fetches {
 		cancel()
 	}
@@ -1187,8 +1217,12 @@ func (runtime *Runtime) beginShutdown() {
 	runtime.controls = map[string]pendingControl{}
 	runtime.callbacks = map[string]pendingCallback{}
 	runtime.callbackExpiry = map[string]context.CancelFunc{}
+	if runtime.activeAdmissions > 0 {
+		runtime.admissionIdle = make(chan struct{})
+	}
+	wait := runtime.admissionIdle
 	runtime.mu.Unlock()
-	runtime.admissionMu.Unlock()
+	return wait
 }
 
 func opaqueHandle(namespace, value string) string {

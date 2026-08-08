@@ -604,7 +604,7 @@ func TestAttachmentTransfersShareOneBoundedCapacity(t *testing.T) {
 	if result := frames[3].Payload.(*channeladapter.AttachmentResult); result.Disposition != channeladapter.EffectFailed {
 		t.Fatalf("combined transfer capacity = %#v", result)
 	}
-	runtime.beginShutdown()
+	runtime.prepareShutdown()
 	<-finished
 	<-finished
 	runtime.mu.Lock()
@@ -664,6 +664,57 @@ func TestShutdownStopsVendorAdmissionAndLateTransferFrames(t *testing.T) {
 	if retained != 0 {
 		t.Fatalf("shutdown retained runtime state = %d", retained)
 	}
+}
+
+func TestShutdownDeadlineCancelsBlockedVendorAdmissionBeforeBarrier(t *testing.T) {
+	blocked := &blockingWriter{release: make(chan struct{})}
+	never := func(time.Duration) <-chan time.Time { return make(chan time.Time) }
+	discord := &fakeDiscord{}
+	dependencies := fixtureDependencies(discord)
+	dependencies.WriteAfter = never
+	runtime, _ := NewRuntime(blocked, dependencies)
+	runtime.setNegotiated(canonicalInitialize())
+	runtime.profile, runtime.client = fixtureProfile(), discord
+	for index := 0; index < channeladapter.MaxQueuedFrames; index++ {
+		if _, err := runtime.writer.sendID(channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 1}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handlerDone := make(chan struct{})
+	go func() {
+		runtime.handleMessage(&discordgo.MessageCreate{Message: &discordgo.Message{ID: "705", ChannelID: "555", GuildID: "444", Content: "blocked", Author: &discordgo.User{ID: "333"}}})
+		close(handlerDone)
+	}()
+	waitUntil(t, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		return runtime.activeAdmissions == 1
+	})
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := runtime.closeWithContext(shutdownContext)
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("bounded shutdown = %v after %s", err, time.Since(started))
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("runtime cancellation did not release blocked vendor handler")
+	}
+	runtime.mu.Lock()
+	active, shuttingDown := runtime.activeAdmissions, runtime.shuttingDown
+	runtime.mu.Unlock()
+	if active != 0 || !shuttingDown {
+		t.Fatalf("shutdown state = active %d, shutting down %t", active, shuttingDown)
+	}
+	runtime.writer.mu.Lock()
+	_, retained := runtime.writer.eventKeys["inbound:705"]
+	runtime.writer.mu.Unlock()
+	if retained {
+		t.Fatal("shutdown cancellation retained the blocked inbound event")
+	}
+	blocked.unblock()
 }
 
 func canonicalInitialize() channeladapter.Initialize {

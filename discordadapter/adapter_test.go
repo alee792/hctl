@@ -24,6 +24,14 @@ type memoryProfiles struct {
 	putErr   error
 }
 
+type failingRestoreProfiles struct{ store FileProfileStore }
+
+func (profiles failingRestoreProfiles) Get(id string) (Profile, error) { return profiles.store.Get(id) }
+func (profiles failingRestoreProfiles) Put(string, Profile) error {
+	return errors.New("restore failed")
+}
+func (profiles failingRestoreProfiles) Delete(id string) error { return profiles.store.Delete(id) }
+
 func (store *memoryProfiles) Get(id string) (Profile, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -371,6 +379,89 @@ func TestLegacyProfileMigrationPreservesExactIdentity(t *testing.T) {
 	}
 	if info, err := os.Stat(store.Path); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("migrated store mode = %v, %v", info.Mode(), err)
+	}
+}
+
+func TestLegacyProfileRemovalTombstonePreventsReimportAndPreservesRollback(t *testing.T) {
+	t.Setenv("HCTL_DISCORD_TOKEN", "ambient-token")
+	root := t.TempDir()
+	legacy := filepath.Join(root, "config.toml")
+	data := []byte("schema_version = 1\n[discord]\ndefault_profile = 'default'\n[discord.profiles.default]\napplication_id = '111'\nbot_user_id = '222'\nallowed_user_id = '333'\nallowed_guild_id = '444'\nallowed_channel_id = '555'\n")
+	if err := os.WriteFile(legacy, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := FileProfileStore{Path: filepath.Join(root, "adapter", "profiles.toml"), LegacyPath: legacy}
+	if profile, err := store.Get("default"); err != nil || profile != fixtureProfileWithoutName() {
+		t.Fatalf("initial migration = %#v, %v", profile, err)
+	}
+	credentials := &memoryCredentials{values: map[string]string{"default": "stored-token"}, deleteErr: errors.New("keyring unavailable")}
+	factoryCalls := 0
+	dependencies := Dependencies{Profiles: store, Credentials: credentials, Discord: func(string) (Discord, error) {
+		factoryCalls++
+		return &fakeDiscord{}, nil
+	}, Locks: func(string) (ApplicationLock, error) { return &fakeLock{}, nil }}
+	if _, err := remove("default", dependencies); err == nil {
+		t.Fatal("remove unexpectedly ignored credential deletion failure")
+	}
+	if profile, err := store.Get("default"); err != nil || profile != fixtureProfileWithoutName() {
+		t.Fatalf("remove rollback did not restore migrated profile = %#v, %v", profile, err)
+	}
+	if document, _, err := store.load(); err != nil || document.LegacyRemovalTombstones["default"] {
+		t.Fatalf("remove rollback retained tombstone = %#v, %v", document, err)
+	}
+	credentials.deleteErr = nil
+	if _, err := remove("default", dependencies); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get("default"); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("removed legacy profile reimported = %v", err)
+	}
+	if _, err := status(context.Background(), "default", dependencies); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("status after remove = %v", err)
+	}
+	var output bytes.Buffer
+	runtime, err := NewRuntime(&output, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.connect(context.Background(), "default"); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("runtime after remove = %v", err)
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("removed profile reached Discord with ambient credential: %d calls", factoryCalls)
+	}
+	document, exists, err := store.load()
+	if err != nil || !exists || !document.LegacyRemovalTombstones["default"] {
+		t.Fatalf("removal tombstone = %#v, %t, %v", document, exists, err)
+	}
+	if info, err := os.Stat(store.Path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("tombstone store mode = %v, %v", info.Mode(), err)
+	}
+}
+
+func TestLegacyRemovalRollbackFailureLeavesProtectiveTombstone(t *testing.T) {
+	root := t.TempDir()
+	legacy := filepath.Join(root, "config.toml")
+	data := []byte("schema_version = 1\n[discord.profiles.default]\napplication_id = '111'\nbot_user_id = '222'\nallowed_user_id = '333'\nallowed_guild_id = '444'\nallowed_channel_id = '555'\n")
+	if err := os.WriteFile(legacy, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := FileProfileStore{Path: filepath.Join(root, "adapter", "profiles.toml"), LegacyPath: legacy}
+	if _, err := store.Get("default"); err != nil {
+		t.Fatal(err)
+	}
+	profiles := failingRestoreProfiles{store: store}
+	credentials := &memoryCredentials{values: map[string]string{"default": "stored-token"}, deleteErr: errors.New("keyring unavailable")}
+	_, err := remove("default", Dependencies{Profiles: profiles, Credentials: credentials, Discord: func(string) (Discord, error) { return &fakeDiscord{}, nil }, Locks: func(string) (ApplicationLock, error) { return &fakeLock{}, nil }})
+	if err == nil || !strings.Contains(err.Error(), "cannot restore the profile") {
+		t.Fatalf("remove rollback failure = %v", err)
+	}
+	if _, err := store.Get("default"); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("rollback failure reimported legacy profile = %v", err)
+	}
+	document, _, err := store.load()
+	if err != nil || !document.LegacyRemovalTombstones["default"] {
+		t.Fatalf("rollback-failure tombstone = %#v, %v", document, err)
 	}
 }
 

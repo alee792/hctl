@@ -172,7 +172,7 @@ func (runtime *Runtime) handleInteraction(incoming *discordgo.InteractionCreate)
 		default:
 			return
 		}
-		_, _ = runtime.writer.sendEventRegistered("control:"+incoming.ID, channeladapter.ControlRequest{SourceID: incoming.ID, Route: channeladapter.Route{Handle: incoming.ChannelID}, Message: channeladapter.MessageRef{Handle: incoming.ID}, Action: action}, "", func(frameID string, add bool) {
+		_, _ = runtime.writer.sendEventRegisteredContext(runtime.admissionContext(), "control:"+incoming.ID, channeladapter.ControlRequest{SourceID: incoming.ID, Route: channeladapter.Route{Handle: incoming.ChannelID}, Message: channeladapter.MessageRef{Handle: incoming.ID}, Action: action}, "", func(frameID string, add bool) {
 			runtime.mu.Lock()
 			if add {
 				runtime.controls[frameID] = pendingControl{interaction: incoming.Interaction, action: action}
@@ -347,7 +347,7 @@ func (runtime *Runtime) finishInteraction(pending pendingInteraction, answer cha
 	if callback != (pendingCallback{}) {
 		callbackContext, cancelCallback = context.WithCancel(context.Background())
 	}
-	eventID, err := runtime.writer.sendEventRegistered("interaction:"+pending.request.InteractionID, channeladapter.InteractionResult{InteractionID: pending.request.InteractionID, Answer: answer}, pending.hostFrameID, func(id string, add bool) {
+	eventID, err := runtime.writer.sendEventRegisteredContext(runtime.admissionContext(), "interaction:"+pending.request.InteractionID, channeladapter.InteractionResult{InteractionID: pending.request.InteractionID, Answer: answer}, pending.hostFrameID, func(id string, add bool) {
 		if callback == (pendingCallback{}) {
 			return
 		}

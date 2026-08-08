@@ -65,7 +65,11 @@ id remains the keyring account, so existing credentials are not stranded.
 Adapter-owned profiles use an owner-only file beneath the OS user configuration
 directory. When that file lacks a selected profile, the adapter can read the
 former owner-only hctl `config.toml` Discord profile shape, validate it, and
-atomically migrate only that selected non-secret profile.
+atomically migrate only that selected non-secret profile. Successful removal
+persists a per-profile tombstone in the same owner-only store so a retained
+legacy configuration cannot silently re-enroll it. A failed credential removal
+restores both the profile and its pre-removal migration eligibility; a failed
+restore leaves the tombstone in place and reports the partial failure.
 
 Setup reads a token through the inherited trusted terminal (hidden when it is
 a terminal), validates bot identity and authorization scope, and uses a

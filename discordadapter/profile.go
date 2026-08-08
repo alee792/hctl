@@ -26,8 +26,9 @@ type Profile struct {
 }
 
 type profileDocument struct {
-	SchemaVersion int                `toml:"schema_version"`
-	Profiles      map[string]Profile `toml:"profiles"`
+	SchemaVersion           int                `toml:"schema_version"`
+	Profiles                map[string]Profile `toml:"profiles"`
+	LegacyRemovalTombstones map[string]bool    `toml:"legacy_removal_tombstones,omitempty"`
 }
 
 // ProfileStore is deliberately narrower than a configuration service. The
@@ -69,6 +70,9 @@ func (store FileProfileStore) Get(id string) (Profile, error) {
 		if ok {
 			return profile, validateProfile(profile)
 		}
+		if document.LegacyRemovalTombstones[id] {
+			return Profile{}, errors.New("discord profile is not configured; run setup")
+		}
 	}
 	profile, found, err := store.loadLegacy(id)
 	if err != nil {
@@ -95,9 +99,10 @@ func (store FileProfileStore) Put(id string, profile Profile) error {
 		return err
 	}
 	if !exists {
-		document = profileDocument{SchemaVersion: 1, Profiles: map[string]Profile{}}
+		document = newProfileDocument()
 	}
 	document.Profiles[id] = profile
+	delete(document.LegacyRemovalTombstones, id)
 	return store.save(document)
 }
 
@@ -110,9 +115,13 @@ func (store FileProfileStore) Delete(id string) error {
 		return err
 	}
 	if !exists {
-		return nil
+		document = newProfileDocument()
 	}
 	delete(document.Profiles, id)
+	if document.LegacyRemovalTombstones == nil {
+		document.LegacyRemovalTombstones = map[string]bool{}
+	}
+	document.LegacyRemovalTombstones[id] = true
 	return store.save(document)
 }
 
@@ -124,15 +133,30 @@ func (store FileProfileStore) load() (profileDocument, bool, error) {
 	var document profileDocument
 	decoder := toml.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&document); err != nil || document.SchemaVersion != 1 || document.Profiles == nil {
+	if err := decoder.Decode(&document); err != nil || document.SchemaVersion != 1 {
 		return profileDocument{}, false, errors.New("Discord profile store is invalid")
+	}
+	if document.Profiles == nil {
+		document.Profiles = map[string]Profile{}
+	}
+	if document.LegacyRemovalTombstones == nil {
+		document.LegacyRemovalTombstones = map[string]bool{}
 	}
 	for id, profile := range document.Profiles {
 		if !validProfileID(id) || validateProfile(profile) != nil {
 			return profileDocument{}, false, errors.New("Discord profile store is invalid")
 		}
 	}
+	for id, removed := range document.LegacyRemovalTombstones {
+		if !validProfileID(id) || !removed {
+			return profileDocument{}, false, errors.New("Discord profile store is invalid")
+		}
+	}
 	return document, true, nil
+}
+
+func newProfileDocument() profileDocument {
+	return profileDocument{SchemaVersion: 1, Profiles: map[string]Profile{}, LegacyRemovalTombstones: map[string]bool{}}
 }
 
 func (store FileProfileStore) loadLegacy(id string) (Profile, bool, error) {

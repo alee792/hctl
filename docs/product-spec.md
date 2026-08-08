@@ -652,6 +652,74 @@ Compilation produces a deterministic apply record and source fingerprint. The
 bounded `echo` managed tool remains an hctl-provided default; it is not author
 configuration.
 
+## Process-isolated integration packages
+
+Machine-installed third-party integrations use a metadata-first package
+contract distinct from portable vendored `plugins/`. A bounded schema-version
+1 manifest supplies a stable package id and exact semantic version,
+human-readable name and description, license, source and revision provenance,
+a half-open hctl compatibility range, exact platform artifacts, and one or more
+closed versioned capability declarations. The SHA-256 of the exact manifest
+bytes is its immutable identity.
+
+Each `darwin` or `linux`, `arm64` or `amd64` artifact is a bounded `binary`,
+`tar.gz`, or `zip` with an exact size and lowercase SHA-256. Its source is
+either a normalized package-relative payload or an HTTPS URL without embedded
+credentials, query, or fragment. The manifest also pins the expected
+package-relative executable path, size, and SHA-256 after preparation. Hctl
+validates all metadata without opening an artifact, fetching a URL, loading a
+library, or running package code.
+
+Capabilities are tagged, closed schemas. Unknown types or versions reject the
+manifest without executing code. The common envelope is not an MCP runtime:
+every capability has its own narrow data or process contract. Package
+installation and enablement are operator-owned machine state bound to the
+exact manifest and artifact identities. Portable agent source cannot choose an
+install source or version, install or enable a package, grant machine trust, or
+carry a credential. The install/cache/CLI journey remains the next delivery;
+apply does not gain a network path from this contract alone.
+
+The closed installation-state schema records package id and version, manifest
+SHA-256, explicit operator trust, package-level enablement, verified artifact
+and executable hashes, and every declared capability's id, type, and version.
+It contains no path, credential, or runtime value and validates back to the
+immutable decoded manifest. Package metadata access and native-MCP selection
+use defensive copies, so caller mutation cannot pair changed executable data
+with the original manifest identity. The later installer persists this already
+defined state rather than defining another package contract.
+
+The first recognized capability is `native-mcp` version 1. It declares a
+stable native server name with collision behavior fixed to rejection, the exact
+artifact ids forming its selective runtime/staging closure, one matching
+package-relative executable, bounded literal arguments and working directory,
+literal non-secret environment defaults, required ambient environment names
+and safe descriptions without values or references, and supported Claude or
+Codex targets. Per-target startup is optional or required and trust remains the
+native project's responsibility. Package metadata cannot modify user,
+administrator, or enterprise trust.
+
+The native harness owns process lifecycle, credentials, approvals, discovery,
+calls, effects, cancellation, results, and failures. Hctl generates native
+configuration in later capability-specific work; it does not proxy,
+supervise, authorize, filter, confirm, retry, observe, or audit native MCP
+traffic. Required ambient names are diagnostic metadata rather than a
+credential channel, and resolved values never belong in generated files,
+package state, staged filesystems, or retained evidence. The value is available
+to the native harness-launched server and may be visible to the harness,
+model-accessible execution tools, and inherited native processes; this
+capability does not claim to hide it. Descriptions reject common value and
+reference syntax through a closed 1-512 character prose alphabet containing
+only ASCII letters, spaces, commas, periods, semicolons, parentheses,
+apostrophes, and hyphens and beginning with a letter. Hctl still cannot
+reliably detect an arbitrary secret disguised as allowed prose.
+
+Core depends only on validated package data and narrow capability consumers.
+Vendor packages depend inward on those contracts and run as separate
+executables. No package can contribute Go interfaces, be imported into hctl,
+register an in-process lifecycle, or require a vendor-named switch in core.
+Existing vendored Agent Plugins and their native MCP behavior remain unchanged.
+See [ADR 0030](adr/0030-use-process-isolated-integration-packages.md).
+
 ## Apply and handoff
 
 ```sh

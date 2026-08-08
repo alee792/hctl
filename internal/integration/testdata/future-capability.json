@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "id": "future-adapter",
+  "version": "1.0.0",
+  "name": "Future adapter fixture",
+  "description": "A future capability tag that this contract must reject without execution.",
+  "license": "MIT",
+  "provenance": {
+    "source": "https://example.invalid/hctl/future-adapter",
+    "revision": "fixture-v1"
+  },
+  "compatibility": {
+    "minimum": "0.1.0-dev",
+    "before": "1.0.0"
+  },
+  "artifacts": [
+    {
+      "id": "darwin-arm64",
+      "os": "darwin",
+      "architecture": "arm64",
+      "format": "binary",
+      "source": {
+        "kind": "package",
+        "path": "payload/future-adapter"
+      },
+      "size": 4096,
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "executable": {
+        "path": "bin/future-adapter",
+        "size": 4096,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    }
+  ],
+  "capabilities": [
+    {
+      "type": "channel-adapter",
+      "version": 1,
+      "id": "future"
+    }
+  ]
+}

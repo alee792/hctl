@@ -17,14 +17,24 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-No task is currently ready.
+### [GitHub #75](https://github.com/alee792/hctl/issues/75) — Define the integration package envelope and native MCP capability
+
+Complete the shared metadata-first package envelope and the first narrow
+`native-mcp` capability contract. This is the sole initial frontier for the
+[process-isolated integrations initiative](process-isolated-integrations-plan.md).
 
 ## Ordered next
 
-Do not start these concurrently. Shape each item using evidence from the
-completed predecessor.
+Follow the dependency graph below. Tasks on the same frontier may run
+concurrently only in isolated worktrees with explicit ownership; every task
+must adapt to its merged predecessors.
 
-No additional item is ordered.
+1. After #75: #76, #65, and #82.
+2. After #65 and #76: #66. After #76 and #82: #83.
+3. After #65 and #66: #67. After #82 and #83: #84.
+4. After #67: #71. After #84: #85.
+5. After #71: #72.
+6. After all implementation issues: verify epics #74, #64, and #81.
 
 ## Completed
 

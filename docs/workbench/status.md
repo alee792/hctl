@@ -34,7 +34,9 @@ The repository contains a small Go CLI that:
 - keeps one apply record, migrates legacy projection records, and removes the
   obsolete duplicated runtime manifest;
 - discovers, prepares, validates, and exposes TypeScript, Python, and Go tool
-  functions beside the bounded built-in `echo` tool through stdio MCP;
+  functions beside the bounded built-in `echo` tool through stdio MCP, plus an
+  optional default-off `record-friction` built-in that retains private,
+  bounded, agent-namespaced local notes without reading them back;
 - discovers a bounded `connections/github.md` description and exposes three
   fixed anonymous public GitHub repository and issue operations through the
   same managed MCP server without contacting GitHub during apply;

@@ -202,6 +202,7 @@ type Project struct {
 	Sources           []SourceRecord
 	SourceFingerprint string
 	MaxToolInput      int
+	FrictionNotes     bool
 }
 
 // Load reads an agent project. If workspace is omitted, the agent source is
@@ -281,7 +282,7 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 	if err != nil {
 		return nil, fmt.Errorf("instructions: %w", err)
 	}
-	description, instructions, err := parseInstructions(instructionSource)
+	description, frictionNotes, instructions, err := parseInstructions(instructionSource)
 	if err != nil {
 		return nil, fmt.Errorf("instructions: %w", err)
 	}
@@ -319,7 +320,7 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 	if err != nil {
 		return nil, err
 	}
-	toolNames := map[string]bool{"echo": true}
+	toolNames := map[string]bool{"echo": true, "record-friction": true}
 	for _, source := range tools.Sources {
 		toolNames[source.Name] = true
 	}
@@ -394,6 +395,7 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 		Sources:           sources,
 		SourceFingerprint: fingerprint,
 		MaxToolInput:      echoMaxInputBytes,
+		FrictionNotes:     frictionNotes,
 	}, nil
 }
 
@@ -756,15 +758,17 @@ func reservedHarnessPath(harness, path string) bool {
 	return path == ".codex/config.toml" || path == ".codex/agents" || strings.HasPrefix(path, ".codex/agents/")
 }
 
-func parseInstructions(content []byte) (string, []byte, error) {
+func parseInstructions(content []byte) (string, bool, []byte, error) {
 	if !utf8.Valid(content) {
-		return "", nil, errors.New("file must be valid UTF-8")
+		return "", false, nil, errors.New("file must be valid UTF-8")
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	if !scanner.Scan() || strings.TrimSuffix(scanner.Text(), "\r") != "---" {
-		return "", nil, errors.New("file must start with YAML frontmatter")
+		return "", false, nil, errors.New("file must start with YAML frontmatter")
 	}
 	description := ""
+	frictionNotes := false
+	frictionNotesSeen := false
 	closed := false
 	for scanner.Scan() {
 		line := strings.TrimSuffix(scanner.Text(), "\r")
@@ -773,29 +777,50 @@ func parseInstructions(content []byte) (string, []byte, error) {
 			break
 		}
 		key, value, ok := strings.Cut(line, ":")
-		if !ok || strings.TrimSpace(key) != "description" || description != "" {
-			return "", nil, errors.New("frontmatter supports one plain description only")
+		if !ok {
+			return "", false, nil, errors.New("frontmatter supports description and optional friction-notes only")
 		}
-		description = strings.TrimSpace(value)
-		if description == "" || len(description) > 1024 {
-			return "", nil, errors.New("frontmatter description must be non-empty and bounded")
+		switch strings.TrimSpace(key) {
+		case "description":
+			if description != "" {
+				return "", false, nil, errors.New("frontmatter description is duplicated")
+			}
+			description = strings.TrimSpace(value)
+			if description == "" || len(description) > 1024 {
+				return "", false, nil, errors.New("frontmatter description must be non-empty and bounded")
+			}
+		case "friction-notes":
+			if frictionNotesSeen {
+				return "", false, nil, errors.New("frontmatter friction-notes is duplicated")
+			}
+			frictionNotesSeen = true
+			switch strings.TrimSpace(value) {
+			case "true":
+				frictionNotes = true
+			case "false":
+				frictionNotes = false
+			default:
+				return "", false, nil, errors.New("frontmatter friction-notes must be true or false")
+			}
+		default:
+			return "", false, nil, errors.New("frontmatter supports description and optional friction-notes only")
 		}
 	}
 	if !closed || description == "" {
-		return "", nil, errors.New("frontmatter requires one plain description")
+		return "", false, nil, errors.New("frontmatter requires one plain description")
 	}
 	var body []string
 	for scanner.Scan() {
 		body = append(body, strings.TrimSuffix(scanner.Text(), "\r"))
 	}
 	if err := scanner.Err(); err != nil {
-		return "", nil, errors.New("cannot read instructions")
+		return "", false, nil, errors.New("cannot read instructions")
 	}
 	trimmed := strings.TrimSpace(strings.Join(body, "\n"))
 	if trimmed == "" {
-		return "", nil, errors.New("markdown body must be non-empty")
+		return "", false, nil, errors.New("markdown body must be non-empty")
 	}
-	return description, []byte(trimmed + "\n"), nil
+	return description, frictionNotes, []byte(trimmed + "\n"), nil
 }
 
 func loadSubagents(root string) ([]Subagent, error) {

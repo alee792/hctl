@@ -61,3 +61,27 @@ func TestEnsurePrivateDirCreatesAndVerifiesRealDirectories(t *testing.T) {
 		t.Fatalf("symlinked private directory verified: %v", err)
 	}
 }
+
+func TestWriteAtomicExclusiveDoesNotReplace(t *testing.T) {
+	root := t.TempDir()
+	if err := WriteAtomicExclusive(root, "state/one.json", []byte("first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAtomicExclusive(root, "state/one.json", []byte("second\n"), 0o600); err == nil || !strings.Contains(err.Error(), "replace existing") {
+		t.Fatalf("exclusive write error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "state", "one.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "first\n" {
+		t.Fatalf("existing file changed to %q", data)
+	}
+	info, err := os.Stat(filepath.Join(root, "state", "one.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("exclusive file mode = %v", info.Mode().Perm())
+	}
+}

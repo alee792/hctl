@@ -1,0 +1,353 @@
+# Remote components design notes
+
+- Status: the outcome-level direction is accepted in `docs/vision.md`; the
+  implementation mechanics in this note remain ideation
+- Started: 2026-08-08
+- Purpose: retain product-model questions and proposed journeys before they
+  are split into GitHub issues or accepted in the product specification and
+  ADRs
+
+## Why this note exists
+
+The desired product should let a non-developer add an MCP connection, Agent
+Plugin, or Agent Skill that already exists elsewhere, apply the agent, and
+interact with it through the selected native harness. The current prototype
+can consume local source, but its acquisition and update journeys are either
+absent or provider-shaped. Broad discussion can obscure the distinct package,
+runtime, credential, and ownership questions, so this note keeps them separate.
+
+## Current contract and implementation
+
+- An agent project is one explicitly selected directory. `instructions.md` is
+  its required conventional root file; there is no authored hctl manifest.
+- Commands currently receive that directory as the positional `AGENT`. The
+  workspace is selected independently and defaults to the agent directory.
+  Directory placement never implicitly selects a parent repository or an
+  `agents/` directory.
+- Root Agent Skills are already consumed from local `skills/<name>/`
+  directories.
+- Agent Plugins are already consumed from local `plugins/<storage-name>/`
+  directories. Hctl validates the publisher-authored `plugin.json`, imports
+  skills, and maps supported `mcp.json` servers into native harness
+  configuration.
+- The current GitHub connection source and legacy managed implementation are
+  provider-specific. The accepted replacement selects an operator-installed
+  official GitHub MCP package and emits native Claude or Codex configuration.
+- Hctl does not currently acquire or update Agent Plugins or Agent Skills.
+
+## Proposed filesystem model
+
+### Agent root
+
+Use convention and explicit selection together:
+
+- The destination agent root is the exact `AGENT` directory supplied to the
+  command, consistent with `hctl apply AGENT`.
+- The required `instructions.md` proves that the selected directory is an
+  agent project.
+- A convenience default to `.` could be considered only when `.` itself is a
+  valid agent root. Hctl should not search ancestors or infer a parent
+  `agents/` directory.
+
+### Imported component root
+
+Resolve a source to one exact component directory:
+
+- `plugin.json` identifies an Agent Plugin root.
+- `SKILL.md` identifies an Agent Skill root.
+- A source that points at a monorepo needs an explicit subdirectory. Hctl
+  should not recursively search a remote tree and guess which package the user
+  intended.
+- Acquisition copies the complete selected component directory after bounded
+  validation. It must not reconstruct a plugin from selected manifest fields
+  or flatten a skill into a second inventory.
+
+### MCP connection source
+
+The proposed authoring surface is `connections/<name>.md`:
+
+- The filename supplies the stable connection name.
+- Frontmatter supplies machine-readable transport and target parameters.
+- The optional Markdown body supplies trusted, model-facing usage context. It
+  is not sent to the upstream MCP server and is not a credential channel.
+- Credential values never appear in the file. The initial generic native path
+  should cover credential-free remote MCP and operator-installed stdio MCP.
+  Authenticated managed remote MCP remains dependent on the accepted gateway,
+  credential-isolation, and OAuth work.
+
+The exact frontmatter schema is deliberately unsettled. It must distinguish at
+least an installed `native-mcp` package capability from a remote
+`streamable-http` target without introducing provider names into hctl core.
+
+## Genericity boundary
+
+Standards-compatible MCP should not require one hctl adapter per vendor. Hctl
+can validate a generic connection declaration and compile it to the selected
+harness's native MCP configuration. The native harness then owns MCP process
+lifecycle, authentication, approval, calls, and effects.
+
+A vendor adapter is still appropriate when the upstream does not expose MCP or
+when hctl deliberately owns a managed runtime contract, such as a channel
+transport. That is a different product boundary from consuming a native MCP
+server.
+
+The GitHub connection should become a fixture or consumer of the generic path,
+not the template for another provider switch. Existing issue #67 needs to be
+reconciled with this direction before implementation.
+
+## Agent Plugin publisher and consumer distinction
+
+The Agent Plugins v1 specification defines a directory package, its
+publisher-authored `plugin.json`, and conventional component locations. It
+does not define a universal install command, marketplace, registry,
+distribution protocol, or update workflow.
+
+Therefore:
+
+- A publisher creates `plugin.json` and the complete plugin directory.
+- A consumer acquires that complete directory; they should not write a new
+  `plugin.json` merely to consume the plugin.
+- `plugins/` vendoring is hctl's current dependency decision, not a requirement
+  of the Agent Plugins specification.
+- Manual replacement is the only current hctl update path. That is a product
+  gap, not prescribed behavior from the specification.
+
+Current documentation is technically consistent with the accepted vendored
+slice but can too easily be read as a plugin-authoring journey. Future cleanup
+should explicitly show publisher versus consumer roles, say that acquisition
+and update semantics are client-owned, and describe hctl's supported consumer
+workflow.
+
+## Proposed acquisition and update properties
+
+Plugins and Skills are both directory dependencies and should share one small
+acquisition primitive rather than duplicate download, pinning, drift, and
+replacement logic.
+
+Candidate supported sources are:
+
+- an exact local directory;
+- a Git repository plus exact commit and optional component subdirectory; and
+- a pinned HTTPS archive plus expected digest and optional component
+  subdirectory.
+
+Unresolved questions include whether friendly release tags are accepted only
+as inputs that immediately resolve to immutable commits or digests, and
+whether marketplace-specific locators belong in the first slice.
+
+The workflow should eventually provide explicit add, status, update, and
+remove operations. Provenance belongs in hctl-owned dependency metadata or a
+lock record, not in `plugin.json` or `SKILL.md`. It should retain source,
+component path, immutable revision or digest, and installed content identity.
+Updates should be deliberate and reviewable and must never resolve a moving
+reference implicitly during `apply`.
+
+Whether `apply` may fetch an already locked immutable component into a local
+cache remains open. The current command is not globally offline: authored-tool
+preparation runs frozen or locked Deno, uv, and Go dependency operations that
+may use the network on a cold cache. The accepted offline property is narrower:
+plugin schema validation, installed integration lookup, and connection
+discovery do not acquire or update remote packages.
+
+The repository currently contains a `skills-lock.json` written by an external
+skill-installation workflow. Its origin/path/hash shape is useful evidence but
+is not yet an hctl contract and should not be adopted silently.
+
+## Existing related issues
+
+- #67: emit the official GitHub MCP server through native Claude and Codex
+  configuration; should reuse the generic connection path.
+- #74: install process-isolated third-party integrations without rebuilding
+  hctl; provides the package foundation for installed executable MCP servers.
+- #77: managed MCP gateway.
+- #78: credential isolation.
+- #80: brokered remote HTTP MCP and OAuth.
+
+No issue has yet been created from this note. The attempted GitHub app write on
+2026-08-08 was denied before issue creation, and the CLI fallback was stopped
+when the discussion returned to product alignment.
+
+## Tentative issue shape after alignment
+
+1. An epic for remote connections and reusable dependencies.
+2. Generic filesystem-authored MCP connections.
+3. One pinned directory-dependency acquisition and provenance primitive.
+4. Agent Plugin add, status, update, remove, and consumer documentation.
+5. Agent Skill add, status, update, and remove.
+
+These should remain `needs-triage` until the root selection, source locator,
+pinning, lock/provenance, drift, and credential boundaries above are accepted.
+
+## Questions to settle next
+
+1. Should add commands always require positional `AGENT`, or may they default
+   to `.` when `.` is already a valid agent root?
+2. What is the smallest readable connection frontmatter that covers installed
+   stdio MCP and credential-free remote Streamable HTTP MCP?
+3. Should connection prose become a bounded generated instruction section, or
+   does each native harness offer a better model-facing connection-description
+   field?
+4. Which immutable remote locator forms are required for the first Plugin and
+   Skill acquisition slice?
+5. Where should source provenance and local content identity be recorded so it
+   is portable enough for another machine but remains separate from upstream
+   manifests?
+
+## Implementation-ticket gate
+
+The following product decisions materially change public source, commands, or
+safety behavior and should be accepted before implementation tickets are
+marked `ready-for-agent`.
+
+### First delivery boundary
+
+Decide whether the first delivery ends at explicit dependency selection,
+generic native MCP configuration, `hctl apply`, and normal native harness
+interaction. The recommended boundary excludes marketplace browsing,
+automatic updates, managed remote MCP, OAuth, and deployment changes. Existing
+image staging remains the separate deployment seam.
+
+Do not describe all of `apply` as offline. Decide instead whether Plugin and
+Skill contents are committed beneath the agent root before apply, or whether
+apply may fetch an already locked immutable dependency into a verified cache.
+In either model, apply must not select a newer version, resolve an unpinned
+moving reference, grant machine-wide integration trust, or contact a runtime
+MCP endpoint.
+
+### Command targets and names
+
+Confirm that add, status, update, and remove commands always receive an exact
+positional `AGENT`; callers in the agent root use `.` explicitly. Decide how a
+destination name is chosen and how collisions fail:
+
+- a connection needs an explicit name because a remote MCP endpoint may expose
+  no stable package identity;
+- a Skill can use its validated Agent Skills `name`; and
+- a Plugin can derive a storage-safe name from its manifest or require an
+  explicit destination name because its current directory name is only a
+  storage identity.
+
+No operation should silently replace an existing destination.
+
+### Generic connection schema and rendering
+
+Accept the exact initial `connections/<name>.md` frontmatter. At minimum it
+must discriminate `type: mcp` and exactly one of:
+
+- an installed package and `native-mcp` capability; or
+- a credential-free remote Streamable HTTP URL.
+
+Decide whether non-secret arguments, environment-variable names, and literal
+headers are allowed in the first schema. Credential values, provider names,
+tool catalogs, tool filters, and approval grants should remain absent.
+
+Confirm how the Markdown body reaches the model. The recommended
+harness-neutral behavior is one bounded generated instruction section naming
+the connection and including its nonempty prose. It is not sent upstream and
+does not rewrite MCP tool descriptions.
+
+### Remote source locator
+
+Select the initial source forms. A small generic first delivery could support
+an existing local directory and an HTTPS Git repository plus a required ref
+and optional component subdirectory. Add resolves a branch or tag to an exact
+commit; the lock records both the requested tracking ref and resolved commit.
+Pinned HTTPS archives and marketplace-specific locators can remain later
+additions unless a required real package is not available through Git.
+
+Choose one materialization model:
+
+- `add` copies the full component into portable source, so apply needs no
+  component network access; or
+- `add` records an exact lock and apply fetches only missing immutable content
+  into a verified cache, similar to existing locked language dependency
+  preparation.
+
+The second model gives a better clean-clone journey and avoids committing
+third-party bytes, but requires cache, fetch, trust, and staging contracts. A
+later apply may work offline from cache, but cold apply is network-dependent.
+
+Decide whether private Git sources may use the operator's existing Git
+credential setup in the first delivery. No credential value or helper output
+may enter agent source, diagnostics, or retained state.
+
+### Portable provenance record
+
+Choose one root-level, committed lock format shared by acquired Plugins and
+Skills. A candidate is `hctl.lock.json`, containing only dependency kind,
+destination, original source, requested ref, resolved immutable revision,
+component subdirectory, and installed tree identity. It must not become a
+second component inventory or be required for manually copied local
+dependencies.
+
+Decide whether the existing externally produced `skills-lock.json` is migrated,
+left independent, or deliberately unsupported. Do not silently claim its
+schema.
+
+### Trust and executable content
+
+Treat remote acquisition as code installation. Skills may contain scripts and
+Plugins may contain MCP executables or other runnable resources. Decide the
+operator confirmation contract for an interactive terminal and the explicit
+noninteractive equivalent. The confirmation should show the exact source,
+resolved revision, component path, identity, and detected executable-capable
+contents. Acquisition must retain existing path, symlink, size, and file-count
+bounds and publish the destination atomically.
+
+### Local edits, update, and removal
+
+Choose whether acquired directories are immutable managed dependencies or
+ordinary editable vendored source. The recommended filesystem-forward behavior
+is:
+
+- apply uses the current local files;
+- status reports drift from the acquired tree identity;
+- update and remove refuse to overwrite or delete drifted contents unless the
+  operator uses an explicit destructive override; and
+- update is always requested explicitly and atomically replaces the directory
+  only after validation.
+
+Also decide whether changing the tracked ref is part of `update` or a separate
+operation. No background or apply-time update is allowed.
+
+### Migration and overlap
+
+Decide whether the current body-only `connections/github.md` is migrated with
+a compatibility warning or deliberately broken before publication. The
+generic connection implementation should supersede its provider-specific
+parser and generator. Issue #67 then becomes the installed GitHub package
+fixture/specialization rather than a separate connection architecture.
+
+Keep Plugin-bundled MCP separate: adding a Plugin preserves and consumes its
+publisher-authored `mcp.json`; it does not synthesize a second connection file.
+Adding one standalone MCP endpoint or installed server creates a connection.
+
+### Acceptance journeys
+
+Define credential-free evidence before implementation:
+
+1. Add a Skill from a temporary remote Git repository and apply it from a
+   separate workspace.
+2. Add a complete Plugin containing a Skill and fake MCP server, then prove
+   both are consumed without reconstructing the manifest.
+3. Configure two provider-neutral MCP fixtures through the same generic
+   connection path, one installed stdio and one remote Streamable HTTP.
+4. Prove apply never resolves or upgrades a moving dependency reference. If
+   cold locked fetch is accepted, prove exact identity verification, cache
+   reuse, and an explicit offline failure mode; otherwise prove add/update are
+   the only component-networked phases.
+5. Prove collision, unsafe archive or tree content, identity mismatch, and
+   locally drifted update/remove fail without partial source mutation.
+
+## Vision impact
+
+`docs/vision.md` now records the accepted outcome-level direction: an author
+can assemble a portable agent project from existing Agent Skills, Agent
+Plugins, and MCP servers without writing provider-specific protocol adapters.
+Acquired dependencies are explicit, pinned, and inspectable, while native
+harnesses continue to own unmanaged MCP runtime behavior and hctl does not
+become a marketplace, automatic updater, or replacement model loop.
+
+The vision should not specify commands, frontmatter, source locator syntax,
+lockfile fields, or drift behavior. Those details belong in the product
+specification and accepted ADRs after the choices above are made.

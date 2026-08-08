@@ -292,6 +292,10 @@ package command and no portability claim for raw workspace caches.
 Product naming, the concrete secretless-broker backend, and proposal review UX
 are also intentionally unresolved.
 
+Generic MCP connections and remote Agent Plugin and Agent Skill acquisition,
+provenance, trust, and update questions are tracked in the
+[remote components design notes](remote-components.md).
+
 ## Current design frontier
 
 Portable source, independent workspaces, authored tools, native inherited

@@ -470,8 +470,9 @@ delivered-interaction restore, ambiguous no-retry delivery, child failure,
 negotiated frame/outstanding and fixed queue bounds, stream-safe
 credential-redacted stderr, signal-aware operation process-tree cancellation,
 real-terminal foreground ownership and restoration, startup pipe backpressure,
-non-evicting reply-target saturation, interprocess-safe selection updates, and
-bounded forced cleanup. #85 removes
+pending recovery responses behind replay, literal overlapping conversations,
+MaxResident=1 native thread resume, non-evicting reply-target saturation,
+interprocess-safe selection updates, and bounded forced cleanup. #85 removes
 the retained old code and Discord-only root dependencies.
 
 The transition continues to honor an explicit profile, the established

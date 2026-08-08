@@ -262,11 +262,11 @@ func TestStartupReplayQueueAndReplyTargetsFailWithoutEviction(t *testing.T) {
 		t.Fatal("startup replay byte ceiling was not enforced")
 	}
 	queue = frameQueue{bytes: channeladapter.MaxQueuedBytes - limits.MaxFrameBytes - 1}
-	if !queue.canAdmit(limits) {
+	if !queue.canAdmit(limits, false) {
 		t.Fatal("startup replay rejected a safely reserved frame")
 	}
 	queue.bytes++
-	if queue.canAdmit(limits) {
+	if queue.canAdmit(limits, false) {
 		t.Fatal("startup replay did not reserve the negotiated maximum frame")
 	}
 
@@ -296,12 +296,16 @@ type startupGateDecoder struct{ reads atomic.Int32 }
 
 func (decoder *startupGateDecoder) Read(channeladapter.Direction) (channeladapter.Envelope, error) {
 	if decoder.reads.Add(1) == 1 {
-		return channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.connection.1", Payload: &channeladapter.Connection{State: channeladapter.ConnectionReady}}, nil
+		return startupInbound("adapter.inbound.1"), nil
 	}
 	return channeladapter.Envelope{}, io.EOF
 }
 
 func (*startupGateDecoder) SetMaxFrameBytes(int) error { return nil }
+
+func startupInbound(id string) channeladapter.Envelope {
+	return channeladapter.Envelope{ProtocolVersion: 1, ID: id, Payload: &channeladapter.InboundMessage{SourceID: "source-1", Route: channeladapter.Route{Handle: "route_1"}, ConversationID: "conversation-1", SurfaceKind: channeladapter.SurfaceDirect, SurfaceKey: strings.Repeat("a", 64), PrincipalKey: strings.Repeat("b", 64), Message: channeladapter.MessageRef{Handle: "message_1"}, Author: channeladapter.Author{Handle: "author_1"}, Text: "hello"}}
+}
 
 func TestStartupReplayStopsDecoderAtNegotiatedCapacity(t *testing.T) {
 	running, _, _ := regressionRuntime(1)
@@ -351,6 +355,52 @@ func TestStartupReplayStopsDecoderAtNegotiatedCapacity(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "recovery remained at bounded queue capacity") {
 		t.Fatalf("startup capacity deadline error = %v", err)
 	}
+}
+
+type sequenceDecoder struct {
+	reads  atomic.Int32
+	frames []channeladapter.Envelope
+}
+
+func (decoder *sequenceDecoder) Read(channeladapter.Direction) (channeladapter.Envelope, error) {
+	index := int(decoder.reads.Add(1)) - 1
+	if index >= len(decoder.frames) {
+		return channeladapter.Envelope{}, io.EOF
+	}
+	return decoder.frames[index], nil
+}
+
+func (*sequenceDecoder) SetMaxFrameBytes(int) error { return nil }
+
+func TestStartupReplayReadsPendingResponseBehindNonEventsAndReplay(t *testing.T) {
+	running, _, _ := regressionRuntime(1)
+	event := startupInbound("adapter.inbound.1")
+	response := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.receipt.1", CorrelationID: "host.recovery.1", Payload: &channeladapter.InteractionReceipt{InteractionID: "interaction.1", Disposition: channeladapter.EffectExact}}
+	decoder := &sequenceDecoder{frames: []channeladapter.Envelope{
+		event,
+		{ProtocolVersion: 1, ID: "adapter.connection.1", Payload: &channeladapter.Connection{State: channeladapter.ConnectionReady}},
+		event,
+		response,
+	}}
+	running.decoder = decoder
+	running.recoveryDone = make(chan struct{})
+	running.readWake = make(chan struct{}, 1)
+	responses := make(chan channeladapter.Envelope, 1)
+	running.pending[response.CorrelationID] = responses
+	go running.readLoop()
+	select {
+	case got := <-responses:
+		if got.ID != response.ID {
+			t.Fatalf("recovery response = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup replay blocked a pending recovery response")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := decoder.reads.Load(); got != 4 {
+		t.Fatalf("startup response path reads=%d; want bounded response frame only", got)
+	}
+	close(running.recoveryDone)
 }
 
 func TestOperationModesPreserveHumanInputAndCancelTheProcessTree(t *testing.T) {
@@ -406,7 +456,7 @@ printf '{"schema_version":1,"operation":"%s","profile_id":"default","status":"%s
 }
 
 func TestOperationOwnsAndRestoresForegroundTerminal(t *testing.T) {
-	if os.Getenv("HCTL_FOREGROUND_TERMINAL_HELPER") == "1" {
+	if os.Getenv("HCTL_FOREGROUND_TERMINAL_HELPER") == "read" {
 		executable := os.Getenv("HCTL_FOREGROUND_ADAPTER")
 		result, err := RunOperation(context.Background(), integration.ChannelAdapterSetup, Launch{Command: executable, Arguments: []string{"setup"}, WorkingDirectory: filepath.Dir(executable)}, AdapterEnvironment(""), os.Stdin, os.Stderr)
 		if err != nil || result.Operation != "setup" {
@@ -443,7 +493,7 @@ func TestOperationOwnsAndRestoresForegroundTerminal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, script, arguments...)
-	command.Env = append(os.Environ(), "HCTL_FOREGROUND_TERMINAL_HELPER=1", "HCTL_FOREGROUND_ADAPTER="+adapter, "HCTL_TEST_EXECUTABLE="+executable)
+	command.Env = append(os.Environ(), "HCTL_FOREGROUND_TERMINAL_HELPER=read", "HCTL_FOREGROUND_ADAPTER="+adapter, "HCTL_TEST_EXECUTABLE="+executable)
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -458,6 +508,113 @@ func TestOperationOwnsAndRestoresForegroundTerminal(t *testing.T) {
 	command.Stdout, command.Stderr = &output, &output
 	if err := command.Run(); err != nil || !strings.Contains(output.String(), "foreground-terminal-restored") {
 		t.Fatalf("pseudo-terminal operation = %v, output=%q", err, output.String())
+	}
+}
+
+type promptOutput struct {
+	mu     sync.Mutex
+	data   bytes.Buffer
+	prompt chan struct{}
+	once   sync.Once
+}
+
+func (output *promptOutput) Write(data []byte) (int, error) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	written, err := output.data.Write(data)
+	if bytes.Contains(output.data.Bytes(), []byte("Discord bot token:")) {
+		output.once.Do(func() { close(output.prompt) })
+	}
+	return written, err
+}
+
+func (output *promptOutput) String() string {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return output.data.String()
+}
+
+func TestOfficialDiscordSetupInterruptRestoresForegroundTerminal(t *testing.T) {
+	if os.Getenv("HCTL_FOREGROUND_TERMINAL_HELPER") == "interrupt" {
+		executable := os.Getenv("HCTL_FOREGROUND_ADAPTER")
+		_, err := RunOperation(context.Background(), integration.ChannelAdapterSetup, Launch{Command: executable, Arguments: []string{"setup", "--profile", "default"}, WorkingDirectory: filepath.Dir(executable)}, AdapterEnvironment(""), os.Stdin, os.Stderr)
+		if err == nil {
+			t.Fatal("foreground Discord setup ignored terminal interrupt")
+		}
+		owner, ownerErr := unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP)
+		if ownerErr != nil || owner != syscall.Getpgrp() {
+			t.Fatalf("interrupted terminal owner = %d, %v; process group=%d", owner, ownerErr, syscall.Getpgrp())
+		}
+		if _, err := fmt.Fprintln(os.Stdout, "foreground-interrupt-restored"); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if testing.Short() {
+		t.Skip("builds and interrupts the separate Discord adapter")
+	}
+	script, err := exec.LookPath("script")
+	if err != nil {
+		t.Skip("script utility is required for a real pseudo-terminal regression")
+	}
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate repository")
+	}
+	repository := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", "..", ".."))
+	root := t.TempDir()
+	adapter := filepath.Join(root, "hctl-discord")
+	build := exec.Command("go", "build", "-o", adapter, "./cmd/hctl-discord")
+	build.Dir = filepath.Join(repository, "discordadapter")
+	build.Env = append(os.Environ(), "GOWORK=off")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build official Discord adapter: %v\n%s", err, output)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := filepath.Join(root, "runner")
+	writeFile(t, runner, "#!/bin/sh\nexec \"$HCTL_TEST_EXECUTABLE\" -test.run=^TestOfficialDiscordSetupInterruptRestoresForegroundTerminal$\n", 0o755)
+	var arguments []string
+	if runtime.GOOS == "darwin" {
+		arguments = []string{"-q", "/dev/null", runner}
+	} else {
+		arguments = []string{"-qefc", runner, "/dev/null"}
+	}
+	command := exec.Command(script, arguments...)
+	command.Env = append(os.Environ(), "HCTL_FOREGROUND_TERMINAL_HELPER=interrupt", "HCTL_FOREGROUND_ADAPTER="+adapter, "HCTL_TEST_EXECUTABLE="+executable)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
+	command.Stdin = reader
+	observed := &promptOutput{prompt: make(chan struct{})}
+	command.Stdout, command.Stderr = observed, observed
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-observed.prompt:
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatalf("official Discord setup did not prompt: %q", observed.String())
+	}
+	if _, err := writer.Write([]byte{3}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil || !strings.Contains(observed.String(), "foreground-interrupt-restored") {
+			t.Fatalf("interrupted official Discord setup = %v, output=%q", err, observed.String())
+		}
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatalf("official Discord setup ignored Ctrl-C: %q", observed.String())
 	}
 }
 

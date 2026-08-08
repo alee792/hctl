@@ -102,6 +102,7 @@ type Runtime struct {
 	err          error
 	done         chan struct{}
 	recoveryDone chan struct{}
+	readWake     chan struct{}
 	closeOnce    sync.Once
 }
 
@@ -119,8 +120,10 @@ type queuedFrame struct {
 	size  int
 }
 type frameQueue struct {
-	frames []queuedFrame
-	bytes  int
+	frames   []queuedFrame
+	bytes    int
+	events   int
+	eventIDs map[string]int
 }
 type synchronizedWriter struct {
 	mu     sync.Mutex
@@ -181,7 +184,7 @@ func New(config Config) (*Runtime, error) {
 			return controller.New(ctx, config, delivery)
 		}
 	}
-	return &Runtime{config: config, writeGate: make(chan struct{}, 1), pending: map[string]chan channeladapter.Envelope{}, interactions: map[string]interactionTarget{}, targets: map[string]target{}, surfaces: map[string]channeladapter.Surface{}, events: map[string]eventReceipt{}, done: make(chan struct{}), recoveryDone: make(chan struct{})}, nil
+	return &Runtime{config: config, writeGate: make(chan struct{}, 1), pending: map[string]chan channeladapter.Envelope{}, interactions: map[string]interactionTarget{}, targets: map[string]target{}, surfaces: map[string]channeladapter.Surface{}, events: map[string]eventReceipt{}, done: make(chan struct{}), recoveryDone: make(chan struct{}), readWake: make(chan struct{}, 1)}, nil
 }
 
 func (runtime *Runtime) Run(ctx context.Context) error {
@@ -373,7 +376,7 @@ func (runtime *Runtime) readLoop() {
 			}
 			continue
 		}
-		if !readPending && (recovered || deferred.canAdmit(runtime.limits)) {
+		if !readPending && (recovered || deferred.canAdmit(runtime.limits, runtime.hasPendingResponse())) {
 			decodePermit <- struct{}{}
 			readPending = true
 		}
@@ -382,6 +385,7 @@ func (runtime *Runtime) readLoop() {
 			case <-recoveryDone:
 				recovered = true
 				recoveryDone = nil
+			case <-runtime.readWake:
 			case <-runtime.config.after(channeladapter.DeliveryTimeout):
 				runtime.fail(errors.New("channel-adapter startup recovery remained at bounded queue capacity"))
 				return
@@ -416,9 +420,9 @@ func (runtime *Runtime) readLoop() {
 	}
 }
 
-func (queue *frameQueue) canAdmit(limits channeladapter.Limits) bool {
-	frameLimit := min(channeladapter.MaxQueuedFrames, limits.MaxOutstanding)
-	return len(queue.frames) < frameLimit && queue.bytes+limits.MaxFrameBytes+1 <= channeladapter.MaxQueuedBytes
+func (queue *frameQueue) canAdmit(limits channeladapter.Limits, responsePending bool) bool {
+	fixedCapacity := len(queue.frames) < channeladapter.MaxQueuedFrames && queue.bytes+limits.MaxFrameBytes+1 <= channeladapter.MaxQueuedBytes
+	return fixedCapacity && (queue.events < limits.MaxOutstanding || responsePending)
 }
 
 func (queue *frameQueue) add(frame channeladapter.Envelope, limits channeladapter.Limits) error {
@@ -427,8 +431,20 @@ func (queue *frameQueue) add(frame channeladapter.Envelope, limits channeladapte
 		return err
 	}
 	size := len(encoded) + 1
-	if len(queue.frames) >= min(channeladapter.MaxQueuedFrames, limits.MaxOutstanding) || queue.bytes+size > channeladapter.MaxQueuedBytes {
+	if len(queue.frames) >= channeladapter.MaxQueuedFrames || queue.bytes+size > channeladapter.MaxQueuedBytes {
 		return errors.New("channel-adapter startup replay exceeded bounded queue capacity")
+	}
+	if adapterEvent(frame) {
+		if queue.eventIDs == nil {
+			queue.eventIDs = map[string]int{}
+		}
+		if queue.eventIDs[frame.ID] == 0 {
+			if queue.events >= limits.MaxOutstanding {
+				return errors.New("channel-adapter startup replay exceeded negotiated event capacity")
+			}
+			queue.events++
+		}
+		queue.eventIDs[frame.ID]++
 	}
 	queue.frames = append(queue.frames, queuedFrame{frame: frame, size: size})
 	queue.bytes += size
@@ -442,7 +458,38 @@ func (queue *frameQueue) pop() (channeladapter.Envelope, bool) {
 	first := queue.frames[0]
 	queue.frames = queue.frames[1:]
 	queue.bytes -= first.size
+	if adapterEvent(first.frame) {
+		queue.eventIDs[first.frame.ID]--
+		if queue.eventIDs[first.frame.ID] == 0 {
+			delete(queue.eventIDs, first.frame.ID)
+			queue.events--
+		}
+	}
 	return first.frame, true
+}
+
+func adapterEvent(frame channeladapter.Envelope) bool {
+	switch frame.Payload.(type) {
+	case channeladapter.InboundMessage, *channeladapter.InboundMessage,
+		channeladapter.ControlRequest, *channeladapter.ControlRequest,
+		channeladapter.InteractionResult, *channeladapter.InteractionResult:
+		return true
+	default:
+		return false
+	}
+}
+
+func (runtime *Runtime) hasPendingResponse() bool {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return len(runtime.pending) > 0
+}
+
+func (runtime *Runtime) wakeReader() {
+	select {
+	case runtime.readWake <- struct{}{}:
+	default:
+	}
 }
 
 func (runtime *Runtime) routeResponse(frame channeladapter.Envelope) bool {
@@ -731,6 +778,7 @@ func (runtime *Runtime) commandID(ctx context.Context, id string, payload channe
 	}
 	runtime.pending[id] = response
 	runtime.mu.Unlock()
+	runtime.wakeReader()
 	defer func() { runtime.mu.Lock(); delete(runtime.pending, id); runtime.mu.Unlock() }()
 	envelope := channeladapter.Envelope{ProtocolVersion: channeladapter.ProtocolVersion, ID: id, Payload: payload}
 	if err := runtime.acquireWrite(ctx, timeout); err != nil {

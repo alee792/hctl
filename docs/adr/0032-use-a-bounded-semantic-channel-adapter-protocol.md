@@ -87,7 +87,9 @@ receives no stdin. Status and remove retain the ordinary 30-second bound.
 For a controlling terminal, hctl gives the adapter's private process group
 foreground ownership before exec and restores the original foreground group on
 every exit path. Caller cancellation or an interrupt kills the complete
-private process group and waits only through the forced-reap bound.
+private process group and waits only through the forced-reap bound. The
+official adapter leaves terminal interrupt signals at their default disposition
+during blocking setup prompts, so Ctrl-C terminates that foreground group.
 
 ## Runtime handshake and semantic messages
 
@@ -215,11 +217,15 @@ directions, while `max_outstanding` bounds live correlations, retained event
 receipts, remembered reply targets, startup surfaces, and newly admitted
 surfaces. Reply-target saturation rejects new input before controller admission
 and never evicts an older accepted target. Startup replay is independently
-bounded to the negotiated outstanding limit, 64 frames, and 8 MiB before
-durable recovery opens admission. The host reserves room for one negotiated
-maximum-size frame before starting each read. At capacity it stops reading so
-the adapter pipe applies backpressure until recovery completes or its bounded
-deadline expires; it does not consume and reject an overflow frame.
+bounded to 64 frames and 8 MiB before durable recovery opens admission, while
+unique unacknowledged semantic events are also bounded to the negotiated
+outstanding limit. Connection/diagnostic frames and same-id event replay remain
+inside the fixed queue bounds without consuming another event slot. The host
+reserves room for one negotiated maximum-size frame before starting each read.
+At capacity it stops reading so the adapter pipe applies backpressure until
+recovery completes or its bounded deadline expires. A bounded response-read
+path remains open for a pending recovery correlation, so connection state or
+event replay cannot deadlock the required receipt.
 Admission waits only to its operation deadline and never creates an unbounded
 goroutine or map.
 

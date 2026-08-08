@@ -906,7 +906,9 @@ no stdin; status and remove remain bounded to 30 seconds. Interrupt or caller
 cancellation kills the complete private operation process group and bounds
 reaping. For a controlling terminal, the adapter process group owns the
 foreground during the operation and hctl restores the original group on every
-exit path. The generic per-agent/channel selection store locks the complete
+exit path. The official adapter retains default terminal-interrupt behavior
+during blocking setup prompts, so Ctrl-C terminates that foreground group. The
+generic per-agent/channel selection store locks the complete
 read-modify-write transaction across processes before atomically replacing its
 owner-only file.
 
@@ -944,11 +946,14 @@ Ordinary commands and deliveries have 30-second deadlines, attachments 60
 seconds, and graceful shutdown five seconds before forced tree cleanup.
 The narrowed frame ceiling applies to reads and writes, and the narrowed
 outstanding ceiling bounds correlations and retained route/event state.
-Startup recovery separately admits no more than the negotiated outstanding
-limit, 64 frames, or 8 MiB before replay. It reserves a negotiated maximum frame
-before reading and applies pipe backpressure at capacity until recovery or its
-deadline. Target saturation rejects new input without evicting an older
-accepted reply target.
+Startup recovery separately admits at most 64 frames and 8 MiB before replay,
+with unique unacknowledged semantic events additionally capped by the
+negotiated outstanding limit. Connection/diagnostic frames and same-id replay
+remain inside the fixed queue without taking another event slot. It reserves a
+negotiated maximum frame before reading and applies pipe backpressure at
+capacity until recovery or its deadline, while retaining a bounded read path
+for a pending recovery response. Target saturation rejects new input without
+evicting an older accepted reply target.
 
 An adapter keeps an event id and exact bytes stable until hctl acknowledges a
 durable acceptance, duplicate, or rejection. Exact same-content replay is

@@ -248,8 +248,11 @@ package_root="$(mktemp -d)/hctl-discord"
   --target "$(go env GOOS)-$(go env GOARCH)" \
   --output "$package_root"
 ./hctl integration install "$package_root" --trust operator
-hctl channel setup discord ~/agents/reviewer
-hctl run ~/agents/reviewer --workspace ~/Code/example --harness codex
+./hctl channel setup discord ~/agents/reviewer
+./hctl channel status discord ~/agents/reviewer
+./hctl run ~/agents/reviewer --workspace ~/Code/example --harness codex
+# When retiring the enrollment:
+./hctl channel remove discord ~/agents/reviewer
 ```
 
 Setup stores non-secret profile metadata in the OS-standard hctl configuration

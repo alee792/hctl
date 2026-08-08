@@ -31,12 +31,15 @@ func TestCredentialFreeInstalledAdapterConversationAndIsolation(t *testing.T) {
 	writeFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Adapter host fixture.\n---\n\nReply briefly.\n", 0o644)
 	writeFile(t, filepath.Join(source, "channels", "discord.md"), "---\nmode: ambient\n---\n\nReply to relevant messages.\n", 0o644)
 	harness := filepath.Join(t.TempDir(), "codex")
+	harnessLog := filepath.Join(t.TempDir(), "harness.log")
+	t.Setenv("HCTL_HARNESS_LOG", harnessLog)
 	writeFile(t, harness, `#!/bin/sh
 if [ -n "${HCTL_DISCORD_TOKEN-}" ]; then exit 90; fi
 while IFS= read -r line; do
  case "$line" in
   *'"method":"initialize"'*) echo '{"id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.1"}}' ;;
-  *'"method":"thread/start"'*|*'"method":"thread/resume"'*) echo '{"id":2,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"},"sandbox":{"type":"readOnly"},"approvalPolicy":"never"}}' ;;
+  *'"method":"thread/start"'*) printf 'thread/start\n' >> "$HCTL_HARNESS_LOG"; echo '{"id":2,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"},"sandbox":{"type":"readOnly"},"approvalPolicy":"never"}}' ;;
+  *'"method":"thread/resume"'*) printf 'thread/resume\n' >> "$HCTL_HARNESS_LOG"; echo '{"id":2,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"},"sandbox":{"type":"readOnly"},"approvalPolicy":"never"}}' ;;
   *'"method":"turn/start"'*)
     echo '{"id":3,"result":{"turn":{"id":"01922222-2222-7222-8222-222222222222","items":[],"status":"inProgress"}}}'
     echo '{"method":"item/agentMessage/delta","params":{"threadId":"01911111-1111-7111-8111-111111111111","turnId":"01922222-2222-7222-8222-222222222222","itemId":"reply","delta":"hello back"}}'
@@ -104,6 +107,13 @@ done
 	if strings.Contains(audit.String(), secret) {
 		t.Fatal("adapter credential reached retained diagnostics")
 	}
+	methods, err := os.ReadFile(harnessLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starts, resumes := bytes.Count(methods, []byte("thread/start\n")), bytes.Count(methods, []byte("thread/resume\n")); starts != 2 || resumes != 1 {
+		t.Fatalf("MaxResident=1 harness lifecycle starts=%d resumes=%d log=%q", starts, resumes, methods)
+	}
 	if err := filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
@@ -115,6 +125,102 @@ done
 		return readErr
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInstalledAdapterRunsConcurrentConversations(t *testing.T) {
+	if os.Getenv("HCTL_FAKE_ADAPTER") == "1" {
+		t.Skip("parent-only test")
+	}
+	source := t.TempDir()
+	writeFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Concurrent adapter fixture.\n---\n\nReply briefly.\n", 0o644)
+	writeFile(t, filepath.Join(source, "channels", "discord.md"), "---\nmode: ambient\n---\n\nReply to relevant messages.\n", 0o644)
+	harnessLog := filepath.Join(t.TempDir(), "harness.log")
+	t.Setenv("HCTL_HARNESS_LOG", harnessLog)
+	harness := filepath.Join(t.TempDir(), "codex")
+	writeFile(t, harness, `#!/bin/sh
+if mkdir "$HCTL_HARNESS_LOG.claim" 2>/dev/null; then
+  thread_id=01911111-1111-7111-8111-111111111111
+  turn_id=01922222-2222-7222-8222-222222222222
+else
+  thread_id=01933333-3333-7333-8333-333333333333
+  turn_id=01944444-4444-7444-8444-444444444444
+fi
+while IFS= read -r line; do
+ case "$line" in
+  *'"method":"initialize"'*) echo '{"id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.1"}}' ;;
+  *'"method":"thread/start"'*) printf 'thread/start\n' >> "$HCTL_HARNESS_LOG"; printf '{"id":2,"result":{"thread":{"id":"%s"},"sandbox":{"type":"readOnly"},"approvalPolicy":"never"}}\n' "$thread_id" ;;
+  *'"method":"turn/start"'*)
+    printf 'turn/start\n' >> "$HCTL_HARNESS_LOG"
+    remaining=300
+    while [ "$(grep -c '^turn/start$' "$HCTL_HARNESS_LOG")" -lt 2 ]; do
+      remaining=$((remaining - 1)); [ "$remaining" -gt 0 ] || exit 91
+      sleep 0.01
+    done
+    printf '{"id":3,"result":{"turn":{"id":"%s","items":[],"status":"inProgress"}}}\n' "$turn_id"
+    printf '{"method":"item/agentMessage/delta","params":{"threadId":"%s","turnId":"%s","itemId":"reply","delta":"hello back"}}\n' "$thread_id" "$turn_id"
+    printf '{"method":"turn/completed","params":{"threadId":"%s","turn":{"id":"%s","items":[],"status":"completed"}}}\n' "$thread_id" "$turn_id" ;;
+ esac
+done
+`, 0o755)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, store := installFakeAdapter(t, self)
+	if _, err := setup.Apply(p, self); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordConsumption(context.Background(), launch.PackageID, p.AgentID, p.Name, []string{launch.CapabilityID}); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "concurrent")
+	environment := secureenv.Replace(AdapterEnvironment(""), map[string]string{"HCTL_FAKE_ADAPTER": "1", "HCTL_FAKE_SCENARIO": "concurrent", "HCTL_FAKE_MARKER": marker})
+	var audit bytes.Buffer
+	running, err := New(Config{Project: p, Driver: codex.New(harness), ProfileID: "default", Environment: environment, Launch: launch, TurnTimeout: 5 * time.Second, IdleTimeout: time.Minute, MaxResident: 2, MaxActive: 2, Executable: self, Audit: &audit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- running.Run(ctx) }()
+	deadline := time.Now().Add(10 * time.Second)
+	var earlyErr error
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		select {
+		case earlyErr = <-done:
+			deadline = time.Now()
+		default:
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		cancel()
+		methods, _ := os.ReadFile(harnessLog)
+		t.Fatalf("concurrent conversations did not complete: %v runtime=%v audit=%s harness=%q", err, earlyErr, audit.String(), methods)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("concurrent adapter host did not shut down")
+	}
+	methods, err := os.ReadFile(harnessLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starts, turns := bytes.Count(methods, []byte("thread/start\n")), bytes.Count(methods, []byte("turn/start\n")); starts != 2 || turns != 2 {
+		t.Fatalf("concurrent harness lifecycle starts=%d overlapping_turns=%d log=%q", starts, turns, methods)
 	}
 }
 
@@ -197,6 +303,14 @@ func TestFakeAdapterProcess(t *testing.T) {
 	}
 	inbound := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.inbound.1", Payload: channeladapter.InboundMessage{SourceID: "source-1", Route: surface.Route, ConversationID: surface.ConversationID, SurfaceKind: surface.Kind, SurfaceKey: surface.SurfaceKey, PrincipalKey: surface.PrincipalKey, Message: channeladapter.MessageRef{Handle: "message_1"}, Author: channeladapter.Author{Handle: "author_1", Label: "Operator"}, Text: "hello"}}
 	switch scenario {
+	case "concurrent":
+		second := channeladapter.InboundMessage{SourceID: "source-2", Route: channeladapter.Route{Handle: "route_2"}, ConversationID: "fixture-conversation-2", SurfaceKind: channeladapter.SurfaceDirect, SurfaceKey: strings.Repeat("c", 64), PrincipalKey: strings.Repeat("d", 64), Message: channeladapter.MessageRef{Handle: "message_2"}, Author: channeladapter.Author{Handle: "author_2", Label: "Operator"}, Text: "second"}
+		if err := encoder.Write(inbound, channeladapter.FromAdapter); err != nil {
+			os.Exit(85)
+		}
+		if err := encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.inbound.2", Payload: second}, channeladapter.FromAdapter); err != nil {
+			os.Exit(85)
+		}
 	case "recovery":
 		if err := encoder.Write(inbound, channeladapter.FromAdapter); err != nil {
 			os.Exit(85)
@@ -227,12 +341,12 @@ func TestFakeAdapterProcess(t *testing.T) {
 		}
 		switch payload := frame.Payload.(type) {
 		case *channeladapter.EventAck:
-			if frame.CorrelationID == inbound.ID && !replayed {
+			if scenario == "" && frame.CorrelationID == inbound.ID && !replayed {
 				replayed = true
 				_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.connection.2", Payload: channeladapter.Connection{State: channeladapter.ConnectionReconnecting, Attempt: 1}}, channeladapter.FromAdapter)
 				_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.connection.3", Payload: channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 1}}, channeladapter.FromAdapter)
 				_ = encoder.Write(inbound, channeladapter.FromAdapter)
-			} else if frame.CorrelationID == inbound.ID && payload.Disposition != "duplicate" {
+			} else if scenario == "" && frame.CorrelationID == inbound.ID && payload.Disposition != "duplicate" {
 				os.Exit(86)
 			}
 		case *channeladapter.Activity:
@@ -244,6 +358,7 @@ func TestFakeAdapterProcess(t *testing.T) {
 				continue
 			}
 			if payload.Text != "hello back" || payload.Route.Handle != "route_1" && payload.Route.Handle != "route_2" {
+				_, _ = fmt.Fprintf(os.Stderr, "unexpected delivery text=%q route=%q\n", payload.Text, payload.Route.Handle)
 				os.Exit(87)
 			}
 			result := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.delivery.1", CorrelationID: frame.ID, Payload: channeladapter.DeliveryResult{Disposition: channeladapter.EffectExact, Message: &channeladapter.MessageRef{Handle: "reply_1"}}}
@@ -251,6 +366,12 @@ func TestFakeAdapterProcess(t *testing.T) {
 				os.Exit(88)
 			}
 			deliveries++
+			if scenario == "concurrent" {
+				if deliveries == 2 {
+					_ = os.WriteFile(os.Getenv("HCTL_FAKE_MARKER"), []byte("concurrent\n"), 0o600)
+				}
+				continue
+			}
 			switch deliveries {
 			case 1:
 				second := channeladapter.InboundMessage{SourceID: "source-2", Route: channeladapter.Route{Handle: "route_2"}, ConversationID: "fixture-conversation-2", SurfaceKind: channeladapter.SurfaceDirect, SurfaceKey: strings.Repeat("c", 64), PrincipalKey: strings.Repeat("d", 64), Message: channeladapter.MessageRef{Handle: "message_2"}, Author: channeladapter.Author{Handle: "author_2", Label: "Operator"}, Text: "second"}

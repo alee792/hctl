@@ -398,7 +398,9 @@ continuation is retained in the operator audit and manager diagnostics, but
 never enters Discord dispatch content or starts the stale native process.
 The synchronous audit receives every such failure while in-memory manager
 evidence retains only a fixed recent tail, so repeated retries cannot grow
-runtime state without bound.
+runtime state without bound. The audit sink is installed before durable
+worktree reconciliation, so startup diagnostics are also emitted completely
+and in order before the same retained-tail bound is applied.
 Credential-free harness fixtures separately prove Claude's one-time
 project-server approval, Codex project/server/tool approval, and bounded
 unsupported MCP protocol or server-version diagnostics.

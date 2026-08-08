@@ -212,6 +212,12 @@ func newManagerConfigured(ctx context.Context, p *project.Project, driver harnes
 		store: store, ctx: managerCtx, cancel: cancel,
 		workers: map[string]*managedConversation{}, elevating: map[string]bool{}, continuing: map[string]Lifecycle{}, resumeQueued: map[string]bool{}, expiryStops: map[string]chan struct{}{}, done: make(chan struct{}), stopped: make(chan struct{}),
 	}
+	if configure != nil {
+		if err := configure(manager); err != nil {
+			manager.Close()
+			return nil, err
+		}
+	}
 	if err := manager.reconcileWorkspaces(managerCtx); err != nil {
 		cancel()
 		return nil, err
@@ -233,12 +239,6 @@ func newManagerConfigured(ctx context.Context, p *project.Project, driver harnes
 		}
 		if pending, ok, loadErr := coordinator.Pending(); loadErr == nil && ok && (pending.Phase == interaction.PhaseRequested || pending.Phase == interaction.PhaseRendered) {
 			expiries = append(expiries, interactionExpiry{conversation: conversation, expiresAt: pending.ExpiresAt})
-		}
-	}
-	if configure != nil {
-		if err := configure(manager); err != nil {
-			manager.Close()
-			return nil, err
 		}
 	}
 	for _, expiry := range expiries {

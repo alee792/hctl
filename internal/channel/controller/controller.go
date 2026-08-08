@@ -178,15 +178,13 @@ func New(ctx context.Context, config Config, delivery Delivery) (*Controller, er
 		return nil
 	}
 	workspaceManager, _ := worktree.NewWithNativeMCP(controllerCtx, config.Project, config.Executable, config.NativeMCP)
-	var managed *dispatch.Manager
-	var configured interactionManager
 	configure := func(manager *dispatch.Manager) error {
 		if err := manager.ConfigureDiagnosticSink(func(diagnostic string) {
 			_, _ = fmt.Fprintf(c.audit, "%s %s\n", c.auditPrefix, diagnostic)
 		}); err != nil {
 			return err
 		}
-		configured = manager
+		c.manager = manager
 		c.interactionMgr = manager
 		c.adapter = config.Interactions
 		c.driver = config.Driver
@@ -200,18 +198,13 @@ func New(ctx context.Context, config Config, delivery Delivery) (*Controller, er
 	}
 	var err error
 	if workspaceManager != nil {
-		managed, err = dispatch.NewManagerWithWorkspaceAndLimitsConfigured(controllerCtx, config.Project, config.Driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, workspaceManager, configure)
+		_, err = dispatch.NewManagerWithWorkspaceAndLimitsConfigured(controllerCtx, config.Project, config.Driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, workspaceManager, configure)
 	} else {
-		managed, err = dispatch.NewManagerWithLimitsConfigured(controllerCtx, config.Project, config.Driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, configure)
+		_, err = dispatch.NewManagerWithLimitsConfigured(controllerCtx, config.Project, config.Driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, configure)
 	}
 	if err != nil {
 		cancel()
 		return nil, err
-	}
-	c.manager = managed
-	c.interactionMgr = configured
-	for _, diagnostic := range managed.Diagnostics() {
-		_, _ = fmt.Fprintf(c.audit, "%s worktree reconciliation: %s\n", c.auditPrefix, diagnostic)
 	}
 	return c, nil
 }

@@ -2070,6 +2070,50 @@ func TestManagerDiagnosticsRetainBoundedTailWhileAuditReceivesEveryFailure(t *te
 	}
 }
 
+func TestManagerConstructionAuditsEveryStartupDiagnosticBeforeRetainingTail(t *testing.T) {
+	p := testProject(t)
+	state, err := session.Load(p.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := maxManagerDiagnostics + 7
+	provider := &reconcilingWorkspaceProvider{
+		base: p, assignments: map[string]worktree.Assignment{}, inspections: map[string]worktree.Inspection{}, inspectErrs: map[string]error{}, retireErrs: map[string]error{},
+	}
+	expected := make([]string, 0, total)
+	for index := range total {
+		conversationID := fmt.Sprintf("startup-%02d", index)
+		conversation, err := state.GetOrCreate(p.AgentID, "claude", conversationID, p.SourceFingerprint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assignment := worktree.Assignment{Root: filepath.Join(t.TempDir(), conversationID), Branch: "hctl/test/" + conversationID}
+		conversation.WorkspaceRoot = assignment.Root
+		conversation.WorktreeBranch = assignment.Branch
+		reason := fmt.Sprintf("startup diagnostic %02d", index)
+		provider.assignments[conversationID] = assignment
+		provider.inspections[conversationID] = worktree.Inspection{Reason: reason}
+		expected = append(expected, fmt.Sprintf("worktree %s preserved: %s", assignment.Root, reason))
+	}
+	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+		t.Fatal(err)
+	}
+	var audit diagnosticRecorder
+	manager, err := NewManagerWithWorkspaceAndLimitsConfigured(context.Background(), p, newManagerDriver(), time.Minute, time.Hour, 1, 1, func(string, Event) error { return nil }, provider, func(manager *Manager) error {
+		return manager.ConfigureDiagnosticSink(audit.add)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	if got := strings.Split(audit.string(), "\n"); !reflect.DeepEqual(got, expected) {
+		t.Fatalf("startup audit = %#v, want every ordered diagnostic %#v", got, expected)
+	}
+	if got, want := manager.Diagnostics(), expected[total-maxManagerDiagnostics:]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("retained startup diagnostics = %#v, want tail %#v", got, want)
+	}
+}
+
 func TestManagerRestartClaimsDurableAnsweredContinuationOnce(t *testing.T) {
 	p := testProject(t)
 	ref := conversationRef{agentID: p.AgentID, harness: "codex", id: "discord-guild", fingerprint: p.SourceFingerprint}

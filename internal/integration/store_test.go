@@ -348,7 +348,7 @@ func TestStoreUpdateRequiresExactIntentAndPreservesOldCache(t *testing.T) {
 	if _, err := store.Install(context.Background(), InstallOptions{Source: secondRoot, Trust: TrustOperator}); err == nil || !strings.Contains(err.Error(), "use update") {
 		t.Fatalf("implicit drift error = %v", err)
 	}
-	updated, err := store.Install(context.Background(), InstallOptions{Source: secondRoot, Trust: TrustOperator, Update: "fixture-package"})
+	updated, err := store.Install(context.Background(), InstallOptions{Source: secondRoot, Trust: TrustOperator, UpdatePackageID: "fixture-package"})
 	if err != nil {
 		t.Fatalf("update error = %v", err)
 	}

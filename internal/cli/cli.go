@@ -135,7 +135,7 @@ func runIntegration(args []string, output, stderr io.Writer) error {
 		if fs.NArg() != 0 {
 			return errors.New("unexpected integration update arguments")
 		}
-		installed, err := store.Install(ctx, integration.InstallOptions{Source: args[2], Trust: integration.InstallationTrust(*trust), Update: args[1]})
+		installed, err := store.Install(ctx, integration.InstallOptions{Source: args[2], Trust: integration.InstallationTrust(*trust), UpdatePackageID: args[1]})
 		if err != nil {
 			return err
 		}

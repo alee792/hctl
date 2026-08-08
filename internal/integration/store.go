@@ -50,9 +50,9 @@ type Store struct {
 
 // InstallOptions makes machine trust and replacement intent explicit.
 type InstallOptions struct {
-	Source string
-	Trust  InstallationTrust
-	Update string
+	Source          string
+	Trust           InstallationTrust
+	UpdatePackageID string
 }
 
 // Installed describes one verified catalog entry without credential or
@@ -122,8 +122,8 @@ func (s *Store) Install(ctx context.Context, options InstallOptions) (Installed,
 		if err != nil {
 			return err
 		}
-		if options.Update != "" {
-			if options.Update != manifest.ID {
+		if options.UpdatePackageID != "" {
+			if options.UpdatePackageID != manifest.ID {
 				return errors.New("integration update source id does not match the selected package")
 			}
 			if !found {

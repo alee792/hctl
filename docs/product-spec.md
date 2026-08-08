@@ -350,10 +350,13 @@ Every local or headless harness process receives the ambient variable from its
 own operator-controlled launch environment. A resumed process, a replacement
 after hibernation, a restart, and each concurrent conversation therefore see
 the environment present when that native process starts; hctl neither snapshots
-the value during apply nor propagates an in-process credential update. Missing
-PAT or native trust leaves the optional GitHub server unavailable while the
-native session and unrelated managed tools remain usable. By contrast, a
-missing, disabled, untrusted, incompatible, or corrupt installed package fails
+the value during apply nor propagates an in-process credential update. A
+missing PAT, Claude project-server approval, or Codex server/tool approval
+leaves the optional GitHub server unavailable while the already-trusted native
+session and unrelated managed tools remain usable. Codex project trust is
+different: it is a prerequisite for launching the native project, so its
+absence fails the session rather than only disabling GitHub. A missing,
+disabled, untrusted, incompatible, or corrupt installed package likewise fails
 offline setup verification before hctl starts a headless process, rather than
 launching against stale executable configuration.
 

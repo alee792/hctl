@@ -382,10 +382,15 @@ retained evidence. Agents without the connection neither resolve nor stage the
 package. The superseded anonymous managed GitHub client and tool definitions
 have been removed; the managed server, authored tools, channel input, and
 plugin-native MCP behavior remain unchanged. Credential-free #71 acceptance
-now proves local discovery and calls, bounded missing-auth and native-trust
-failure, repeated and concurrent native launches, ambient inheritance through
-headless Claude and Codex sessions, and the fact that a read-only workspace
-does not constrain simulated native GitHub effects. A deterministic eligible
+now proves local discovery and calls, bounded missing-auth and optional native
+server/tool approval failure, repeated and concurrent native launches, ambient
+inheritance through headless Claude and Codex sessions, and the fact that a
+read-only workspace does not constrain simulated native GitHub effects. The
+headless fixtures launch the installed fake native server from generated
+configuration and expose credential-free `github-unavailable` categories plus
+a successful managed echo through ordinary bounded harness output. They also
+prove that missing Codex project trust fails the harness launch instead of
+being misclassified as optional GitHub unavailability. A deterministic eligible
 tracker fixture verifies the maintainer's claim-first guidance without claiming
 hctl authorization. The complete documented operator journey remains #72.
 Every hctl-owned scheduled or channel session open, channel reopen, and native

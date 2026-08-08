@@ -1,6 +1,7 @@
 # ADR 0033: Package Discord as an external channel adapter
 
 - Status: accepted
+- Runtime integration: external host wired on 2026-08-08
 - Specializes: [ADR 0032](0032-use-a-bounded-semantic-channel-adapter-protocol.md)
 - Extracts transport ownership from: [ADR 0028](0028-use-a-conversational-discord-gateway-channel.md)
 - Preserves interaction behavior from: [ADR 0025](0025-render-discord-input-with-bounded-native-components.md)
@@ -10,9 +11,9 @@
 The official Discord integration is now built as `hctl-discord`, a separate Go
 module and executable. It owns DiscordGo, Gateway and REST payloads, Discord
 rendering, application locks, credentials, and non-secret profiles. Hctl does
-not import the module. The two processes will communicate only through the
-bounded `hctl/channeladapter` version-1 protocol once the generic process host
-is added.
+not import the module. The two processes now communicate only through the
+bounded `hctl/channeladapter` version-1 protocol and exact installed package
+resolution.
 
 ## Decision
 
@@ -54,16 +55,32 @@ protocol output, and only then emits shutdown completion. The per-application
 lock remains held through the bounded admitted-work drain and is released on
 every shutdown return path.
 
-Hctl will continue to own portable participation policy, controller and
+Discord derives the same stable conversation and owner identities formerly
+used by the in-process controller, but sends only the conversation id and
+SHA-256 owner keys across the protocol. The guild route and the first
+authorized DM route are adapter-owned profile state and are advertised as
+startup surfaces. Persisting that first DM route precedes its admission, so a
+restart can reattach its durable interaction callbacks before Gateway event
+replay. Restore registers callback ownership without posting a duplicate
+Discord message.
+
+Hctl continues to own portable participation policy, controller and
 dispatcher state, model execution, sessions, worktrees, capacity, hibernation,
-and durable generic interaction state. This issue deliberately does not wire
-the external process into those owners or remove the in-process adapter; those
-are the process-host and final-cutover deliveries.
+and durable generic interaction state. The process host now wires the external
+adapter into those owners. The final dependency cutover remains separate.
 
 ## Credentials and profiles
 
 The keyring service remains exactly `hctl.discord`, and the non-secret profile
 id remains the keyring account, so existing credentials are not stranded.
+Hctl retains only the transport-neutral binding from an agent and channel kind
+to that opaque profile id in an owner-only selection file. Successful external
+setup records the binding, while remove clears it only if it still selects the
+removed profile. This store contains no Discord identity, routing, or credential
+fields. Its complete read-modify-write transaction is serialized by an
+owner-only interprocess lock, so concurrent setup/remove processes cannot lose
+an unrelated selection despite atomic file replacement.
+
 Adapter-owned profiles use an owner-only file beneath the OS user configuration
 directory. When that file lacks a selected profile, the adapter can read the
 former owner-only hctl `config.toml` Discord profile shape, validate it, and
@@ -116,9 +133,9 @@ evidence.
 - DiscordGo, WebSocket, keyring, and Discord transport tests now have an
   independently buildable dependency home, while the old root imports remain
   temporarily until cutover.
-- Installing this package does not activate Discord. The later process host
-  must select the verified capability and preserve the existing literal hctl
-  channel journey before the old adapter can be removed.
+- Installing this package does not activate Discord. `hctl channel setup` and
+  `hctl run` select its verified capability explicitly; the old adapter is not
+  a production fallback and remains only until the final dependency cutover.
 - Release automation can build exact platform packages without rebuilding the
   hctl executable. A multi-platform release is a set of exact platform package
   manifests; apply and capability resolution remain offline.

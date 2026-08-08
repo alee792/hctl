@@ -23,6 +23,7 @@ type Profile struct {
 	AllowedUserID    string `toml:"allowed_user_id"`
 	AllowedGuildID   string `toml:"allowed_guild_id"`
 	AllowedChannelID string `toml:"allowed_channel_id"`
+	DirectChannelID  string `toml:"direct_channel_id,omitempty"`
 }
 
 type profileDocument struct {
@@ -245,6 +246,9 @@ func validateProfile(profile Profile) error {
 		if !snowflake(value) {
 			return fmt.Errorf("Discord profile %s id is invalid", label)
 		}
+	}
+	if profile.DirectChannelID != "" && !snowflake(profile.DirectChannelID) {
+		return errors.New("Discord profile direct channel id is invalid")
 	}
 	if len(profile.BotName) > 100 || strings.ContainsAny(profile.BotName, "\r\n\x00") {
 		return errors.New("Discord bot name is invalid")

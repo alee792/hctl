@@ -392,16 +392,34 @@ identity, authorization ID, profile, or credential. It joins the source
 fingerprint, and apply adds its policy plus the exact `HCTL_NO_REPLY` control
 result to generated native instructions.
 
-`hctl channel setup discord` enrolls an existing bot. Local non-secret profiles
-live in owner-only TOML beneath the OS user configuration directory; tokens live
-in the OS credential store. Deployment selects an owner-only mounted config and
-injects `HCTL_DISCORD_TOKEN`. Every run validates the token's application and bot
-IDs against the selected profile before opening an outbound Gateway connection,
-and removes the token from every child-process environment.
+`hctl channel setup discord` resolves the one installed and enabled `discord`
+channel-adapter capability and runs its exact setup mode. The external adapter
+owns enrollment, non-secret profile data, legacy profile migration, bot
+identity validation, and the `hctl.discord` OS credential-store entry. Status
+and remove use its exact bounded modes. Deployment may inject
+`HCTL_DISCORD_TOKEN`; hctl passes that opaque value only to the selected
+adapter and removes it from every other child environment.
+
+Profile selection remains `--profile`, then the existing
+`HCTL_DISCORD_PROFILE`, then the persisted non-secret per-agent channel
+selection, a legacy per-agent/default selector during the transition, and
+finally `default`. Successful setup records only the agent, channel kind, and
+opaque profile id in hctl's owner-only selection store; successful remove
+clears that binding only when it still names the removed profile. Hctl reads no
+Discord profile fields or credential through either lookup. Operators can roll
+back with a previous hctl binary while the old implementation and legacy
+configuration remain through the final dependency cutover; the new production
+path itself never falls back silently.
 
 `hctl run` auto-applies a missing or stale generated harness integration, then
-serves the authorized user in one guild channel and DM. Each surface has
-independent durable dispatcher state. A transport-neutral channel controller
+resolves the exact apply-time package selection and launches the external
+adapter automatically. Missing, disabled, incompatible, ambiguous, or stale
+selection fails with an install, enable, setup, or reapply remedy and never
+falls back to the retained in-process code. The adapter serves the authorized
+user in one guild channel and DM. Each surface has
+independent durable dispatcher state. It is explicitly direct or shared and
+core receives only its stable conversation id plus hashed owner keys; vendor
+ids and payloads remain outside core. A transport-neutral channel controller
 owns surface registration, pending-turn correlation, complete-response
 buffering and control-result handling, typing readiness, terminal
 classification, status/reset delegation, and dispatcher lifecycle. The Discord
@@ -882,6 +900,18 @@ feature and limit negotiation may only narrow the manifest declaration.
 Every mode runs from the verified package root; no manifest field selects the
 agent workspace or an ambient working directory.
 
+Channel setup retains trusted terminal input and has a separate ten-minute
+human enrollment deadline. Remove also retains trusted input, while status has
+no stdin; status and remove remain bounded to 30 seconds. Interrupt or caller
+cancellation kills the complete private operation process group and bounds
+reaping. For a controlling terminal, the adapter process group owns the
+foreground during the operation and hctl restores the original group on every
+exit path. The official adapter retains default terminal-interrupt behavior
+during blocking setup prompts, so Ctrl-C terminates that foreground group. The
+generic per-agent/channel selection store locks the complete
+read-modify-write transaction across processes before atomically replacing its
+owner-only file.
+
 The channel-adapter protocol is one bounded bidirectional JSONL stream over an
 exact verified child process's stdin/stdout. The adapter opens with
 hello; hctl selects one compatible version plus profile, feature, limit, and
@@ -896,7 +926,9 @@ and non-secret profile data.
 Frames contain only closed semantic messages: opaque route/message/author
 handles, normalized inbound text and attachment descriptors, authorized
 status/reset requests and redacted results, activity and reply/edit/reaction
-intents, the existing bounded interactive request and normalized answer,
+intents, the existing bounded interactive request, an
+exact/ambiguous/failed render receipt, recovery-only restore, and normalized
+answer,
 attachment transfer authorization and bounded base64 chunks, exact/ambiguous/
 failed dispositions, connection lifecycle, classified diagnostics, event
 acknowledgement, and shutdown. Vendor payloads and SDK objects, credentials,
@@ -912,6 +944,16 @@ queue to 64 frames and 8 MiB, retained stderr to 64 KiB, and a
 setup/status/remove result to 16 KiB. Negotiation may lower those values.
 Ordinary commands and deliveries have 30-second deadlines, attachments 60
 seconds, and graceful shutdown five seconds before forced tree cleanup.
+The narrowed frame ceiling applies to reads and writes, and the narrowed
+outstanding ceiling bounds correlations and retained route/event state.
+Startup recovery separately admits at most 64 frames and 8 MiB before replay,
+with unique unacknowledged semantic events additionally capped by the
+negotiated outstanding limit. Connection/diagnostic frames and same-id replay
+remain inside the fixed queue without taking another event slot. It reserves a
+negotiated maximum frame before reading and applies pipe backpressure at
+capacity until recovery or its deadline, while retaining a bounded read path
+for a pending recovery response. Target saturation rejects new input without
+evicting an older accepted reply target.
 
 An adapter keeps an event id and exact bytes stable until hctl acknowledges a
 durable acceptance, duplicate, or rejection. Exact same-content replay is
@@ -922,6 +964,16 @@ results, disconnects, deadlines, and post-write child exits are ambiguous and
 use the controller's existing uncertain/no-retry behavior. Malformed,
 oversized, unknown, wrong-direction, or uncorrelated protocol data terminates
 only the owning adapter runtime.
+
+At startup, the adapter advertises its bounded stable surfaces before the
+controller is constructed. Hctl reattaches durable interaction state before
+adapter replay: pending renders are issued once, while previously delivered
+interactions are restored without posting duplicate vendor UI. Shutdown stops
+admission, retires interaction UI, asks the adapter to drain, then applies
+independently bounded process-tree and controller cleanup. Retained stderr is
+capped by emitted sanitized bytes, credential-redacted across arbitrary write
+boundaries, control-cleaned, and protocol-shaped output is suppressed before
+terminating only that adapter runtime.
 
 Setup, status, and remove use exact package modes. Secret entry and credential
 storage occur inside the trusted adapter using its inherited operator terminal
@@ -943,10 +995,12 @@ amd64/arm64 package metadata that installs and selectively stages through the
 shared package store. Credential-free fakes prove its four modes and runtime
 protocol. See [ADR 0033](adr/0033-package-discord-as-an-external-channel-adapter.md).
 
-The current production `hctl run` path is not routed to that executable yet.
-The generic process host and final dependency cutover remain separate
-deliveries; until then the old in-process runtime remains the shipped path and
-the root module temporarily retains its existing Discord dependencies.
+The production `hctl channel setup|status|remove discord` and `hctl run` paths
+now select the exact installed executable and use the generic bounded process
+host. Apply records the exact package/capability consumption; a later package
+change requires reapply before launch. The retained in-process implementation
+is not a fallback. Its code and Discord-only root dependencies remain
+temporarily for rollback until the separate final-cutover delivery.
 
 Core depends only on validated package data and narrow capability consumers.
 Vendor packages depend inward on those contracts and run as separate

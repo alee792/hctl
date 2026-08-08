@@ -382,6 +382,24 @@ func TestLegacyProfileMigrationPreservesExactIdentity(t *testing.T) {
 	}
 }
 
+func TestProfilePersistsAuthorizedDirectSurfaceForRecovery(t *testing.T) {
+	root := t.TempDir()
+	store := FileProfileStore{Path: filepath.Join(root, "profiles.toml")}
+	profile := fixtureProfile()
+	profile.DirectChannelID = "777"
+	if err := store.Put("default", profile); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Get("default")
+	if err != nil || loaded.DirectChannelID != "777" {
+		t.Fatalf("direct recovery profile = %#v, %v", loaded, err)
+	}
+	surfaces := discordSurfaces(loaded)
+	if len(surfaces) != 2 || surfaces[0].Kind != channeladapter.SurfaceShared || surfaces[1].Kind != channeladapter.SurfaceDirect || surfaces[1].ConversationID != discordConversationID(profile.ApplicationID, "777") {
+		t.Fatalf("recovery surfaces = %#v", surfaces)
+	}
+}
+
 func TestLegacyProfileRemovalTombstonePreventsReimportAndPreservesRollback(t *testing.T) {
 	t.Setenv("HCTL_DISCORD_TOKEN", "ambient-token")
 	root := t.TempDir()
@@ -575,6 +593,9 @@ func TestRuntimeProtocolCoversGatewayDeliveryInteractionReconnectAndShutdown(t *
 
 	request := confirmRequest()
 	writeHostFrame(t, encoder, "host.interaction.1", "", request)
+	if receipt := readAdapterFrame(t, decoder); receipt.CorrelationID != "host.interaction.1" || receipt.Payload.(*channeladapter.InteractionReceipt).Disposition != channeladapter.EffectExact {
+		t.Fatalf("interaction receipt = %#v", receipt)
+	}
 	waitUntil(t, func() bool { sent, _, _, _ := discord.snapshot(); return len(sent) == 3 })
 	sent, _, _, _ = discord.snapshot()
 	if len(sent[2].Components) == 0 {
@@ -653,13 +674,16 @@ func TestRuntimeCancellationAndMalformedFrameAreBounded(t *testing.T) {
 		{name: "cancellation", run: func(t *testing.T, encoder *channeladapter.Encoder, _ *io.PipeWriter, decoder *channeladapter.Decoder, runtime *Runtime) {
 			request := confirmRequest()
 			writeHostFrame(t, encoder, "host.interaction.cancel", "", request)
-			writeHostFrame(t, encoder, "host.cancel.1", "", channeladapter.InteractionCancel{InteractionID: request.InteractionID})
-			result := readAdapterFrame(t, decoder)
-			answer := result.Payload.(*channeladapter.InteractionResult)
-			if answer.Answer.Action != channeladapter.AnswerCancel || result.CorrelationID != "host.cancel.1" {
-				t.Fatalf("cancellation = %#v", result)
+			if receipt := readAdapterFrame(t, decoder); receipt.Payload.(*channeladapter.InteractionReceipt).Disposition != channeladapter.EffectExact {
+				t.Fatalf("interaction receipt = %#v", receipt)
 			}
-			writeHostFrame(t, encoder, "host.ack.cancel", result.ID, channeladapter.EventAck{Disposition: "accepted"})
+			writeHostFrame(t, encoder, "host.cancel.1", "", channeladapter.InteractionCancel{InteractionID: request.InteractionID})
+			waitUntil(t, func() bool {
+				runtime.mu.Lock()
+				defer runtime.mu.Unlock()
+				return len(runtime.interactions) == 0
+			})
+			_ = decoder
 			_ = runtime
 		}},
 		{name: "malformed", run: func(t *testing.T, _ *channeladapter.Encoder, writer *io.PipeWriter, _ *channeladapter.Decoder, _ *Runtime) {

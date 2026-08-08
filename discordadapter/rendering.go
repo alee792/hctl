@@ -15,7 +15,8 @@ import (
 
 const componentPrefix = "h1"
 
-func (runtime *Runtime) renderInteraction(hostFrameID string, request channeladapter.InteractionRequest) error {
+func (runtime *Runtime) renderInteraction(hostFrameID string, request channeladapter.InteractionRequest) channeladapter.InteractionReceipt {
+	receipt := channeladapter.InteractionReceipt{InteractionID: request.InteractionID, Disposition: channeladapter.EffectExact}
 	handle := opaqueHandle("interaction", request.InteractionID)
 	expiryContext, cancelExpiry := context.WithCancel(context.Background())
 	pending := pendingInteraction{hostFrameID: hostFrameID, request: request, handle: handle, expiryCancel: cancelExpiry}
@@ -23,12 +24,17 @@ func (runtime *Runtime) renderInteraction(hostFrameID string, request channelada
 	if _, exists := runtime.interactions[request.InteractionID]; exists || len(runtime.interactions) >= runtime.limits.MaxOutstanding {
 		runtime.mu.Unlock()
 		cancelExpiry()
-		return errors.New("Discord adapter interaction capacity is exhausted")
+		receipt.Disposition = channeladapter.EffectFailed
+		receipt.Failure = channeladapter.Failure{Class: channeladapter.DiagnosticProtocol, Code: "interaction_capacity"}
+		return receipt
 	}
 	runtime.interactions[request.InteractionID] = pending
 	runtime.handles[handle] = request.InteractionID
 	runtime.mu.Unlock()
 	go runtime.expireInteraction(expiryContext, request.InteractionID, handle, time.Duration(request.Request.Policy.ExpiresAfterSeconds)*time.Second)
+	if request.Restore {
+		return receipt
+	}
 	var message *discordgo.MessageSend
 	var err error
 	if runtime.supports(channeladapter.FeatureInteractiveComponents) {
@@ -40,13 +46,39 @@ func (runtime *Runtime) renderInteraction(hostFrameID string, request channelada
 		err = errors.New("text fallback was not negotiated")
 	}
 	if err != nil {
-		_ = runtime.writer.send(channeladapter.Diagnostic{Class: channeladapter.DiagnosticConfiguration, Severity: channeladapter.SeverityWarning, Code: "interaction_fallback_failed", Message: "Discord could not render the interactive request."}, hostFrameID)
-		return nil
+		runtime.removeInteraction(request.InteractionID, handle)
+		receipt.Disposition = channeladapter.EffectFailed
+		receipt.Failure = channeladapter.Failure{Class: channeladapter.DiagnosticConfiguration, Code: "interaction_render_failed"}
+		return receipt
 	}
-	if _, err := runtime.client.ChannelMessageSendComplex(request.Route.Handle, message); err != nil {
-		_ = runtime.writer.send(channeladapter.Diagnostic{Class: channeladapter.DiagnosticConnection, Severity: channeladapter.SeverityWarning, Code: "interaction_delivery_uncertain", Message: "Discord interaction delivery may have failed."}, hostFrameID)
+	rendered, err := runtime.client.ChannelMessageSendComplex(request.Route.Handle, message)
+	if err != nil {
+		runtime.removeInteraction(request.InteractionID, handle)
+		receipt.Disposition = channeladapter.EffectAmbiguous
+	} else if rendered == nil {
+		runtime.removeInteraction(request.InteractionID, handle)
+		receipt.Disposition = channeladapter.EffectAmbiguous
+	} else {
+		runtime.mu.Lock()
+		pending := runtime.interactions[request.InteractionID]
+		pending.renderedID = rendered.ID
+		runtime.interactions[request.InteractionID] = pending
+		runtime.mu.Unlock()
 	}
-	return nil
+	return receipt
+}
+
+func (runtime *Runtime) removeInteraction(interactionID, handle string) {
+	runtime.mu.Lock()
+	pending, ok := runtime.interactions[interactionID]
+	if ok && pending.handle == handle {
+		delete(runtime.interactions, interactionID)
+		delete(runtime.handles, handle)
+	}
+	runtime.mu.Unlock()
+	if ok && pending.expiryCancel != nil {
+		pending.expiryCancel()
+	}
 }
 
 func (runtime *Runtime) expireInteraction(ctx context.Context, interactionID, handle string, duration time.Duration) {
@@ -55,12 +87,22 @@ func (runtime *Runtime) expireInteraction(ctx context.Context, interactionID, ha
 	case <-ctx.Done():
 		return
 	}
+	runtime.retireRenderedInteraction(interactionID, handle)
+}
+
+func (runtime *Runtime) retireRenderedInteraction(interactionID, handle string) {
 	runtime.mu.Lock()
-	if pending, ok := runtime.interactions[interactionID]; ok && pending.handle == handle {
+	pending, ok := runtime.interactions[interactionID]
+	if ok && pending.handle == handle {
 		delete(runtime.interactions, interactionID)
 		delete(runtime.handles, handle)
 	}
+	client := runtime.client
 	runtime.mu.Unlock()
+	if ok && pending.renderedID != "" && client != nil {
+		components := []discordgo.MessageComponent{}
+		_, _ = client.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: pending.renderedID, Channel: pending.request.Route.Handle, Components: &components})
+	}
 }
 
 func interactionMessage(pending pendingInteraction) (*discordgo.MessageSend, error) {
@@ -172,7 +214,13 @@ func (runtime *Runtime) handleInteraction(incoming *discordgo.InteractionCreate)
 		default:
 			return
 		}
-		_, _ = runtime.writer.sendEventRegisteredContext(runtime.admissionContext(), "control:"+incoming.ID, channeladapter.ControlRequest{SourceID: incoming.ID, Route: channeladapter.Route{Handle: incoming.ChannelID}, Message: channeladapter.MessageRef{Handle: incoming.ID}, Action: action}, "", func(frameID string, add bool) {
+		direct := incoming.GuildID == ""
+		if direct && !runtime.rememberDirectSurface(incoming.ChannelID) {
+			runtime.vendorDiagnostic("direct_surface_unavailable", "Discord direct-message routing could not be retained safely.")
+			return
+		}
+		surface := discordSurface(runtime.profileSnapshot(), incoming.ChannelID, direct)
+		_, _ = runtime.writer.sendEventRegisteredContext(runtime.admissionContext(), "control:"+incoming.ID, channeladapter.ControlRequest{SourceID: incoming.ID, Route: surface.Route, ConversationID: surface.ConversationID, SurfaceKind: surface.Kind, SurfaceKey: surface.SurfaceKey, PrincipalKey: surface.PrincipalKey, Message: channeladapter.MessageRef{Handle: incoming.ID}, Action: action}, "", func(frameID string, add bool) {
 			runtime.mu.Lock()
 			if add {
 				runtime.controls[frameID] = pendingControl{interaction: incoming.Interaction, action: action}
@@ -218,7 +266,8 @@ func (runtime *Runtime) handleInteraction(incoming *discordgo.InteractionCreate)
 }
 
 func (runtime *Runtime) authorizedInteraction(incoming *discordgo.InteractionCreate) bool {
-	if incoming.AppID != "" && incoming.AppID != runtime.profile.ApplicationID {
+	profile := runtime.profileSnapshot()
+	if incoming.AppID != "" && incoming.AppID != profile.ApplicationID {
 		return false
 	}
 	userID := ""
@@ -227,10 +276,10 @@ func (runtime *Runtime) authorizedInteraction(incoming *discordgo.InteractionCre
 	} else if incoming.User != nil {
 		userID = incoming.User.ID
 	}
-	if userID != runtime.profile.AllowedUserID {
+	if userID != profile.AllowedUserID {
 		return false
 	}
-	return incoming.GuildID == "" || incoming.GuildID == runtime.profile.AllowedGuildID && incoming.ChannelID == runtime.profile.AllowedChannelID
+	return incoming.GuildID == "" || incoming.GuildID == profile.AllowedGuildID && incoming.ChannelID == profile.AllowedChannelID
 }
 
 func interactionModal(pending pendingInteraction) (*discordgo.InteractionResponse, error) {
@@ -381,12 +430,15 @@ func (runtime *Runtime) cancelInteraction(hostFrameID string, cancel channeladap
 	if !ok {
 		return
 	}
-	pending.hostFrameID = hostFrameID
-	_ = runtime.finishInteraction(pending, channeladapter.SemanticInteractionAnswer{SchemaVersion: 1, Action: channeladapter.AnswerCancel}, pendingCallback{})
+	_ = hostFrameID
+	if pending.expiryCancel != nil {
+		pending.expiryCancel()
+	}
+	runtime.retireRenderedInteraction(cancel.InteractionID, pending.handle)
 }
 
 func (runtime *Runtime) handleFallback(incoming *discordgo.MessageCreate) bool {
-	if incoming == nil || incoming.ReferencedMessage == nil || incoming.ReferencedMessage.Author == nil || incoming.ReferencedMessage.Author.ID != runtime.profile.BotUserID {
+	if incoming == nil || incoming.ReferencedMessage == nil || incoming.ReferencedMessage.Author == nil || incoming.ReferencedMessage.Author.ID != runtime.profileSnapshot().BotUserID {
 		return false
 	}
 	content := incoming.ReferencedMessage.Content

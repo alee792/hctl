@@ -19,6 +19,7 @@ var (
 	channelKindPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
 	profileIDPattern   = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
 	codePattern        = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	ownerKeyPattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 func ValidateEnvelope(envelope Envelope, direction Direction) error {
@@ -35,7 +36,7 @@ func ValidateEnvelope(envelope Envelope, direction Direction) error {
 	if !directionAllows(direction, kind) {
 		return fmt.Errorf("channel-adapter %s frame cannot travel from %s", kind, direction)
 	}
-	requiresCorrelation := kind == KindInitialize || kind == KindReady || kind == KindControlResult || kind == KindEventAck || kind == KindDeliveryResult || kind == KindInteractionResult || kind == KindAttachmentChunk || kind == KindAttachmentResult || kind == KindShutdownComplete
+	requiresCorrelation := kind == KindInitialize || kind == KindReady || kind == KindControlResult || kind == KindEventAck || kind == KindDeliveryResult || kind == KindInteractionReceipt || kind == KindInteractionResult || kind == KindAttachmentChunk || kind == KindAttachmentResult || kind == KindShutdownComplete
 	allowsCorrelation := requiresCorrelation || kind == KindDiagnostic
 	if requiresCorrelation && !frameIDPattern.MatchString(envelope.CorrelationID) {
 		return fmt.Errorf("channel-adapter %s frame requires correlation", kind)
@@ -69,7 +70,7 @@ func directionAllows(direction Direction, kind Kind) bool {
 		}
 	case FromAdapter:
 		switch kind {
-		case KindHello, KindReady, KindInboundMessage, KindControlRequest, KindDeliveryResult, KindInteractionResult, KindAttachmentChunk, KindAttachmentResult, KindConnection, KindDiagnostic, KindShutdownComplete:
+		case KindHello, KindReady, KindInboundMessage, KindControlRequest, KindDeliveryResult, KindInteractionReceipt, KindInteractionResult, KindAttachmentChunk, KindAttachmentResult, KindConnection, KindDiagnostic, KindShutdownComplete:
 			return true
 		}
 	}
@@ -122,6 +123,10 @@ func validatePayload(payload Payload) error {
 		return validateInteractionRequest(value)
 	case *InteractionRequest:
 		return validateInteractionRequest(*value)
+	case InteractionReceipt:
+		return validateInteractionReceipt(value)
+	case *InteractionReceipt:
+		return validateInteractionReceipt(*value)
 	case InteractionCancel:
 		return validateRuntimeID(value.InteractionID)
 	case *InteractionCancel:
@@ -213,7 +218,20 @@ func validateReady(value Ready) error {
 	if err := validateFeatures(value.Features, false); err != nil {
 		return err
 	}
-	return validateLimits(value.Limits)
+	if err := validateLimits(value.Limits); err != nil {
+		return err
+	}
+	if len(value.Surfaces) > value.Limits.MaxOutstanding {
+		return errors.New("ready surfaces exceed negotiated outstanding capacity")
+	}
+	routes, conversations := map[string]bool{}, map[string]bool{}
+	for _, surface := range value.Surfaces {
+		if err := validateSurface(surface); err != nil || routes[surface.Route.Handle] || conversations[surface.ConversationID] {
+			return errors.New("ready surface is invalid or duplicated")
+		}
+		routes[surface.Route.Handle], conversations[surface.ConversationID] = true, true
+	}
+	return nil
 }
 
 func validateFeatures(features []Feature, require bool) error {
@@ -286,6 +304,9 @@ func validateInbound(value InboundMessage) error {
 	if err := validateHandle(value.Route.Handle); err != nil {
 		return err
 	}
+	if err := validateSurface(Surface{Route: value.Route, ConversationID: value.ConversationID, Kind: value.SurfaceKind, SurfaceKey: value.SurfaceKey, PrincipalKey: value.PrincipalKey}); err != nil {
+		return err
+	}
 	if err := validateHandle(value.Message.Handle); err != nil {
 		return err
 	}
@@ -317,11 +338,27 @@ func validateInbound(value InboundMessage) error {
 	return nil
 }
 
+func validateSurface(value Surface) error {
+	if err := validateHandle(value.Route.Handle); err != nil {
+		return err
+	}
+	if !frameIDPattern.MatchString(value.ConversationID) {
+		return errors.New("surface conversation id is invalid")
+	}
+	if value.Kind != SurfaceDirect && value.Kind != SurfaceShared {
+		return errors.New("surface kind is invalid")
+	}
+	if !ownerKeyPattern.MatchString(value.SurfaceKey) || !ownerKeyPattern.MatchString(value.PrincipalKey) {
+		return errors.New("surface owner key is invalid")
+	}
+	return nil
+}
+
 func validateControlRequest(value ControlRequest) error {
 	if !frameIDPattern.MatchString(value.SourceID) {
 		return errors.New("control source id is invalid")
 	}
-	if err := validateHandle(value.Route.Handle); err != nil {
+	if err := validateSurface(Surface{Route: value.Route, ConversationID: value.ConversationID, Kind: value.SurfaceKind, SurfaceKey: value.SurfaceKey, PrincipalKey: value.PrincipalKey}); err != nil {
 		return err
 	}
 	if err := validateHandle(value.Message.Handle); err != nil {
@@ -459,10 +496,30 @@ func validateInteractionRequest(value InteractionRequest) error {
 	if err := validateHandle(value.Route.Handle); err != nil {
 		return err
 	}
-	if err := validateHandle(value.ReplyTo.Handle); err != nil {
-		return err
+	if value.ReplyTo.Handle != "" {
+		if err := validateHandle(value.ReplyTo.Handle); err != nil {
+			return err
+		}
+	} else if !value.Restore {
+		return errors.New("new interaction request requires a reply target")
 	}
 	return validateSemanticRequest(value.Request)
+}
+
+func validateInteractionReceipt(value InteractionReceipt) error {
+	if err := validateRuntimeID(value.InteractionID); err != nil {
+		return err
+	}
+	if value.Disposition != EffectExact && value.Disposition != EffectAmbiguous && value.Disposition != EffectFailed {
+		return errors.New("interaction receipt disposition is invalid")
+	}
+	if value.Disposition == EffectFailed {
+		return validateFailure(value.Failure)
+	}
+	if value.Failure != (Failure{}) {
+		return errors.New("successful or ambiguous interaction receipt contains failure details")
+	}
+	return nil
 }
 
 func validateSemanticRequest(request SemanticInteractionRequest) error {

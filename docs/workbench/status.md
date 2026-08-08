@@ -47,10 +47,10 @@ The repository contains a small Go CLI that:
   installed official GitHub MCP package offline, and exposes its discovered
   catalog through native Claude or Codex configuration without adding GitHub
   code or credentials to hctl's managed server;
-- discovers a bounded `channels/discord.md` participation policy and runs one
-  outbound conversational Discord Gateway adapter over the durable turn
-  dispatcher, with independent managed session lifecycles for the authorized
-  guild channel and DM;
+- discovers a bounded `channels/discord.md` participation policy, resolves one
+  exact installed external adapter, and bridges its semantic protocol to the
+  durable turn dispatcher with independent managed session lifecycles for the
+  authorized guild channel and DM;
 - discovers nested Markdown schedules, validates and fingerprints their
   five-field cron metadata, and explicitly triggers fresh-session task
   occurrences through the durable turn dispatcher without emitting model text;
@@ -456,9 +456,33 @@ credential-free fake runtime proves setup/status/remove, identity, handshake,
 inbound messages, replies, interactions, reconnect, cancellation, ambiguous
 delivery, malformed/oversized input, and shutdown. Its exact reproducible package builds,
 installs, resolves offline, and selectively stages through #76. The generic
-process host does not exist yet and production still uses the in-process
-adapter; #84 consumes this module before #85 removes old code and Discord-only
-root dependencies.
+host now resolves one enabled capability by channel kind, records exact
+apply-time consumption, supervises bounded operation and runtime modes, and
+bridges normalized messages, controls, replies, interactions, dispositions,
+replay, reconnect, and shutdown into the existing controller. Production no
+longer falls back to the in-process adapter. Credential-free installed-package
+acceptance proves a complete apply, external handshake, two independently
+queued conversations, resident-pressure hibernation and resume, durable turns,
+replies, replay, token-isolated harness environments, and graceful cleanup.
+External-process regressions also prove semantic direct/shared identity,
+status/reset, interaction answer and cancellation, exact render receipt,
+delivered-interaction restore, ambiguous no-retry delivery, child failure,
+negotiated frame/outstanding and fixed queue bounds, stream-safe
+credential-redacted stderr, signal-aware operation process-tree cancellation,
+real-terminal foreground ownership and restoration, startup pipe backpressure,
+pending recovery responses behind replay, literal overlapping conversations,
+MaxResident=1 native thread resume, non-evicting reply-target saturation,
+interprocess-safe selection updates, and bounded forced cleanup. #85 removes
+the retained old code and Discord-only root dependencies.
+
+The transition continues to honor an explicit profile, the established
+profile-selection environment value, a generic owner-only per-agent/channel
+selector written by successful setup, and legacy per-agent/default selector
+names without reading legacy Discord profile contents. Successful remove
+clears only its matching generic binding. Missing consumption
+evidence after an install/update has one deterministic remedy: reapply. A
+previous binary remains the rollback path until #85; the new host never
+silently routes production traffic back into the old implementation.
 
 The package CLI now requires explicit operator
 trust for local directory/archive installation and exact selected updates,

@@ -74,6 +74,18 @@ var (
 	checksumPattern        = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
+var channelProfileID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
+
+// ValidateChannelProfileID applies the closed opaque-id-v1 selector grammar.
+// A profile is a non-secret identity, never a path, command, environment name,
+// or credential reference.
+func ValidateChannelProfileID(value string) error {
+	if !channelProfileID.MatchString(value) || len(value) > 64 {
+		return errors.New("channel-adapter profile id is invalid")
+	}
+	return nil
+}
+
 type OperatingSystem string
 type Architecture string
 type ArtifactFormat string

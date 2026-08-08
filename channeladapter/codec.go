@@ -83,6 +83,8 @@ func decodePayload(kind Kind, data []byte) (Payload, error) {
 		payload = &DeliveryResult{}
 	case KindInteractionRequest:
 		payload = &InteractionRequest{}
+	case KindInteractionReceipt:
+		payload = &InteractionReceipt{}
 	case KindInteractionCancel:
 		payload = &InteractionCancel{}
 	case KindInteractionResult:
@@ -223,14 +225,31 @@ func (decoder *Decoder) Read(direction Direction) (Envelope, error) {
 	}
 }
 
-type Encoder struct{ writer io.Writer }
+type Encoder struct {
+	writer        io.Writer
+	maxFrameBytes int
+}
 
-func NewEncoder(writer io.Writer) *Encoder { return &Encoder{writer: writer} }
+func NewEncoder(writer io.Writer) *Encoder {
+	return &Encoder{writer: writer, maxFrameBytes: MaxFrameBytes}
+}
+
+// SetMaxFrameBytes narrows host or adapter output after negotiation.
+func (encoder *Encoder) SetMaxFrameBytes(maximum int) error {
+	if maximum < 1 || maximum > encoder.maxFrameBytes {
+		return errors.New("channel-adapter frame limit is invalid")
+	}
+	encoder.maxFrameBytes = maximum
+	return nil
+}
 
 func (encoder *Encoder) Write(envelope Envelope, direction Direction) error {
 	data, err := MarshalFrame(envelope, direction)
 	if err != nil {
 		return err
+	}
+	if len(data) > encoder.maxFrameBytes {
+		return fmt.Errorf("channel-adapter frame exceeds %d bytes", encoder.maxFrameBytes)
 	}
 	data = append(data, '\n')
 	for len(data) > 0 {

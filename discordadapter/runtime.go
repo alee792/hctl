@@ -347,6 +347,7 @@ type pendingInteraction struct {
 	request      channeladapter.InteractionRequest
 	handle       string
 	expiryCancel context.CancelFunc
+	renderedID   string
 }
 
 type pendingCallback struct {
@@ -390,6 +391,7 @@ type Runtime struct {
 	activeAdmissions int
 	admissionIdle    chan struct{}
 	profile          Profile
+	profileID        string
 	client           Discord
 	controls         map[string]pendingControl
 	interactions     map[string]pendingInteraction
@@ -518,6 +520,9 @@ func (runtime *Runtime) Run(ctx context.Context, input io.Reader) error {
 		return errors.New("Discord adapter initialize did not correlate to hello")
 	}
 	ready := channeladapter.Ready{ChannelKind: "discord", Features: append([]channeladapter.Feature(nil), initialize.Features...), Limits: initialize.Limits}
+	if profile, profileErr := runtime.profiles.Get(initialize.ProfileID); profileErr == nil {
+		ready.Surfaces = discordSurfaces(profile)
+	}
 	if err := channeladapter.ValidateNegotiation(hello, *initialize, ready); err != nil {
 		return err
 	}
@@ -616,7 +621,7 @@ func (runtime *Runtime) connect(ctx context.Context, profileID string) error {
 		}
 	}()
 	runtime.mu.Lock()
-	runtime.profile, runtime.client, runtime.lock = profile, client, lock
+	runtime.profileID, runtime.profile, runtime.client, runtime.lock = profileID, profile, client, lock
 	runtime.mu.Unlock()
 	runtime.installHandlers(client)
 	commands := []*discordgo.ApplicationCommand{{Name: "new", Description: "Start a fresh hctl conversation"}, {Name: "status", Description: "Show hctl runtime status"}}
@@ -694,9 +699,15 @@ func (runtime *Runtime) handleMessage(incoming *discordgo.MessageCreate) {
 		return
 	}
 	defer runtime.endVendorAdmission()
-	if !eligibleMessage(runtime.profile, incoming) || runtime.handleFallback(incoming) {
+	profile := runtime.profileSnapshot()
+	if !eligibleMessage(profile, incoming) || runtime.handleFallback(incoming) {
 		return
 	}
+	if incoming.GuildID == "" && !runtime.rememberDirectSurface(incoming.ChannelID) {
+		runtime.vendorDiagnostic("direct_surface_unavailable", "Discord direct-message routing could not be retained safely.")
+		return
+	}
+	profile = runtime.profileSnapshot()
 	if len([]byte(incoming.Content)) > runtime.inboundTextLimit() {
 		runtime.vendorDiagnostic("inbound_text_too_large", "Discord message exceeds the negotiated inbound text limit.")
 		return
@@ -757,8 +768,9 @@ func (runtime *Runtime) handleMessage(incoming *discordgo.MessageCreate) {
 	for _, source := range expiring {
 		go runtime.expireAttachment(source.ctx, source.handle, source.generation)
 	}
+	surface := discordSurface(profile, incoming.ChannelID, incoming.GuildID == "")
 	message := channeladapter.InboundMessage{
-		SourceID: incoming.ID, Route: channeladapter.Route{Handle: incoming.ChannelID}, Message: channeladapter.MessageRef{Handle: incoming.ID},
+		SourceID: incoming.ID, Route: surface.Route, ConversationID: surface.ConversationID, SurfaceKind: surface.Kind, SurfaceKey: surface.SurfaceKey, PrincipalKey: surface.PrincipalKey, Message: channeladapter.MessageRef{Handle: incoming.ID},
 		Author: channeladapter.Author{Handle: incoming.Author.ID, Label: safeLabel(incoming.Author.Username)}, Text: incoming.Content, Attachments: attachments,
 	}
 	ctx := runtime.admissionContext()
@@ -769,6 +781,61 @@ func (runtime *Runtime) handleMessage(incoming *discordgo.MessageCreate) {
 		default:
 		}
 	}
+}
+
+func (runtime *Runtime) profileSnapshot() Profile {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return runtime.profile
+}
+
+func (runtime *Runtime) rememberDirectSurface(channelID string) bool {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.profile.DirectChannelID == channelID {
+		return true
+	}
+	if runtime.profile.DirectChannelID != "" || runtime.profileID == "" {
+		return false
+	}
+	runtime.profile.DirectChannelID = channelID
+	profile, profileID := runtime.profile, runtime.profileID
+	if err := runtime.profiles.Put(profileID, profile); err != nil {
+		if runtime.profile.DirectChannelID == channelID {
+			runtime.profile.DirectChannelID = ""
+		}
+		return false
+	}
+	return true
+}
+
+func discordSurfaces(profile Profile) []channeladapter.Surface {
+	surfaces := []channeladapter.Surface{discordSurface(profile, profile.AllowedChannelID, false)}
+	if profile.DirectChannelID != "" {
+		surfaces = append(surfaces, discordSurface(profile, profile.DirectChannelID, true))
+	}
+	return surfaces
+}
+
+func discordSurface(profile Profile, route string, direct bool) channeladapter.Surface {
+	kind := channeladapter.SurfaceShared
+	if direct {
+		kind = channeladapter.SurfaceDirect
+	}
+	return channeladapter.Surface{
+		Route: channeladapter.Route{Handle: route}, ConversationID: discordConversationID(profile.ApplicationID, route), Kind: kind,
+		SurfaceKey: discordOwnerKey("discord-surface", profile.ApplicationID, route), PrincipalKey: discordOwnerKey("discord-principal", profile.ApplicationID, profile.AllowedUserID),
+	}
+}
+
+func discordConversationID(applicationID, route string) string {
+	digest := sha256.Sum256([]byte(applicationID + ":" + route))
+	return "discord-" + hex.EncodeToString(digest[:12])
+}
+
+func discordOwnerKey(namespace, applicationID, identity string) string {
+	digest := sha256.Sum256([]byte(namespace + "\x00" + applicationID + "\x00" + identity))
+	return hex.EncodeToString(digest[:])
 }
 
 func (runtime *Runtime) expireAttachment(ctx context.Context, handle string, generation uint64) {
@@ -820,7 +887,8 @@ func (runtime *Runtime) handleHostFrame(ctx context.Context, frame channeladapte
 		if !runtime.supports(channeladapter.FeatureInteractiveComponents) && !runtime.supports(channeladapter.FeatureTextFallback) {
 			return false, errors.New("Discord adapter received an interaction without a negotiated renderer")
 		}
-		if err := runtime.renderInteraction(frame.ID, *payload); err != nil {
+		receipt := runtime.renderInteraction(frame.ID, *payload)
+		if err := runtime.writer.send(receipt, frame.ID); err != nil {
 			return false, err
 		}
 	case *channeladapter.InteractionCancel:

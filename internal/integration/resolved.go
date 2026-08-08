@@ -39,6 +39,40 @@ type NativeMCPResolution struct {
 	Executable string
 }
 
+// ChannelAdapterResolution is the narrow channel-adapter consumer result. It
+// binds one channel kind to one enabled exact package executable without
+// introducing a generic integration runtime or vendor registry.
+type ChannelAdapterResolution struct {
+	Selection  ChannelAdapterSelection
+	Root       string
+	Executable string
+}
+
+type ChannelAdapterMode string
+
+const (
+	ChannelAdapterRuntime ChannelAdapterMode = "runtime"
+	ChannelAdapterSetup   ChannelAdapterMode = "setup"
+	ChannelAdapterStatus  ChannelAdapterMode = "status"
+	ChannelAdapterRemove  ChannelAdapterMode = "remove"
+)
+
+// ChannelAdapterLaunchDescriptor is exact, credential-free process metadata.
+// The process host supplies the selected environment separately so package
+// metadata can never name, read, or redirect a credential.
+type ChannelAdapterLaunchDescriptor struct {
+	PackageID        string
+	ManifestSHA256   string
+	CapabilityID     string
+	ChannelKind      string
+	Command          string
+	Arguments        []string
+	WorkingDirectory string
+	ProtocolMinimum  int
+	ProtocolBefore   int
+	Features         []ChannelFeature
+}
+
 // NativeMCPLaunchDescriptor is the credential-free process metadata a narrow
 // native harness generator can consume. EnvironmentDefaults contains only
 // literal manifest values; RequiredEnvironment contains names and descriptions
@@ -115,6 +149,115 @@ func (s *Store) ResolveNativeMCP(ctx context.Context, packageID, capabilityID st
 		return NativeMCPResolution{}, fmt.Errorf("native-mcp capability %q artifact is not installed; update %s from a compatible exact source", capabilityID, packageID)
 	}
 	return NativeMCPResolution{Selection: selection, Root: artifact.Root, Executable: artifact.Executable}, nil
+}
+
+// ResolveChannelAdapter selects the one explicitly installed and enabled v1
+// capability for a channel kind. Selection is offline and fails closed on an
+// ambiguous install rather than adding precedence or a vendor switch.
+func (s *Store) ResolveChannelAdapter(ctx context.Context, channelKind string) (ChannelAdapterResolution, error) {
+	entries, err := s.List(ctx)
+	if err != nil {
+		return ChannelAdapterResolution{}, err
+	}
+	type candidate struct {
+		packageID, capabilityID string
+		enabled                 bool
+	}
+	var candidates []candidate
+	for _, entry := range entries {
+		for _, capability := range entry.Package.Manifest().Capabilities {
+			if capability.ChannelAdapter != nil && capability.ChannelAdapter.ChannelKind == channelKind {
+				candidates = append(candidates, candidate{entry.State.PackageID, capability.ID, entry.State.Enabled})
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return ChannelAdapterResolution{}, fmt.Errorf("channel adapter %q is not installed; install an exact channel-adapter package with hctl integration install SOURCE --trust operator", channelKind)
+	}
+	var enabled []candidate
+	for _, candidate := range candidates {
+		if candidate.enabled {
+			enabled = append(enabled, candidate)
+		}
+	}
+	if len(enabled) == 0 {
+		return ChannelAdapterResolution{}, fmt.Errorf("channel adapter %q is disabled; run hctl integration enable %s", channelKind, candidates[0].packageID)
+	}
+	if len(enabled) != 1 {
+		ids := make([]string, len(enabled))
+		for index, candidate := range enabled {
+			ids[index] = candidate.packageID
+		}
+		sort.Strings(ids)
+		return ChannelAdapterResolution{}, fmt.Errorf("channel adapter %q is ambiguous across enabled packages %s; disable all but one exact package", channelKind, strings.Join(ids, ", "))
+	}
+	resolved, err := s.Resolve(ctx, enabled[0].packageID)
+	if err != nil {
+		return ChannelAdapterResolution{}, err
+	}
+	selection, err := resolved.Package.SelectChannelAdapter(enabled[0].capabilityID, s.targetOS, s.targetArch)
+	if err != nil {
+		return ChannelAdapterResolution{}, err
+	}
+	artifact, ok := resolved.Artifact(selection.Artifact.ID)
+	if !ok {
+		return ChannelAdapterResolution{}, fmt.Errorf("channel-adapter capability %q artifact is not installed; update %s from a compatible exact source", selection.Capability.ID, selection.PackageID)
+	}
+	return ChannelAdapterResolution{Selection: selection, Root: artifact.Root, Executable: artifact.Executable}, nil
+}
+
+func (resolved ChannelAdapterResolution) ValidateExecutable() error {
+	info, err := os.Lstat(resolved.Executable)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
+		return errors.New("resolved channel-adapter executable is missing or unsafe; verify and reinstall the package")
+	}
+	canonicalRoot, err := rootfs.CanonicalDir(resolved.Root)
+	canonicalExecutable, executableErr := filepath.EvalSymlinks(resolved.Executable)
+	if err != nil || executableErr != nil {
+		return errors.New("resolved channel-adapter executable is missing or unsafe; verify and reinstall the package")
+	}
+	relative, relativeErr := filepath.Rel(canonicalRoot, canonicalExecutable)
+	if relativeErr != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("resolved channel-adapter executable escapes its immutable artifact root")
+	}
+	return nil
+}
+
+func (resolved ChannelAdapterResolution) LaunchDescriptor(mode ChannelAdapterMode, profileID string) (ChannelAdapterLaunchDescriptor, error) {
+	if err := resolved.ValidateExecutable(); err != nil {
+		return ChannelAdapterLaunchDescriptor{}, err
+	}
+	capability := resolved.Selection.Capability
+	var arguments []string
+	switch mode {
+	case ChannelAdapterRuntime:
+		arguments = capability.Runtime.Arguments
+	case ChannelAdapterSetup:
+		arguments = capability.Setup.Arguments
+	case ChannelAdapterStatus:
+		arguments = capability.Status.Arguments
+	case ChannelAdapterRemove:
+		arguments = capability.Remove.Arguments
+	default:
+		return ChannelAdapterLaunchDescriptor{}, errors.New("channel-adapter mode is invalid")
+	}
+	if mode != ChannelAdapterRuntime {
+		if err := ValidateChannelProfileID(profileID); err != nil {
+			return ChannelAdapterLaunchDescriptor{}, err
+		}
+		arguments = append(append([]string(nil), arguments...), "--profile", profileID)
+	} else {
+		arguments = append([]string(nil), arguments...)
+	}
+	canonicalRoot, _ := rootfs.CanonicalDir(resolved.Root)
+	canonicalExecutable, _ := filepath.EvalSymlinks(resolved.Executable)
+	return ChannelAdapterLaunchDescriptor{
+		PackageID: resolved.Selection.PackageID, ManifestSHA256: resolved.Selection.ManifestSHA256,
+		CapabilityID: capability.ID, ChannelKind: capability.ChannelKind,
+		Command: canonicalExecutable, Arguments: arguments, WorkingDirectory: canonicalRoot,
+		ProtocolMinimum: capability.Protocol.Minimum, ProtocolBefore: capability.Protocol.Before,
+		Features: append([]ChannelFeature(nil), capability.Features...),
+	}, nil
 }
 
 // Artifact returns one defensive artifact selection for a capability-specific

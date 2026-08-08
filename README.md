@@ -236,12 +236,23 @@ staging likewise requires the relocatable interpreter supplied at
 installation as a portable closure.
 
 An agent with `channels/discord.md` can run as a conversational Discord Gateway
-bot without a public listener or tunnel. Enroll an existing bot once, then run
-the agent:
+bot without a public listener or tunnel. Build an exact package for the current
+platform, explicitly trust its local source, enroll an existing bot once, then
+run the agent:
 
 ```sh
-hctl channel setup discord ~/agents/reviewer
-hctl run ~/agents/reviewer --workspace ~/Code/example --harness codex
+package_root="$(mktemp -d)/hctl-discord"
+./discordadapter/build-package.sh \
+  --version 0.1.0 \
+  --revision "$(git rev-parse HEAD)" \
+  --target "$(go env GOOS)-$(go env GOARCH)" \
+  --output "$package_root"
+./hctl integration install "$package_root" --trust operator
+./hctl channel setup discord ~/agents/reviewer
+./hctl channel status discord ~/agents/reviewer
+./hctl run ~/agents/reviewer --workspace ~/Code/example --harness codex
+# When retiring the enrollment:
+./hctl channel remove discord ~/agents/reviewer
 ```
 
 Setup stores non-secret profile metadata in the OS-standard hctl configuration
@@ -253,7 +264,13 @@ messages, applies the participation policy in `channels/discord.md`, replies in
 the same channel, and stays silent when the agent returns exactly
 `HCTL_NO_REPLY`. `/new` resets an idle conversation and `/status` reports safe
 runtime status. Deployment may mount the same non-secret TOML configuration and
-inject `HCTL_DISCORD_TOKEN`; hctl removes that variable from every child process.
+inject `HCTL_DISCORD_TOKEN`. Hctl passes that opaque value only to the exact
+selected Discord adapter for setup, status, remove, and runtime; harnesses, MCP
+servers, authored tools, Git, schedules, and unrelated children receive a
+scrubbed environment. The adapter is trusted to consume the value, and another
+process running as the same OS user may still inspect that process environment:
+process separation is dependency and ownership isolation, not a secret broker
+or OS sandbox.
 An idle channel session releases its resident harness after 15 minutes by
 default while retaining its native conversation; use `--idle-timeout` to choose
 a different interval up to 24 hours. The next message resumes that conversation.

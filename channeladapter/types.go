@@ -53,6 +53,7 @@ const (
 	KindDelivery           Kind = "delivery"
 	KindDeliveryResult     Kind = "delivery_result"
 	KindInteractionRequest Kind = "interaction_request"
+	KindInteractionReceipt Kind = "interaction_receipt"
 	KindInteractionCancel  Kind = "interaction_cancel"
 	KindInteractionResult  Kind = "interaction_result"
 	KindAttachmentFetch    Kind = "attachment_fetch"
@@ -140,6 +141,7 @@ type Ready struct {
 	ChannelKind string    `json:"channel_kind"`
 	Features    []Feature `json:"features"`
 	Limits      Limits    `json:"limits"`
+	Surfaces    []Surface `json:"surfaces,omitempty"`
 }
 
 func (Ready) frameKind() Kind { return KindReady }
@@ -155,6 +157,24 @@ type Author struct {
 	Label  string `json:"label,omitempty"`
 }
 
+type SurfaceKind string
+
+const (
+	SurfaceDirect SurfaceKind = "direct"
+	SurfaceShared SurfaceKind = "shared"
+)
+
+// Surface is an authorized transport-neutral conversation identity. Route is
+// adapter-opaque; ConversationID and owner keys are stable semantic identities
+// used only by hctl's durable controller.
+type Surface struct {
+	Route          Route       `json:"route"`
+	ConversationID string      `json:"conversation_id"`
+	Kind           SurfaceKind `json:"kind"`
+	SurfaceKey     string      `json:"surface_key"`
+	PrincipalKey   string      `json:"principal_key"`
+}
+
 type AttachmentDescriptor struct {
 	Handle    string `json:"handle"`
 	Name      string `json:"name"`
@@ -163,12 +183,16 @@ type AttachmentDescriptor struct {
 }
 
 type InboundMessage struct {
-	SourceID    string                 `json:"source_id"`
-	Route       Route                  `json:"route"`
-	Message     MessageRef             `json:"message"`
-	Author      Author                 `json:"author"`
-	Text        string                 `json:"text"`
-	Attachments []AttachmentDescriptor `json:"attachments,omitempty"`
+	SourceID       string                 `json:"source_id"`
+	Route          Route                  `json:"route"`
+	ConversationID string                 `json:"conversation_id"`
+	SurfaceKind    SurfaceKind            `json:"surface_kind"`
+	SurfaceKey     string                 `json:"surface_key"`
+	PrincipalKey   string                 `json:"principal_key"`
+	Message        MessageRef             `json:"message"`
+	Author         Author                 `json:"author"`
+	Text           string                 `json:"text"`
+	Attachments    []AttachmentDescriptor `json:"attachments,omitempty"`
 }
 
 func (InboundMessage) frameKind() Kind { return KindInboundMessage }
@@ -183,10 +207,14 @@ const (
 // ControlRequest is emitted only after the adapter authorizes and decodes its
 // vendor-native status/reset command. Hctl retains lifecycle ownership.
 type ControlRequest struct {
-	SourceID string        `json:"source_id"`
-	Route    Route         `json:"route"`
-	Message  MessageRef    `json:"message"`
-	Action   ControlAction `json:"action"`
+	SourceID       string        `json:"source_id"`
+	Route          Route         `json:"route"`
+	ConversationID string        `json:"conversation_id"`
+	SurfaceKind    SurfaceKind   `json:"surface_kind"`
+	SurfaceKey     string        `json:"surface_key"`
+	PrincipalKey   string        `json:"principal_key"`
+	Message        MessageRef    `json:"message"`
+	Action         ControlAction `json:"action"`
 }
 
 func (ControlRequest) frameKind() Kind { return KindControlRequest }
@@ -350,10 +378,19 @@ type InteractionRequest struct {
 	InteractionID string                     `json:"interaction_id"`
 	Route         Route                      `json:"route"`
 	ReplyTo       MessageRef                 `json:"reply_to"`
+	Restore       bool                       `json:"restore,omitempty"`
 	Request       SemanticInteractionRequest `json:"request"`
 }
 
 func (InteractionRequest) frameKind() Kind { return KindInteractionRequest }
+
+type InteractionReceipt struct {
+	InteractionID string            `json:"interaction_id"`
+	Disposition   EffectDisposition `json:"disposition"`
+	Failure       Failure           `json:"failure,omitempty"`
+}
+
+func (InteractionReceipt) frameKind() Kind { return KindInteractionReceipt }
 
 type InteractionCancel struct {
 	InteractionID string `json:"interaction_id"`

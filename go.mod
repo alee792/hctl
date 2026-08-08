@@ -9,8 +9,11 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/zalando/go-keyring v0.2.6
 	go.yaml.in/yaml/v3 v3.0.5
-	golang.org/x/term v0.36.0
+	golang.org/x/sys v0.37.0
+	hctl/channeladapter v0.0.0
 )
+
+replace hctl/channeladapter => ./channeladapter
 
 require (
 	al.essio.dev/pkg/shellescape v1.5.1 // indirect
@@ -18,5 +21,4 @@ require (
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	golang.org/x/crypto v0.0.0-20210421170649-83a5a9bb288b // indirect
-	golang.org/x/sys v0.37.0 // indirect
 )

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -201,6 +202,25 @@ func TestStoreInstallsChannelAdapterThroughSharedEnvelope(t *testing.T) {
 	staged, err := store.StageArtifacts(context.Background(), "fixture-channel-adapter", selection.Capability.Artifacts, t.TempDir())
 	if err != nil || len(staged) != 1 {
 		t.Fatalf("channel-adapter StageArtifacts() = %#v, %v", staged, err)
+	}
+	hostResolution, err := store.ResolveChannelAdapter(context.Background(), "fixture")
+	if err != nil {
+		t.Fatalf("ResolveChannelAdapter() error = %v", err)
+	}
+	runtimeLaunch, err := hostResolution.LaunchDescriptor(ChannelAdapterRuntime, "")
+	canonicalExecutable, _ := filepath.EvalSymlinks(artifact.Executable)
+	if err != nil || runtimeLaunch.Command != canonicalExecutable || !strings.HasSuffix(strings.Join(runtimeLaunch.Arguments, " "), "run --stdio") {
+		t.Fatalf("runtime launch = %#v, %v", runtimeLaunch, err)
+	}
+	setupLaunch, err := hostResolution.LaunchDescriptor(ChannelAdapterSetup, "default")
+	if err != nil || !slices.Equal(setupLaunch.Arguments[len(setupLaunch.Arguments)-2:], []string{"--profile", "default"}) {
+		t.Fatalf("setup launch = %#v, %v", setupLaunch, err)
+	}
+	if err := store.SetEnabled(context.Background(), "fixture-channel-adapter", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResolveChannelAdapter(context.Background(), "fixture"); err == nil || !strings.Contains(err.Error(), "integration enable fixture-channel-adapter") {
+		t.Fatalf("disabled adapter remedy = %v", err)
 	}
 }
 

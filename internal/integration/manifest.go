@@ -54,12 +54,13 @@ const (
 )
 
 var (
-	packageIDPattern  = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$`)
-	capabilityID      = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
-	artifactIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
-	serverNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
-	environmentName   = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
-	checksumPattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	packageIDPattern       = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$`)
+	capabilityID           = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
+	artifactIDPattern      = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
+	serverNamePattern      = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+	environmentName        = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
+	environmentDescription = regexp.MustCompile(`^[A-Za-z][A-Za-z ,.;()'\-]{0,511}$`)
+	checksumPattern        = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 type OperatingSystem string
@@ -751,14 +752,8 @@ func validateLiteral(label, value string, maximum int) error {
 }
 
 func validateEnvironmentDescription(value string) error {
-	if err := validateText("required environment description", value, 1, 512); err != nil {
-		return err
-	}
-	lower := strings.ToLower(value)
-	for _, forbidden := range []string{"${", "://", "env:", "file:", "keyring:", "secret:", "vault:", "="} {
-		if strings.Contains(lower, forbidden) {
-			return errors.New("required environment description must not contain a value or reference syntax")
-		}
+	if !environmentDescription.MatchString(value) || strings.TrimSpace(value) != value {
+		return errors.New("required environment description must use safe prose without value or reference syntax")
 	}
 	return nil
 }

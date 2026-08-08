@@ -101,10 +101,12 @@ The resolved ambient value is nevertheless available to the native
 harness-launched server and may also be visible to the harness,
 model-accessible shell or execution tools, and other inherited native
 processes. `native-mcp` does not claim to hide it. Required-environment
-descriptions are bounded prose and reject environment-placeholder, URI, and
-common credential-reference syntax. Like other allowed strings, hctl cannot
-reliably recognize an arbitrary secret disguised as prose; package authors
-remain prohibited from placing values or references there.
+descriptions use a closed 1-512 character prose alphabet: ASCII letters,
+spaces, commas, periods, semicolons, parentheses, apostrophes, and hyphens,
+beginning with a letter. Variable markers, underscores, URI/reference
+punctuation, equals signs, and token-like machine syntax are therefore invalid.
+No text grammar can reliably recognize an arbitrary secret disguised as prose;
+package authors remain prohibited from placing values or references there.
 
 ### Dependency direction
 

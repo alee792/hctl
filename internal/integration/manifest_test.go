@@ -264,6 +264,18 @@ func TestInstallationStateBindsTrustEnablementAndExactIdentities(t *testing.T) {
 	}
 }
 
+func TestRequiredEnvironmentDescriptionUsesClosedSafeProse(t *testing.T) {
+	t.Parallel()
+	if err := validateEnvironmentDescription("Ambient authentication required by the server at runtime."); err != nil {
+		t.Fatalf("safe prose: %v", err)
+	}
+	for _, value := range []string{"$TOKEN", "%TOKEN%", "GITHUB_PERSONAL_ACCESS_TOKEN", "sm://name", "op:secret-name", "ghp_example"} {
+		if err := validateEnvironmentDescription(value); err == nil {
+			t.Errorf("reference-like description %q was accepted", value)
+		}
+	}
+}
+
 func validManifest() Manifest {
 	checksum := strings.Repeat("a", 64)
 	native := &NativeMCP{

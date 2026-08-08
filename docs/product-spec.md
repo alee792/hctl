@@ -704,8 +704,10 @@ package state, staged filesystems, or retained evidence. The value is available
 to the native harness-launched server and may be visible to the harness,
 model-accessible execution tools, and inherited native processes; this
 capability does not claim to hide it. Descriptions reject common value and
-reference syntax, though hctl cannot reliably detect an arbitrary secret
-disguised as otherwise allowed prose.
+reference syntax through a closed 1-512 character prose alphabet containing
+only ASCII letters, spaces, commas, periods, semicolons, parentheses,
+apostrophes, and hyphens and beginning with a letter. Hctl still cannot
+reliably detect an arbitrary secret disguised as allowed prose.
 
 Core depends only on validated package data and narrow capability consumers.
 Vendor packages depend inward on those contracts and run as separate

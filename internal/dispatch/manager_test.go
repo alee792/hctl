@@ -1905,6 +1905,55 @@ func TestManagerOwnsCodexContinuationCapacityAndCommitsBeforeTerminalEvent(t *te
 	}
 }
 
+func TestManagerPassesResolvedWritableProjectToContinuationGuard(t *testing.T) {
+	p := testProject(t)
+	workspace := t.TempDir()
+	assignment := worktree.Assignment{Root: workspace, Branch: "hctl/test/continued"}
+	provider := &multiWorkspaceProvider{base: p, assignments: map[string]worktree.Assignment{"discord-guild": assignment}, resolveFailures: map[string]error{}}
+	driver := &projectAwareContinuationManagerDriver{managerDriver: newNamedManagerDriver("codex")}
+	manager, err := NewManagerWithWorkspace(context.Background(), p, driver, time.Minute, time.Hour, func(string, Event) error { return nil }, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	ref := manager.reference("discord-guild")
+	if _, _, err := manager.store.assignWorkspaceAndAccept(ref, assignment.Root, assignment.Branch, "message-1", "origin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.store.startNext(ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.store.setSessionID(ref, "thread-1"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 8, 3, 0, 0, 0, time.UTC)
+	coordinator, err := manager.NewInteractionCoordinator("discord-guild", dispatchRendererFunc(func(context.Context, interaction.RenderIntent) interaction.EffectOutcome {
+		return interaction.EffectSucceeded
+	}), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := storeTestLifecycle("w")
+	pending.InputID = "message-1"
+	pending.ExpiresAt = now.Add(time.Hour)
+	if err := coordinator.Request(interaction.OpenRequest{InteractionID: pending.ID, InputID: pending.InputID, Owner: pending.Owner, Request: pending.Request, Resolution: pending.Resolution, Continuation: interaction.ContinuationTurn}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Render(context.Background(), pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := true
+	if _, err := coordinator.AcceptAnswer(interaction.AnswerAttempt{InteractionID: pending.ID, Owner: pending.Owner, Answer: interaction.Answer{SchemaVersion: interaction.SchemaVersion, Action: interaction.ActionSubmit, Fields: []interaction.FieldAnswer{{FieldID: "approved", Confirmed: &confirmed}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if driver.project == nil || driver.project.WorkspaceRoot != workspace || driver.policy != harness.PolicyWorkspaceWrite || driver.standardCalls != 0 {
+		t.Fatalf("writable continuation guard = project %#v, policy %q, standard calls %d", driver.project, driver.policy, driver.standardCalls)
+	}
+}
+
 func TestManagerRestartClaimsDurableAnsweredContinuationOnce(t *testing.T) {
 	p := testProject(t)
 	ref := conversationRef{agentID: p.AgentID, harness: "codex", id: "discord-guild", fingerprint: p.SourceFingerprint}
@@ -2207,6 +2256,24 @@ type continuationManagerDriver struct {
 	*managerDriver
 	started chan struct{}
 	release chan struct{}
+}
+
+type projectAwareContinuationManagerDriver struct {
+	*managerDriver
+	project       *project.Project
+	policy        harness.ExecutionPolicy
+	standardCalls int
+}
+
+func (d *projectAwareContinuationManagerDriver) ContinueTurn(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult {
+	d.standardCalls++
+	return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+}
+
+func (d *projectAwareContinuationManagerDriver) ContinueProjectTurn(_ context.Context, p *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, _ func(harness.Event)) interaction.ContinuationResult {
+	d.project = p
+	d.policy = request.Policy
+	return interaction.ContinuationResult{Effect: interaction.EffectSucceeded, OriginOutcome: "completed", ResultSessionID: sessionID, ResultTurnID: intent.InputID}
 }
 
 func newContinuationManagerDriver() *continuationManagerDriver {

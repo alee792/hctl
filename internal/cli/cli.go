@@ -431,6 +431,13 @@ type currentContinuationDriver struct {
 }
 
 func (d *currentContinuationDriver) ContinueTurn(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	return d.ContinueProjectTurn(ctx, d.project, request, sessionID, intent, emit)
+}
+
+func (d *currentContinuationDriver) ContinueProjectTurn(ctx context.Context, p *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	if err := ensureAppliedForPolicyContext(ctx, p, d.self, d.diagnostics, request.Policy); err != nil {
+		return d.failedContinuation(err)
+	}
 	return d.continuation.ContinueTurn(ctx, request, sessionID, intent, emit)
 }
 
@@ -440,20 +447,29 @@ type currentDeferredDriver struct {
 }
 
 func (d *currentDeferredDriver) ResumeDeferredTool(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	return d.ResumeProjectDeferredTool(ctx, d.project, request, sessionID, intent, emit)
+}
+
+func (d *currentDeferredDriver) ResumeProjectDeferredTool(ctx context.Context, p *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	if err := ensureAppliedForPolicyContext(ctx, p, d.self, d.diagnostics, request.Policy); err != nil {
+		return d.failedContinuation(err)
+	}
 	return d.deferred.ResumeDeferredTool(ctx, request, sessionID, intent, emit)
 }
 
 type currentContinuationDeferredDriver struct {
-	*currentSetupDriver
-	continuation harness.ContinuationTurnDriver
-	deferred     harness.NativeDeferredToolDriver
-}
-
-func (d *currentContinuationDeferredDriver) ContinueTurn(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
-	return d.continuation.ContinueTurn(ctx, request, sessionID, intent, emit)
+	*currentContinuationDriver
+	deferred harness.NativeDeferredToolDriver
 }
 
 func (d *currentContinuationDeferredDriver) ResumeDeferredTool(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	return d.ResumeProjectDeferredTool(ctx, d.project, request, sessionID, intent, emit)
+}
+
+func (d *currentContinuationDeferredDriver) ResumeProjectDeferredTool(ctx context.Context, p *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	if err := ensureAppliedForPolicyContext(ctx, p, d.self, d.diagnostics, request.Policy); err != nil {
+		return d.failedContinuation(err)
+	}
 	return d.deferred.ResumeDeferredTool(ctx, request, sessionID, intent, emit)
 }
 
@@ -463,7 +479,7 @@ func newCurrentSetupDriver(driver harness.Driver, p *project.Project, self strin
 	deferred, hasDeferred := driver.(harness.NativeDeferredToolDriver)
 	switch {
 	case hasContinuation && hasDeferred:
-		return &currentContinuationDeferredDriver{currentSetupDriver: current, continuation: continuation, deferred: deferred}
+		return &currentContinuationDeferredDriver{currentContinuationDriver: &currentContinuationDriver{currentSetupDriver: current, continuation: continuation}, deferred: deferred}
 	case hasContinuation:
 		return &currentContinuationDriver{currentSetupDriver: current, continuation: continuation}
 	case hasDeferred:
@@ -477,8 +493,13 @@ func (d *currentSetupDriver) Open(ctx context.Context, request harness.OpenReque
 	return d.OpenProject(ctx, d.project, request)
 }
 
+func (d *currentSetupDriver) failedContinuation(err error) interaction.ContinuationResult {
+	_, _ = fmt.Fprintf(d.diagnostics, "native continuation setup failed: %v\n", err)
+	return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
+}
+
 func (d *currentSetupDriver) OpenProject(ctx context.Context, p *project.Project, request harness.OpenRequest) (harness.Session, error) {
-	if err := ensureAppliedContext(ctx, p, d.self, d.diagnostics); err != nil {
+	if err := ensureAppliedForPolicyContext(ctx, p, d.self, d.diagnostics, request.Policy); err != nil {
 		return nil, err
 	}
 	return d.Driver.Open(ctx, request)
@@ -802,6 +823,10 @@ func ensureApplied(p *project.Project, self string, stderr io.Writer) error {
 }
 
 func ensureAppliedContext(ctx context.Context, p *project.Project, self string, stderr io.Writer) error {
+	return ensureAppliedForPolicyContext(ctx, p, self, stderr, harness.PolicyDefault)
+}
+
+func ensureAppliedForPolicyContext(ctx context.Context, p *project.Project, self string, stderr io.Writer, policy harness.ExecutionPolicy) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -812,7 +837,11 @@ func ensureAppliedContext(ctx context.Context, p *project.Project, self string, 
 	if err := setup.ValidateNativeMCP(p, nativeMCP); err != nil {
 		return err
 	}
-	if err := setup.Verify(p); err == nil && len(nativeMCP) == 0 {
+	verify := setup.Verify
+	if policy == harness.PolicyWorkspaceWrite {
+		verify = setup.VerifyWritableChannel
+	}
+	if err := verify(p); err == nil && len(nativeMCP) == 0 {
 		return nil
 	}
 	prepareContext, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -824,7 +853,12 @@ func ensureAppliedContext(ctx context.Context, p *project.Project, self string, 
 	if err != nil {
 		return err
 	}
-	result, err := setup.ApplyWithNativeMCP(p, executable, nativeMCP)
+	var result setup.Result
+	if policy == harness.PolicyWorkspaceWrite {
+		result, err = setup.ApplyWritableChannelWithNativeMCP(p, executable, nativeMCP)
+	} else {
+		result, err = setup.ApplyWithNativeMCP(p, executable, nativeMCP)
+	}
 	if err != nil {
 		return err
 	}

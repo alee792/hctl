@@ -665,22 +665,42 @@ type managerContinuation struct {
 	conversation string
 }
 
+type projectContinuationTurnDriver interface {
+	ContinueProjectTurn(context.Context, *project.Project, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
+}
+
+type projectDeferredToolDriver interface {
+	ResumeProjectDeferredTool(context.Context, *project.Project, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
+}
+
 func (c *managerContinuation) Resume(ctx context.Context, intent interaction.ContinuationIntent) interaction.ContinuationResult {
 	m := c.manager
-	var continueTurn func(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
+	var continueTurn func(context.Context, *project.Project, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
 	switch intent.Mode {
 	case interaction.ContinuationTurn:
 		driver, ok := m.driver.(harness.ContinuationTurnDriver)
 		if !ok {
 			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
 		}
-		continueTurn = driver.ContinueTurn
+		if current, ok := m.driver.(projectContinuationTurnDriver); ok {
+			continueTurn = current.ContinueProjectTurn
+		} else {
+			continueTurn = func(ctx context.Context, _ *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+				return driver.ContinueTurn(ctx, request, sessionID, intent, emit)
+			}
+		}
 	case interaction.ContinuationNativeDeferredTool:
 		driver, ok := m.driver.(harness.NativeDeferredToolDriver)
 		if !ok || intent.ContinuationKey == "" {
 			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
 		}
-		continueTurn = driver.ResumeDeferredTool
+		if current, ok := m.driver.(projectDeferredToolDriver); ok {
+			continueTurn = current.ResumeProjectDeferredTool
+		} else {
+			continueTurn = func(ctx context.Context, _ *project.Project, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+				return driver.ResumeDeferredTool(ctx, request, sessionID, intent, emit)
+			}
+		}
 	default:
 		return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
 	}
@@ -741,7 +761,7 @@ func (c *managerContinuation) Resume(ctx context.Context, intent interaction.Con
 		m.mu.Unlock()
 	}()
 	emitErr := error(nil)
-	result := continueTurn(turnCtx, harness.OpenRequest{Root: p.WorkspaceRoot, Policy: policy}, snapshot.sessionID, intent, func(event harness.Event) {
+	result := continueTurn(turnCtx, p, harness.OpenRequest{Root: p.WorkspaceRoot, Policy: policy}, snapshot.sessionID, intent, func(event harness.Event) {
 		if emitErr == nil {
 			emitErr = m.emit(c.conversation, fromHarness(event, intent.InputID))
 			if emitErr != nil {

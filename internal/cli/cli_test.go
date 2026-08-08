@@ -19,6 +19,7 @@ import (
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
 	"hctl/internal/integration"
+	"hctl/internal/interaction"
 	"hctl/internal/project"
 	"hctl/internal/schedule"
 	"hctl/internal/setup"
@@ -344,6 +345,176 @@ func TestDelayedChannelOpenAndReopenUseCurrentGitHubPackage(t *testing.T) {
 	}
 	if session, err := driver.OpenProject(context.Background(), p, harness.OpenRequest{Root: source, ResumeID: "second-reopen", Policy: harness.PolicyReadOnly}); err == nil || session != nil || underlying.opens != 2 {
 		t.Fatalf("corrupt channel reopen = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+}
+
+func TestGuardedWritableChannelOpenPreservesWritableSetup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageRoot := writeCLIGitHubPackage(t, "1.8.0", []byte("#!/bin/sh\n# writable-channel\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "writable-channel-agent")
+	writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Writable channel agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(root, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+	writeCLIFile(t, filepath.Join(root, "channels", "discord.md"), "---\nmode: ambient\n---\n\nParticipate when useful.\n", 0o644)
+	p, err := project.Load(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, err := resolveProjectNativeMCP(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.ApplyWritableChannelWithNativeMCP(p, self, servers); err != nil {
+		t.Fatal(err)
+	}
+	underlying := &countingContinuationDriver{}
+	driver := newCurrentSetupDriver(underlying, p, self, io.Discard)
+	guarded := driver.(interface {
+		OpenProject(context.Context, *project.Project, harness.OpenRequest) (harness.Session, error)
+	})
+	request := harness.OpenRequest{Root: root, Policy: harness.PolicyWorkspaceWrite}
+	for attempt := 1; attempt <= 2; attempt++ {
+		session, err := guarded.OpenProject(context.Background(), p, request)
+		if err != nil || session == nil || underlying.opens != attempt {
+			t.Fatalf("writable guarded open %d = session %#v, opens %d, error %v", attempt, session, underlying.opens, err)
+		}
+		if err := setup.VerifyWritableChannel(p); err != nil {
+			t.Fatalf("writable setup after guarded open %d: %v", attempt, err)
+		}
+	}
+	continuation := driver.(interface {
+		ContinueProjectTurn(context.Context, *project.Project, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult
+	})
+	result := continuation.ContinueProjectTurn(context.Background(), p, request, "persisted-session", interaction.ContinuationIntent{}, func(harness.Event) {})
+	if result.Effect != interaction.EffectSucceeded || underlying.continuations != 1 {
+		t.Fatalf("writable guarded continuation = %+v, starts %d", result, underlying.continuations)
+	}
+	if err := setup.VerifyWritableChannel(p); err != nil {
+		t.Fatalf("writable setup after guarded continuation: %v", err)
+	}
+	if instructions := readCLIFile(t, filepath.Join(root, "AGENTS.md")); !strings.Contains(instructions, "already has workspace-write access") || strings.Contains(instructions, "enforced read-only") {
+		t.Fatalf("guard downgraded writable instructions: %s", instructions)
+	}
+	if record := readCLIFile(t, filepath.Join(root, ".hctl", "apply", "codex.json")); !strings.Contains(record, `"channel_writable": true`) {
+		t.Fatalf("guard downgraded writable apply record: %s", record)
+	}
+}
+
+func TestParkedContinuationsRevalidateCurrentGitHubPackage(t *testing.T) {
+	for _, harnessName := range []string{"codex", "claude"} {
+		t.Run(harnessName, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			store, err := integration.NewDefaultStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := writeCLIGitHubPackage(t, "1.8.0", []byte("#!/bin/sh\n# parked-first\nexit 0\n"))
+			if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Join(t.TempDir(), harnessName+"-parked-agent")
+			writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Parked continuation agent.\n---\n\nBe concise.\n", 0o644)
+			writeCLIFile(t, filepath.Join(root, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+			p, err := project.Load(root, harnessName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			servers, err := resolveProjectNativeMCP(context.Background(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := setup.ApplyWithNativeMCP(p, self, servers); err != nil {
+				t.Fatal(err)
+			}
+
+			starts := 0
+			var diagnostics bytes.Buffer
+			var invoke func() interaction.ContinuationResult
+			if harnessName == "codex" {
+				underlying := &countingContinuationDriver{}
+				driver := newCurrentSetupDriver(underlying, p, self, &diagnostics).(harness.ContinuationTurnDriver)
+				invoke = func() interaction.ContinuationResult {
+					result := driver.ContinueTurn(context.Background(), harness.OpenRequest{Root: root, Policy: harness.PolicyReadOnly}, "persisted-session", interaction.ContinuationIntent{}, func(harness.Event) {})
+					starts = underlying.continuations
+					return result
+				}
+			} else {
+				underlying := &countingDeferredDriver{}
+				driver := newCurrentSetupDriver(underlying, p, self, &diagnostics).(harness.NativeDeferredToolDriver)
+				invoke = func() interaction.ContinuationResult {
+					result := driver.ResumeDeferredTool(context.Background(), harness.OpenRequest{Root: root, Policy: harness.PolicyReadOnly}, "persisted-session", interaction.ContinuationIntent{}, func(harness.Event) {})
+					starts = underlying.continuations
+					return result
+				}
+			}
+
+			if err := store.SetEnabled(context.Background(), "github-mcp-server", false); err != nil {
+				t.Fatal(err)
+			}
+			if result := invoke(); result.Effect != interaction.EffectFailed || starts != 0 || !strings.Contains(diagnostics.String(), "disabled") {
+				t.Fatalf("disabled parked continuation = %+v, starts %d", result, starts)
+			}
+			diagnostics.Reset()
+			if err := store.SetEnabled(context.Background(), "github-mcp-server", true); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Remove(context.Background(), "github-mcp-server"); err != nil {
+				t.Fatal(err)
+			}
+			if result := invoke(); result.Effect != interaction.EffectFailed || starts != 0 || !strings.Contains(diagnostics.String(), "not installed") {
+				t.Fatalf("removed parked continuation = %+v, starts %d", result, starts)
+			}
+			diagnostics.Reset()
+			if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
+				t.Fatal(err)
+			}
+			second := writeCLIGitHubPackage(t, "1.8.1", []byte("#!/bin/sh\n# parked-second\nexit 0\n"))
+			if _, err := store.Install(context.Background(), integration.InstallOptions{Source: second, Trust: integration.TrustOperator, UpdatePackageID: "github-mcp-server"}); err != nil {
+				t.Fatal(err)
+			}
+			current, err := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result := invoke(); result.Effect != interaction.EffectSucceeded || starts != 1 {
+				t.Fatalf("updated parked continuation = %+v, starts %d", result, starts)
+			}
+			diagnostics.Reset()
+			configPath := filepath.Join(root, ".codex", "config.toml")
+			if harnessName == "claude" {
+				configPath = filepath.Join(root, ".mcp.json")
+			}
+			if config := readCLIFile(t, configPath); !strings.Contains(config, current.Executable) {
+				t.Fatalf("parked continuation retained stale executable: %s", config)
+			}
+			if err := os.Chmod(current.Executable, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(current.Executable, []byte("corrupt"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if result := invoke(); result.Effect != interaction.EffectFailed || starts != 1 || !strings.Contains(diagnostics.String(), "cache is corrupt") {
+				t.Fatalf("corrupt parked continuation = %+v, starts %d", result, starts)
+			}
+		})
 	}
 }
 
@@ -947,6 +1118,26 @@ func (d *countingOpenDriver) Verify(context.Context) error { return nil }
 func (d *countingOpenDriver) Open(context.Context, harness.OpenRequest) (harness.Session, error) {
 	d.opens++
 	return countingSession{}, nil
+}
+
+type countingContinuationDriver struct {
+	countingOpenDriver
+	continuations int
+}
+
+func (d *countingContinuationDriver) ContinueTurn(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult {
+	d.continuations++
+	return interaction.ContinuationResult{Effect: interaction.EffectSucceeded, OriginOutcome: "completed"}
+}
+
+type countingDeferredDriver struct {
+	countingOpenDriver
+	continuations int
+}
+
+func (d *countingDeferredDriver) ResumeDeferredTool(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult {
+	d.continuations++
+	return interaction.ContinuationResult{Effect: interaction.EffectSucceeded, OriginOutcome: "completed"}
 }
 
 type countingSession struct{}

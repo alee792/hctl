@@ -14,7 +14,9 @@ operator-installed packages containing external executables. Hctl validates a
 small manifest without executing the package, then gives each recognized
 capability to its own narrow consumer. The first capability is a native stdio
 MCP server. Its process belongs to Claude Code or Codex after hctl writes native
-configuration; it does not become an hctl-managed tool.
+configuration; it does not become an hctl-managed tool. The second capability
+is a bounded semantic channel adapter whose external process remains owned by a
+separate narrow channel host.
 
 ## Decision
 
@@ -37,8 +39,8 @@ source is a closed union:
 
 Both forms remain pinned by size and checksum. Metadata validation reads no
 artifact. It does not resolve a symlink, fetch a URL, inspect an archive, load a
-library, or start a process. Installation and content verification are the
-separate work of #76.
+library, or start a process. Installation and content verification remain a
+separate phase from metadata validation and are defined below.
 
 Decoded package values retain their validated manifest privately and return
 defensive metadata copies. Capability selection therefore always derives from
@@ -59,8 +61,8 @@ SHA-256, explicit `operator` trust, package-level enabled flag, verified
 artifact and executable SHA-256 identities, and the exact id/type/version of
 every declared capability. Validation binds all fields back to the immutable
 manifest. It contains no executable path, credential material, or runtime
-value. #76 persists that state and implements its commands; it does not invent
-the state contract. Portable source may request a known package capability,
+value. The installer persists that state and implements its commands; it does
+not invent the state contract. Portable source may request a known package capability,
 but it cannot choose a source or installed version, install or enable a
 package, grant machine trust, or carry a credential.
 
@@ -125,6 +127,52 @@ capability tags, enablement, and selective closure. MCP configuration, channel
 transport, credentials, providers, and other runtime behavior remain separate
 capability domains.
 
+### Installation, cache, and offline selection
+
+The initial installer accepts one explicit operator-trusted local package
+directory, zip archive, or tar.gz archive. Its root contains the exact
+`integration.json`. Package artifacts are either safe relative payloads under
+that source or the exact manifest-pinned HTTPS URLs already defined above.
+Redirects are not followed. A different manifest under an installed package id
+requires an explicit `update` naming that id and another `operator` trust
+decision; ordinary install never causes version or manifest drift.
+
+One owner-only OS-user store is shared across agents and workspaces. It keeps
+exact manifests and raw platform artifacts by SHA-256 and prepares binary,
+zip, and tar.gz artifacts into immutable content-addressed regular-file trees.
+Every prepared tree carries a bounded receipt of its paths, sizes, hashes, and
+normalized modes. Its content key includes the raw artifact size and SHA-256,
+format, and expected executable path, size, and SHA-256, so distinct
+transformations of the same raw bytes never alias and a valid immutable entry
+is never replaced. Install validates the current hctl compatibility interval,
+host platform, source ownership, archive containment, raw identity, prepared
+executable identity, and every closed capability before atomically replacing
+the small installation-state record under a store lock. It never executes a
+package. Cache bytes published before an interruption are inert until an exact
+valid installation state selects them.
+
+Inspection and verification are separate: inspect can report the immutable
+non-secret manifest and installed identities without opening a process, while
+offline verify rehashes the raw artifact and every prepared file. Disable
+prevents future resolution. Enable first verifies. Remove deletes only the
+exact installation record and deliberately retains shared content-addressed
+bytes. A separate non-secret consumption receipt may bind agent identity and
+selected capability ids to the exact current manifest for diagnostics; it
+contains no workspace, executable, or environment value and grants no trust.
+Broad cache garbage collection remains deferred.
+
+The offline lookup verifies enabled state, compatibility, artifact closure,
+and executable identity, then returns defensive package metadata plus exact
+prepared paths. A capability consumer supplies the artifact ids from its own
+closed schema. Generic selective staging copies only those verified ids to the
+canonical package/manifest/artifact prefix. The installer does not infer MCP,
+channel, credential, policy, confirmation, or process behavior from them. The
+native-MCP consumer may derive a credential-free, harness-targeted launch
+descriptor containing the exact executable, literal arguments and defaults,
+working directory, ambient variable names, startup, and trust metadata. It
+does not resolve ambient values, start the process, select authored source, or
+write Claude or Codex configuration; that generation remains #67.
+
 ## Context
 
 Vendored Agent Plugins under authored `plugins/` are portable project source.
@@ -144,15 +192,16 @@ rebuilding hctl.
 
 ## Consequences
 
-- The credentialless native-MCP fixture and official `github-mcp-server`
-  executable metadata validate and select through the same vendor-neutral
-  code path.
+- The credentialless native-MCP fixture, deterministic no-op channel-adapter
+  fixture, and official `github-mcp-server` executable metadata install,
+  validate, and select through the same vendor-neutral envelope without
+  sharing a capability runtime.
 - An unknown capability or later unsupported `channel-adapter` version is
   rejected without reading or executing its artifact.
 - Root hctl dependencies remain independent of package SDKs.
-- #76 may implement local and pinned-HTTPS installation, shared cache, offline
-  apply, enablement, and selective staging without learning MCP runtime
-  semantics.
+- Local and pinned-HTTPS installation, shared immutable cache, offline lookup,
+  enablement, and selective staging use the same common envelope without
+  learning MCP runtime semantics.
 - Existing vendored Agent Plugins and their native MCP generation remain
   unchanged.
 - Registry search, git/npm/Go installers, package scripts, automatic updates,

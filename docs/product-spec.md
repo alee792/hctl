@@ -717,8 +717,8 @@ every capability has its own narrow data or process contract. Package
 installation and enablement are operator-owned machine state bound to the
 exact manifest and artifact identities. Portable agent source cannot choose an
 install source or version, install or enable a package, grant machine trust, or
-carry a credential. The install/cache/CLI journey remains the next delivery;
-apply does not gain a network path from this contract alone.
+carry a credential. The install/cache/CLI journey below remains distinct from
+capability-specific generation; apply does not gain a network path.
 
 The closed installation-state schema records package id and version, manifest
 SHA-256, explicit operator trust, package-level enablement, verified artifact
@@ -726,8 +726,71 @@ and executable hashes, and every declared capability's id, type, and version.
 It contains no path, credential, or runtime value and validates back to the
 immutable decoded manifest. Package metadata access and native-MCP selection
 use defensive copies, so caller mutation cannot pair changed executable data
-with the original manifest identity. The later installer persists this already
-defined state rather than defining another package contract.
+with the original manifest identity.
+
+`hctl integration install SOURCE --trust operator` is the only initial trust
+and installation journey. `SOURCE` is an existing real owner-controlled local
+directory, zip archive, or tar.gz archive whose root contains
+`integration.json`; portable agent source and `apply` never select that source
+or grant trust. A package-local artifact is read beneath that source without
+following symlinks. A pinned HTTPS artifact is fetched only from the exact
+manifest URL, without redirects, and accepted only at its exact declared size
+and SHA-256. There is no registry search, package script, dependency resolver,
+git/npm/Go installer, or signature claim.
+
+Installation validates the manifest, closed capability metadata, current hctl
+compatibility, and the host platform before preparing an artifact. It rejects
+foreign or broadly writable local source entries, symlinks, path escape,
+duplicate or unsupported archive entries, unsupported platforms, ambiguous
+package ids, implicit identity drift, and artifact or executable mismatch.
+Binary, zip, and tar.gz platform artifacts are normalized into bounded private
+regular-file closures; archive links, devices, and other special entries are
+never retained. Hctl does not start an artifact during install, inspection,
+verification, or setup.
+
+Exact manifests, raw artifacts, and prepared closures live in one owner-only
+OS-user integration store shared across agents and workspaces. Raw and prepared
+entries are content-addressed, verified before reuse, and published atomically
+under a store lock. The prepared closure includes a deterministic file receipt
+so later corruption of the executable or a sibling runtime file fails closed.
+Its cache identity binds the raw artifact size and SHA-256, archive format, and
+expected executable path, size, and SHA-256; two transformation contracts over
+the same raw bytes therefore cannot alias or replace one another. A valid
+immutable prepared entry is reused rather than replaced.
+Only the small installation-state record selects the current exact package;
+interruption before that atomic write can leave inert unreferenced cache bytes
+but cannot publish a partial installation. `hctl integration update ID SOURCE
+--trust operator` is the only identity-changing path. Install of a different
+manifest under an existing id fails with that remedy rather than drifting.
+
+`integration inspect`, `verify`, `list`, `enable`, `disable`, and `remove`
+operate only on that owner-controlled store. Inspect reports identity,
+provenance, compatibility, platform artifacts, executable identities,
+capabilities, and required ambient names/descriptions; it does not read or
+print environment values. Verify is offline and rechecks the full cached
+closure. Disable removes a package from future resolution without deleting its
+metadata; enable first verifies it. Remove retires only the selected install
+record and its non-secret consuming-agent receipts. A capability consumer may
+record one receipt only after successful exact resolution; it contains agent
+identity, manifest identity, and selected capability ids, never a workspace or
+executable path. Inspect reports only receipts for the currently installed
+manifest. Shared content-addressed bytes remain inert for exact offline reuse;
+broad cache garbage collection is not part of this slice.
+
+Apply and staging use an offline lookup that requires an enabled compatible
+installation and re-verifies its exact manifest, artifact, prepared closure,
+and executable. Each narrow capability consumer names its own artifact ids.
+The common layer returns immutable metadata and exact local paths without
+interpreting runtime behavior. Selective staging copies only those named
+closures beneath `/opt/hctl/integrations/PACKAGE/MANIFEST/ARTIFACT/`; an agent
+that requests no integration contributes no package artifacts. The consumer
+that maps a validated authored connection or channel request into this lookup
+remains with that capability's delivery, rather than becoming a generic plugin
+runtime. For `native-mcp`, the offline consumer can derive a credential-free,
+harness-targeted launch descriptor from the exact installed metadata and
+verified paths. It does not read ambient values or write native configuration.
+#67 remains responsible for mapping authored connection source into generated
+Claude and Codex configuration and proving the native runtime journey.
 
 The first recognized capability is `native-mcp` version 1. It declares a
 stable native server name with collision behavior fixed to rejection, the exact

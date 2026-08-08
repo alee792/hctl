@@ -33,7 +33,10 @@ The repository contains a small Go CLI that:
   without overwriting hand-authored files;
 - validates bounded metadata-first integration package manifests, immutable
   manifest/artifact/executable identities, and the closed `native-mcp` v1 and
-  `channel-adapter` v1 capabilities without loading or executing package code;
+  `channel-adapter` v1 capabilities without loading or executing package code,
+  and installs exact local or pinned-HTTPS platform artifacts into an
+  owner-only shared immutable cache with offline verification, enablement, and
+  selective staging;
 - keeps one apply record, migrates legacy projection records, and removes the
   obsolete duplicated runtime manifest;
 - discovers, prepares, validates, and exposes TypeScript, Python, and Go tool
@@ -340,10 +343,11 @@ ADR 0030 now defines the shared metadata-first envelope for operator-installed
 process-isolated integration packages and its first closed `native-mcp` v1
 capability. Exact manifest bytes, platform artifacts, and post-preparation
 executables have immutable identities; capability artifact references form the
-selective runtime/staging closure. A credentialless fixture and official
-`github-mcp-server` metadata use the same vendor-neutral validation and
- selection path. ADR 0031 now specializes that contract for the
- GitHub connection: native server name `github`, exact installed executable plus
+selective runtime/staging closure. A credentialless native fixture, a
+deterministic no-op channel-adapter fixture, and official `github-mcp-server`
+metadata use the same vendor-neutral validation and selection path without
+sharing a runtime contract. ADR 0031 now specializes that contract for the
+GitHub connection: native server name `github`, exact installed executable plus
 `stdio`, prepared package working directory, optional startup, native project
 trust, ambient `GITHUB_PERSONAL_ACCESS_TOKEN`, rejection on generated-name
 collision, and native ownership of missing-auth diagnostics and every GitHub
@@ -351,12 +355,14 @@ effect. It prominently accepts that the harness/model can access the PAT,
 retains one local/headless environment contract, leaves native Git and `gh`
 operator-owned, and keeps ADR 0009 unchanged for future secret-bearing managed
 operations. The credentialless native fixture is the configuration-generation
-evidence path; no live PAT or broker is required. Installer/cache/CLI behavior
-remains #76, official artifact packaging remains #66, and native generation and
- runtime proof remain #67. The currently shipped anonymous managed GitHub code
- has not yet been removed.
+evidence path; no live PAT or broker is required. #76 resolves that fixture to
+an offline harness-targeted launch descriptor and selectively stages its exact
+closure, but it does not map authored source or write native configuration.
+Official artifact packaging remains #66, and source-to-Claude/Codex generation
+and native runtime proof remain #67. The currently shipped anonymous managed GitHub code
+has not yet been removed.
 
- ADR 0032 and the dependency-free `hctl/channeladapter` module now define the
+ADR 0032 and the dependency-free `hctl/channeladapter` module now define the
 second closed capability and its version-1 process protocol. Package metadata
 pins one exact executable, fixed runtime/setup/status/remove modes, protocol
 range, non-secret profile selector, feature declaration, and selective
@@ -369,7 +375,25 @@ backpressure, deadlines,
 process cleanup, credential ownership, same-user limitations, and dependency
 direction are explicit. The production Discord code has not moved and no
 generic process host exists yet; #83 and #84 consume this contract before #85
- removes the in-process implementation and Discord-only root dependencies.
+removes the in-process implementation and Discord-only root dependencies.
+
+The package CLI now requires explicit operator
+trust for local directory/archive installation and exact selected updates,
+fetches only checksum-and-size-pinned HTTPS artifacts without redirects, and
+supports non-secret inspect/list, offline verify, enable/disable, and exact
+metadata removal. One locked owner-only content-addressed store atomically
+publishes raw and prepared current-platform artifacts for reuse across
+workspaces. Prepared receipts detect sibling-runtime corruption as well as
+executable drift. Offline resolution gives each narrow capability consumer
+only defensive metadata and verified paths; generic staging copies only the
+artifact ids that consumer selects. The native consumer can derive a
+credential-free launch descriptor without reading ambient values or generating
+harness files. No package execution, credential flow, native MCP generation,
+or channel protocol is present in the installer. #65
+and #82 supply the two closed capability contracts, while #76 supplies their
+shared installed-artifact boundary. #66 and #67 consume that boundary for the
+official GitHub package and native harness generation; #83 and #84 consume it
+for the external channel-adapter host and Discord module.
 
 The channel runtime now owns explicit independent managed session lifecycles
 for its configured Discord guild and DM surfaces. Idle lifecycles release their

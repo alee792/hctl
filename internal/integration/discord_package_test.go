@@ -1,3 +1,5 @@
+//go:build externalintegration
+
 package integration
 
 import (

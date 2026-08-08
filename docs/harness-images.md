@@ -107,6 +107,25 @@ The Linux/amd64 image check builds both GitHub-bearing direct/staged images and
 a GitHub-free counterpart with a conspicuous runtime-only fake marker; it never
 starts the official server or uses a live credential.
 
+An agent with `channels/discord.md` separately requires the exact installed
+`hctl-discord` package before direct `apply` or `stage`. Direct images retain
+the operator-installed shared package store. Selective staging copies only the
+adapter's verified current-platform artifact plus one non-secret descriptor
+bound to the agent id, source fingerprint, package manifest, capability, and
+executable hash. The generated staged entrypoint selects only that adjacent
+descriptor; a normal direct hctl invocation ignores an arbitrary descriptor
+environment path. Agents without the Discord channel stage no adapter artifact
+or descriptor.
+
+Inject `HCTL_DISCORD_TOKEN` only when the container starts. Never place it in
+an image `ARG`, `ENV`, build secret, source tree, package metadata, or staged
+filesystem. Hctl passes the opaque value only to the exact adapter and scrubs
+both the value and its internal staged-descriptor locator from harness, MCP,
+tool-host, and unrelated child environments. Mount adapter profile state,
+channel durable state, the workspace, and harness home on storage appropriate
+to the deployment. Process separation is dependency and ownership isolation,
+not an OS sandbox or protection from a malicious same-user process.
+
 ## Release identity and verification
 
 The release workflow publishes the already-checked Codex source image, not a

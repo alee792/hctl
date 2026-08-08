@@ -386,7 +386,7 @@ repository gate and requires separate authorization.
 
 The optional `channels/discord.md` file contains strict `mode: ambient`
 frontmatter and a 1-1024 character UTF-8 Markdown participation policy. Its
-conventional path registers the built-in `discord` channel; any other entry
+conventional path registers the `discord` channel; any other entry
 under `channels/` fails before workspace mutation. The file contains no runtime
 identity, authorization ID, profile, or credential. It joins the source
 fingerprint, and apply adds its policy plus the exact `HCTL_NO_REPLY` control
@@ -406,16 +406,15 @@ selection, a legacy per-agent/default selector during the transition, and
 finally `default`. Successful setup records only the agent, channel kind, and
 opaque profile id in hctl's owner-only selection store; successful remove
 clears that binding only when it still names the removed profile. Hctl reads no
-Discord profile fields or credential through either lookup. Operators can roll
-back with a previous hctl binary while the old implementation and legacy
-configuration remain through the final dependency cutover; the new production
-path itself never falls back silently.
+Discord profile fields or credential through either lookup. The adapter alone
+reads and migrates the legacy vendor profile fields. There is no in-process
+Discord implementation or fallback in hctl core.
 
 `hctl run` auto-applies a missing or stale generated harness integration, then
 resolves the exact apply-time package selection and launches the external
 adapter automatically. Missing, disabled, incompatible, ambiguous, or stale
 selection fails with an install, enable, setup, or reapply remedy and never
-falls back to the retained in-process code. The adapter serves the authorized
+falls back to in-process vendor code. The adapter serves the authorized
 user in one guild channel and DM. Each surface has
 independent durable dispatcher state. It is explicitly direct or shared and
 core receives only its stable conversation id plus hashed owner keys; vendor
@@ -996,11 +995,20 @@ shared package store. Credential-free fakes prove its four modes and runtime
 protocol. See [ADR 0033](adr/0033-package-discord-as-an-external-channel-adapter.md).
 
 The production `hctl channel setup|status|remove discord` and `hctl run` paths
-now select the exact installed executable and use the generic bounded process
+select the exact installed executable and use the generic bounded process
 host. Apply records the exact package/capability consumption; a later package
-change requires reapply before launch. The retained in-process implementation
-is not a fallback. Its code and Discord-only root dependencies remain
-temporarily for rollback until the separate final-cutover delivery.
+change requires reapply before launch. Hctl core contains no Discord transport,
+credential implementation, Discord SDK, or keyring dependency.
+
+Selective staging resolves the same exact installed capability offline, copies
+only its current-platform artifact, and emits one strict non-secret descriptor
+bound to the agent id, source fingerprint, manifest identity, capability, and
+executable hash. The generated staged entrypoint alone selects that adjacent
+descriptor. A normal direct invocation cannot use an arbitrary ambient path to
+redirect adapter execution. Agents without `channels/discord.md` stage neither
+the descriptor nor the adapter closure. Profiles, credentials, and durable
+channel state remain runtime mounts or injected values rather than staged
+content.
 
 Core depends only on validated package data and narrow capability consumers.
 Vendor packages depend inward on those contracts and run as separate

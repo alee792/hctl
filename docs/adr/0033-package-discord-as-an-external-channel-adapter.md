@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Runtime integration: external host wired on 2026-08-08
+- Dependency cutover: completed on 2026-08-08
 - Specializes: [ADR 0032](0032-use-a-bounded-semantic-channel-adapter-protocol.md)
 - Extracts transport ownership from: [ADR 0028](0028-use-a-conversational-discord-gateway-channel.md)
 - Preserves interaction behavior from: [ADR 0025](0025-render-discord-input-with-bounded-native-components.md)
@@ -67,7 +68,8 @@ Discord message.
 Hctl continues to own portable participation policy, controller and
 dispatcher state, model execution, sessions, worktrees, capacity, hibernation,
 and durable generic interaction state. The process host now wires the external
-adapter into those owners. The final dependency cutover remains separate.
+adapter into those owners. The root module no longer contains the retired
+transport or credential code and no longer depends on DiscordGo or keyring.
 
 ## Credentials and profiles
 
@@ -116,10 +118,11 @@ The separate module has its own `go.mod`, `go.sum`, and third-party license
 record. A deterministic builder supports Darwin and Linux on amd64 and arm64,
 uses trimmed build paths and no build id, and emits one package-local binary
 plus an exact schema-1 manifest containing its measured size and SHA-256. A
-credential-free root test builds that external module, installs it through the
-shared operator-trusted store, resolves the exact `discord` capability offline,
-and selectively stages its executable through the same #76 boundary used by
-other integration packages.
+credential-free cross-module acceptance gate builds the adapter separately,
+installs it through the shared operator-trusted store, resolves the exact
+`discord` capability offline, and selectively stages its executable through the
+same #76 boundary used by other integration packages. Ordinary root builds and
+tests exclude that gate and never compile or download Discord dependencies.
 
 Fake Discord, credential, profile, lock, and protocol counterparts prove
 setup/status/remove, migration, identity, Gateway lifecycle, authorized inbound
@@ -131,11 +134,11 @@ evidence.
 ## Consequences
 
 - DiscordGo, WebSocket, keyring, and Discord transport tests now have an
-  independently buildable dependency home, while the old root imports remain
-  temporarily until cutover.
+  independently buildable dependency home; the root module has none of those
+  dependencies.
 - Installing this package does not activate Discord. `hctl channel setup` and
-  `hctl run` select its verified capability explicitly; the old adapter is not
-  a production fallback and remains only until the final dependency cutover.
+  `hctl run` select its verified capability explicitly; no in-process fallback
+  remains.
 - Release automation can build exact platform packages without rebuilding the
   hctl executable. A multi-platform release is a set of exact platform package
   manifests; apply and capability resolution remain offline.

@@ -8,29 +8,25 @@
 
 ## Automated evidence
 
-`TestDiscordInteractiveRequestProcessExitAndExactContinuation` drives an
-authorized guild message through the production Discord runtime. For both
-Claude and Codex, the fake child speaks the harness's native protocol, requests
-a confirmation, exits after the durable park, and leaves active and resident
-capacity at zero. A native Discord callback then commits and acknowledges the
-answer before continuation. Claude resumes the retained session and exact
-deferred tool call through the one-shot broker; Codex resumes the same thread
-in a new turn. Exactly one bounded, mention-disabled response references the
-originating message. The durable origin finishes once with no queued successor.
+The current automation crosses the installed external-adapter process boundary.
+`TestExternalAdapterInteractionsControlsRecoveryAndFailures` drives semantic
+interaction render, exact receipt, authorized answer, cancellation, status and
+reset, delivered-interaction restoration, ambiguity, child failure, and
+recovery through the process host. `TestInteractionAcknowledgesDiscordOnlyAfterDurableEventAck`
+and the adjacent adapter regressions prove vendor acknowledgement follows
+durable event acceptance, hostile or stale callback state fails closed, and
+ambiguous effects are not replayed. Claude and Codex external-host conversation
+tests separately prove that normalized Discord input reaches both native
+harness drivers while the adapter-only token stays out of their environments
+and retained diagnostics.
 
-The same stitched test proves `/new` is busy while input is pending and a
-second ordinary message receives an explicit bounded busy response without
-entering the queue. Child-process assertions prove the Discord token and
-semantic or correlation canaries are absent from unintended environments and
-arguments. Audit assertions prove credentials, prompts, answers, callback
-handles, input IDs, interaction IDs, tool-call IDs, and session IDs are absent.
-`TestDiscordCodexRequestInputRemainsAvailableAfterNew` completes one DM
-interaction, resets it through `/new`, proves the fresh Codex `thread/start`
-registers the dynamic managed tool again, and parks a second choice request
-through a newly created controller coordinator. A deterministic concurrency
-test blocks old coordinator construction across reset, reuses the same external
-surface and conversation identifiers, and proves generation revalidation
-discards the stale coordinator instead of publishing it into the new surface.
+Controller, dispatcher, and interaction-store tests remain the authority for
+durable parking, busy `/new`, exact continuation, generation revalidation,
+capacity release, and restart transitions. The adapter-host recovery test binds
+those generic guarantees to external interaction restore-before-replay. The
+separate adapter owns only callback authorization, rendering, transport
+acknowledgement, and vendor state; it cannot write the durable interaction
+lifecycle directly.
 
 The model-facing request schema is a per-kind discriminated union whose
 required properties match runtime validation. In particular, `choose_one`
@@ -54,11 +50,11 @@ that should not be recreated by timing real processes:
 | Contract | Evidence |
 | --- | --- |
 | Duplicate, conflicting, late, expired, and cancelled answers | `internal/interaction/coordinator_test.go` |
-| Unauthorized, cross-surface, malformed, and stale callbacks | `internal/channel/discord/discord_test.go` |
-| Restart before render, after answer, around resume intent, and no retry after ambiguity | Coordinator, manager, and Discord restart tests |
+| Unauthorized, cross-surface, malformed, and stale callbacks | `discordadapter/adapter_test.go` and `discordadapter/review_regression_test.go` |
+| Restart before render, after answer, around resume intent, and no retry after ambiguity | Coordinator, manager, adapter-host recovery, and Discord-adapter replay tests |
 | Queue saturation, fair admission, idle hibernation, shutdown, and parked-slot release | Capacity, manager, and stitched process tests |
-| Bounds, disabled mentions, acknowledgement ordering, and ambiguous delivery | Discord and controller tests |
-| Environment, diagnostics, status, and audit redaction | Secure-environment, CLI, MCP, controller, Discord, and stitched tests |
+| Bounds, disabled mentions, acknowledgement ordering, and ambiguous delivery | Channel-adapter protocol, adapter-host, Discord-adapter, and controller tests |
+| Environment, diagnostics, status, and audit redaction | Secure-environment, CLI, MCP, controller, adapter-host, and Discord-adapter tests |
 
 ## Credentialed manual pass
 

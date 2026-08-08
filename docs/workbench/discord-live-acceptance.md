@@ -1,5 +1,12 @@
 # Discord live acceptance
 
+> Historical note: this credentialed pass predates the final external-adapter
+> dependency cutover. It remains evidence for the preserved product behavior,
+> not live proof of the separately installed `hctl-discord` executable. The
+> current external process path is covered by credential-free deterministic
+> automation; another live pass requires separate authorization and a temporary
+> least-privilege bot credential.
+
 - Date: 2026-08-06
 - Harness: Codex
 - Channel surfaces: one authorized guild channel and the authorized user's DM

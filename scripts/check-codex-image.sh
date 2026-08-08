@@ -106,6 +106,9 @@ docker run --rm --network none --entrypoint /bin/sh --env "EXPECTED_SHARED_LIBRA
   hctl integration verify github-mcp-server | grep -F "verified integration=github-mcp-server version=1.8.0" >/dev/null
   hctl integration inspect github-mcp-server | grep -F "required_environment=GITHUB_PERSONAL_ACCESS_TOKEN" >/dev/null
   hctl integration inspect github-mcp-server | grep -F "value=not-read" >/dev/null
+  test ! -e /home/hctl/.config/hctl/integrations/installed/hctl-discord.json
+  test ! -e /opt/hctl/integrations/hctl-discord
+  test ! -e /opt/hctl/integrations/channel-adapter.json
   if grep -R "hctl-ci-fake-github-token-must-not-persist" /home/hctl/.config/hctl/integrations; then exit 1; fi
   mkdir -p /tmp/codex-version
   CODEX_HOME=/tmp/codex-version codex --version | grep -F "'"$codex_version"'" >/dev/null
@@ -152,6 +155,9 @@ docker run --rm --network none --entrypoint /bin/sh "$direct_image" -c '
   test ! -e /workspace/CLAUDE.md
   test -z "$(find /home/hctl/.codex -mindepth 1 -print -quit)"
   hctl integration verify github-mcp-server >/dev/null
+  test ! -e /home/hctl/.config/hctl/integrations/installed/hctl-discord.json
+  test ! -e /opt/hctl/integrations/hctl-discord
+  test ! -e /opt/hctl/integrations/channel-adapter.json
   test ! -e /workspace/.hctl/integrations
   ! grep -F "GITHUB_PERSONAL_ACCESS_TOKEN" /workspace/.codex/config.toml
   ! grep -F "[mcp_servers.\"github\"]" /workspace/.codex/config.toml
@@ -176,6 +182,7 @@ docker run --rm --entrypoint /bin/sh "$staged_image" -c '
   test ! -e /opt/hctl/runtimes
   test ! -e /opt/hctl/integrations
   test ! -e /home/hctl/.config/hctl/integrations
+  ! grep -F "HCTL_CHANNEL_ADAPTER_DESCRIPTOR" /opt/hctl/bin/agent-entrypoint
   grep -F "\"runtimes\": []" /opt/hctl/artifact.json >/dev/null
   test -f /workspace/.codex/config.toml
   ! grep -F "GITHUB_PERSONAL_ACCESS_TOKEN" /workspace/.codex/config.toml

@@ -26,15 +26,16 @@ import (
 )
 
 const (
-	finalWorkspace = "/workspace"
-	finalHome      = "/home/hctl"
-	finalHCTL      = "/opt/hctl/bin/hctl"
-	manifestPath   = "opt/hctl/artifact.json"
-	maxStagedFile  = 384 << 20
-	maxStagedFiles = 65536
-	maxStagedBytes = int64(2 << 30)
-	runtimeUID     = 65532
-	runtimeGID     = 65532
+	finalWorkspace                = "/workspace"
+	finalHome                     = "/home/hctl"
+	finalHCTL                     = "/opt/hctl/bin/hctl"
+	finalChannelAdapterDescriptor = "/opt/hctl/integrations/channel-adapter.json"
+	manifestPath                  = "opt/hctl/artifact.json"
+	maxStagedFile                 = 384 << 20
+	maxStagedFiles                = 65536
+	maxStagedBytes                = int64(2 << 30)
+	runtimeUID                    = 65532
+	runtimeGID                    = 65532
 )
 
 var semanticVersion = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
@@ -134,6 +135,8 @@ func Create(ctx context.Context, request Request) (Result, error) {
 	}
 	var nativeResolution integration.NativeMCPResolution
 	var nativeDescriptor []integration.NativeMCPLaunchDescriptor
+	var channelResolution integration.ChannelAdapterResolution
+	var channelArtifact integration.StagedArtifact
 	if request.Project.GitHubConnection != nil {
 		if request.IntegrationStore == nil {
 			return Result{}, errors.New("GitHub connection requires the installed github-mcp-server package")
@@ -148,6 +151,16 @@ func Create(ctx context.Context, request Request) (Result, error) {
 			return Result{}, descriptorErr
 		}
 		nativeDescriptor = []integration.NativeMCPLaunchDescriptor{descriptor}
+	}
+	if request.Project.DiscordChannel != nil {
+		if request.IntegrationStore == nil {
+			return Result{}, errors.New("discord channel requires the installed hctl-discord package")
+		}
+		resolved, resolveErr := request.IntegrationStore.ResolveChannelAdapter(ctx, "discord")
+		if resolveErr != nil {
+			return Result{}, resolveErr
+		}
+		channelResolution = resolved
 	}
 	output, err := safeOutput(request.Output, request.Project)
 	if err != nil {
@@ -202,6 +215,17 @@ func Create(ctx context.Context, request Request) (Result, error) {
 		nativeDescriptor[0].Command = selected.Executable
 		nativeDescriptor[0].WorkingDirectory = filepath.Clean(filepath.Join(selected.Root, relativeWorkingDirectory))
 	}
+	if channelResolution.Selection.Capability.ID != "" {
+		staged, stageErr := request.IntegrationStore.StageArtifacts(ctx, channelResolution.Selection.PackageID, []string{channelResolution.Selection.Artifact.ID}, temporary)
+		if stageErr != nil {
+			return Result{}, stageErr
+		}
+		selected, found := stagedArtifact(staged, channelResolution.Selection.Artifact.ID)
+		if !found {
+			return Result{}, errors.New("staged channel-adapter closure is incomplete")
+		}
+		channelArtifact = selected
+	}
 	prepared, err := project.LoadRelocated(physicalAgent, request.Project.Harness, physicalWorkspace, request.Project)
 	if err != nil {
 		return Result{}, fmt.Errorf("cannot validate staged source: %w", err)
@@ -230,11 +254,20 @@ func Create(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if channelResolution.Selection.Capability.ID != "" {
+		descriptor, descriptorErr := integration.EncodeStagedChannelAdapter(logical.AgentID, logical.SourceFingerprint, channelResolution, channelArtifact)
+		if descriptorErr != nil {
+			return Result{}, descriptorErr
+		}
+		if err := rootfs.WriteAtomic(temporary, strings.TrimPrefix(finalChannelAdapterDescriptor, "/"), descriptor, 0o444); err != nil {
+			return Result{}, err
+		}
+	}
 	applyResult, err := setup.ApplyAtWithNativeMCP(logical, finalHCTL, physicalWorkspace, nativeDescriptor)
 	if err != nil {
 		return Result{}, err
 	}
-	entrypoint := entrypointBytes(logical, finalHarness)
+	entrypoint := entrypointBytes(logical, finalHarness, channelResolution.Selection.Capability.ID != "")
 	if err := rootfs.WriteAtomic(temporary, "opt/hctl/bin/agent-entrypoint", entrypoint, 0o755); err != nil {
 		return Result{}, err
 	}
@@ -492,8 +525,12 @@ func copyTree(source, root, destination string) error {
 	})
 }
 
-func entrypointBytes(p *project.Project, harness string) []byte {
-	return []byte("#!/bin/sh\nif [ \"$(id -u)\" != \"65532\" ] || [ \"$(id -g)\" != \"65532\" ]; then\n  echo 'hctl staged agents must run as uid 65532 gid 65532' >&2\n  exit 1\nfi\nexport HOME=" + finalHome + "\nexec " + finalHCTL + " run " + p.SourceRoot + " --workspace " + p.WorkspaceRoot + " --harness " + p.Harness + " --command " + harness + " \"$@\"\n")
+func entrypointBytes(p *project.Project, harness string, channelAdapter bool) []byte {
+	environment := ""
+	if channelAdapter {
+		environment = "export " + integration.StagedChannelAdapterEnvironment + "=" + finalChannelAdapterDescriptor + "\n"
+	}
+	return []byte("#!/bin/sh\nif [ \"$(id -u)\" != \"65532\" ] || [ \"$(id -g)\" != \"65532\" ]; then\n  echo 'hctl staged agents must run as uid 65532 gid 65532' >&2\n  exit 1\nfi\nexport HOME=" + finalHome + "\n" + environment + "exec " + finalHCTL + " run " + p.SourceRoot + " --workspace " + p.WorkspaceRoot + " --harness " + p.Harness + " --command " + harness + " \"$@\"\n")
 }
 
 func rejectBuildPaths(root string, request Request, prepared *project.Project) error {

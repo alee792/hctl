@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"hctl/channeladapter"
+	"hctl/internal/harness/claude"
 	"hctl/internal/harness/codex"
 	"hctl/internal/integration"
 	"hctl/internal/project"
@@ -125,6 +126,92 @@ done
 		return readErr
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCredentialFreeInstalledAdapterClaudeConversation(t *testing.T) {
+	if os.Getenv("HCTL_FAKE_ADAPTER") == "1" {
+		t.Skip("parent-only test")
+	}
+	source := t.TempDir()
+	writeFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Claude adapter host fixture.\n---\n\nReply briefly.\n", 0o644)
+	writeFile(t, filepath.Join(source, "channels", "discord.md"), "---\nmode: ambient\n---\n\nReply to relevant messages.\n", 0o644)
+	harnessLog := filepath.Join(t.TempDir(), "claude.log")
+	t.Setenv("HCTL_HARNESS_LOG", harnessLog)
+	harness := filepath.Join(t.TempDir(), "claude")
+	writeFile(t, harness, `#!/bin/sh
+if [ "${1-}" = "--permission-mode" ]; then
+  echo '--permission-mode plan acceptEdits'
+  exit 0
+fi
+if [ -n "${HCTL_DISCORD_TOKEN-}" ]; then exit 90; fi
+case " $* " in *' --resume '*) printf 'resume\n' >> "$HCTL_HARNESS_LOG" ;; *) printf 'start\n' >> "$HCTL_HARNESS_LOG" ;; esac
+while IFS= read -r line; do
+  printf 'turn\n' >> "$HCTL_HARNESS_LOG"
+  echo '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111"}'
+  echo '{"type":"stream_event","session_id":"11111111-1111-4111-8111-111111111111","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello back"}}}'
+  echo '{"type":"result","subtype":"success","is_error":false,"session_id":"11111111-1111-4111-8111-111111111111","result":"hello back"}'
+done
+`, 0o755)
+	p, err := project.Load(source, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, store := installFakeAdapter(t, self)
+	if _, err := setup.Apply(p, self); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordConsumption(context.Background(), launch.PackageID, p.AgentID, p.Name, []string{launch.CapabilityID}); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "delivered")
+	secret := "claude-adapter-only-value"
+	t.Setenv("HCTL_DISCORD_TOKEN", secret)
+	environment := secureenv.Replace(AdapterEnvironment("HCTL_DISCORD_TOKEN"), map[string]string{"HCTL_FAKE_ADAPTER": "1", "HCTL_FAKE_MARKER": marker})
+	var audit bytes.Buffer
+	running, err := New(Config{Project: p, Driver: claude.New(harness), ProfileID: "default", Environment: environment, Launch: launch, TurnTimeout: 2 * time.Second, IdleTimeout: time.Minute, MaxResident: 1, MaxActive: 1, Executable: self, Audit: &audit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- running.Run(ctx) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			cancel()
+			t.Fatalf("Claude adapter host exited before delivery: %v audit=%s", err, audit.String())
+		default:
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		cancel()
+		t.Fatalf("Claude conversation did not complete: %v audit=%s", err, audit.String())
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Claude adapter host did not shut down")
+	}
+	log, err := os.ReadFile(harnessLog)
+	if err != nil || !bytes.Contains(log, []byte("start\n")) || !bytes.Contains(log, []byte("turn\n")) {
+		t.Fatalf("Claude external-host lifecycle = %q, %v", log, err)
+	}
+	if strings.Contains(audit.String(), secret) {
+		t.Fatal("Claude adapter credential reached retained diagnostics")
 	}
 }
 

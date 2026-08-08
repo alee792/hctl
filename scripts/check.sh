@@ -36,6 +36,10 @@ go vet ./...
 golangci-lint run
 govulncheck ./...
 
+# Cross-module package acceptance is deliberately separate from the ordinary
+# root test graph so core builds never compile or download Discord dependencies.
+go test -tags=externalintegration ./internal/integration -run '^TestOfficialDiscordPackageInstallsAndStagesThroughSharedStore$'
+
 (
   cd channeladapter
   go test ./...

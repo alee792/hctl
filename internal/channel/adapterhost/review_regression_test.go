@@ -514,6 +514,7 @@ func TestOperationOwnsAndRestoresForegroundTerminal(t *testing.T) {
 type promptOutput struct {
 	mu     sync.Mutex
 	data   bytes.Buffer
+	needle []byte
 	prompt chan struct{}
 	once   sync.Once
 }
@@ -522,7 +523,7 @@ func (output *promptOutput) Write(data []byte) (int, error) {
 	output.mu.Lock()
 	defer output.mu.Unlock()
 	written, err := output.data.Write(data)
-	if bytes.Contains(output.data.Bytes(), []byte("Discord bot token:")) {
+	if bytes.Contains(output.data.Bytes(), output.needle) {
 		output.once.Do(func() { close(output.prompt) })
 	}
 	return written, err
@@ -591,7 +592,7 @@ func TestOfficialDiscordSetupInterruptRestoresForegroundTerminal(t *testing.T) {
 	defer func() { _ = reader.Close() }()
 	defer func() { _ = writer.Close() }()
 	command.Stdin = reader
-	observed := &promptOutput{prompt: make(chan struct{})}
+	observed := &promptOutput{needle: []byte("Discord bot token:"), prompt: make(chan struct{})}
 	command.Stdout, command.Stderr = observed, observed
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
@@ -615,6 +616,82 @@ func TestOfficialDiscordSetupInterruptRestoresForegroundTerminal(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		_ = command.Process.Kill()
 		t.Fatalf("official Discord setup ignored Ctrl-C: %q", observed.String())
+	}
+}
+
+func TestForegroundRemoveInterruptRestoresTerminal(t *testing.T) {
+	if os.Getenv("HCTL_BLOCKING_REMOVE_CHILD") == "1" {
+		if _, err := fmt.Fprintln(os.Stderr, "remove-blocked"); err != nil {
+			t.Fatal(err)
+		}
+		select {}
+	}
+	if os.Getenv("HCTL_FOREGROUND_TERMINAL_HELPER") == "interrupt-remove" {
+		executable := os.Getenv("HCTL_TEST_EXECUTABLE")
+		environment := secureenv.Replace(AdapterEnvironment(""), map[string]string{"HCTL_BLOCKING_REMOVE_CHILD": "1"})
+		_, err := RunOperation(context.Background(), integration.ChannelAdapterRemove, Launch{Command: executable, Arguments: []string{"-test.run=^TestForegroundRemoveInterruptRestoresTerminal$"}, WorkingDirectory: filepath.Dir(executable)}, environment, os.Stdin, os.Stderr)
+		if err == nil {
+			t.Fatal("foreground remove ignored terminal interrupt")
+		}
+		owner, ownerErr := unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP)
+		if ownerErr != nil || owner != syscall.Getpgrp() {
+			t.Fatalf("interrupted remove terminal owner = %d, %v; process group=%d", owner, ownerErr, syscall.Getpgrp())
+		}
+		if _, err := fmt.Fprintln(os.Stdout, "foreground-remove-interrupt-restored"); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	script, err := exec.LookPath("script")
+	if err != nil {
+		t.Skip("script utility is required for a real pseudo-terminal regression")
+	}
+	root := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := filepath.Join(root, "runner")
+	writeFile(t, runner, "#!/bin/sh\nexec \"$HCTL_TEST_EXECUTABLE\" -test.run=^TestForegroundRemoveInterruptRestoresTerminal$\n", 0o755)
+	var arguments []string
+	if runtime.GOOS == "darwin" {
+		arguments = []string{"-q", "/dev/null", runner}
+	} else {
+		arguments = []string{"-qefc", runner, "/dev/null"}
+	}
+	command := exec.Command(script, arguments...)
+	command.Env = append(os.Environ(), "HCTL_FOREGROUND_TERMINAL_HELPER=interrupt-remove", "HCTL_TEST_EXECUTABLE="+executable)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
+	command.Stdin = reader
+	observed := &promptOutput{needle: []byte("remove-blocked"), prompt: make(chan struct{})}
+	command.Stdout, command.Stderr = observed, observed
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-observed.prompt:
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatalf("foreground remove did not block: %q", observed.String())
+	}
+	if _, err := writer.Write([]byte{3}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil || !strings.Contains(observed.String(), "foreground-remove-interrupt-restored") {
+			t.Fatalf("interrupted foreground remove = %v, output=%q", err, observed.String())
+		}
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatalf("foreground remove ignored Ctrl-C: %q", observed.String())
 	}
 }
 

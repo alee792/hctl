@@ -312,14 +312,15 @@ injects `HCTL_DISCORD_TOKEN`. Every run validates the token's application and bo
 IDs against the selected profile before opening an outbound Gateway connection,
 and removes the token from every child-process environment.
 
-`hctl run` auto-applies missing or stale setup, then serves the authorized user
-in one guild channel and DM. Each surface has independent durable dispatcher
-state. A transport-neutral channel controller owns surface registration,
-pending-turn correlation, complete-response buffering and control-result
-handling, typing readiness, terminal classification, status/reset delegation,
-and dispatcher lifecycle. The Discord adapter retains Gateway/REST integration,
-authorization, native event filtering, reply references, rendering, mentions,
-commands, and delivery semantics. Transport-owned reply targets remain
+`hctl run` auto-applies a missing or stale generated harness integration, then
+serves the authorized user in one guild channel and DM. Each surface has
+independent durable dispatcher state. A transport-neutral channel controller
+owns surface registration, pending-turn correlation, complete-response
+buffering and control-result handling, typing readiness, terminal
+classification, status/reset delegation, and dispatcher lifecycle. The Discord
+adapter retains Gateway/REST integration, authorization, native event
+filtering, reply references, rendering, mentions, commands, and delivery
+semantics. Transport-owned reply targets remain
 process-local and vendor payloads never enter dispatcher or durable state. One
 deterministic managed-session lifecycle owns each surface's queue,
 native session mapping, and resident harness process, while a shared state
@@ -693,7 +694,7 @@ harness-specific source file uses the same modified-file protection and stale
 cleanup as generated portable setup. Reapplying identical source is
 deterministic.
 
-## Harness contract
+## Native harness contract
 
 Each harness integration declares and verifies:
 
@@ -820,14 +821,14 @@ The source image provides `/out` as a writable parent owned by UID/GID 65532.
 The stage runs as that identity and creates a new child such as `/out/agent`;
 the child itself must not already exist.
 
-The staged tree contains hctl, the selected harness, immutable agent source,
-generated workspace setup and apply record, an empty writable harness home,
-an entrypoint, and an artifact manifest. It carries only the union of execution
-requirements discovered from the agent's tools: Deno for TypeScript, Python
-and uv for Python, and compiled Go hosts plus required shared libraries for Go.
-Tool-free agents carry none of those runtimes. Build-only compilers, unused
-runtimes, module and download caches, and temporary inspection output are
-excluded.
+The staged tree contains hctl, the selected native harness, immutable agent
+source, a generated harness integration and apply record, an empty writable
+harness home, an entrypoint, and an artifact manifest. It carries only the union
+of execution requirements discovered from the agent's tools: Deno for
+TypeScript, Python and uv for Python, and compiled Go hosts plus required shared
+libraries for Go. Tool-free agents carry none of those runtimes. Build-only
+compilers, unused runtimes, module and download caches, and temporary inspection
+output are excluded.
 
 The artifact manifest records the generator and harness versions, agent and
 source identity, target OS, architecture and ABI, compatible base, required
@@ -846,8 +847,8 @@ build-only Deno, Python, and Go state, verifies that preparation did not mutate
 authored source, and publishes with one rename only after the manifest is
 complete. Repeating the operation with identical source and pinned inputs
 produces the same file contents and manifest. The entrypoint verifies the exact
-runtime identity, harness setup, and source fingerprint before a turn and
-refuses to run as an identity other than UID/GID 65532.
+runtime identity, generated harness integration, and source fingerprint before
+a turn and refuses to run as an identity other than UID/GID 65532.
 
 The Python interpreter must already be installed at the canonical
 `/opt/hctl/runtimes/python` prefix by the pinned harness image. Staging rejects
@@ -872,14 +873,15 @@ this behavior but cannot enforce it or observe native filesystem writes.
 
 A proposal is a local, inert record of a candidate improvement to one existing
 instruction, skill, or managed-tool source file. It does not modify active
-authored source, generated harness setup, or a running harness. Proposal files
-belong to the producing workspace at `.hctl/proposals/ID/`, not to the agent
-source that they name. `proposal.md` explains the suggestion and records its
-target, selected source and run provenance, and the target's SHA-256 content
-hash; `change.diff` is a bounded unified diff. `review.md` is added only after
-a human accepts or rejects it. After publication, `proposal.md` and
-`change.diff` are immutable evidence; `review.md` is the separate later human
-decision record. There is no manifest or proposal registry.
+authored source, a generated harness integration, or a running harness.
+Proposal files belong to the producing workspace at `.hctl/proposals/ID/`, not
+to the agent source that they name. `proposal.md` explains the suggestion and
+records its target, selected source and run provenance, and the target's
+SHA-256 content hash; `change.diff` is a bounded unified diff. `review.md` is
+added only after a human accepts or rejects it. After publication,
+`proposal.md` and `change.diff` are immutable proposal artifacts; they are not
+evidence that the suggestion will help. `review.md` is the separate later
+human decision record. There is no manifest or proposal registry.
 
 A proposal can target `instructions.md`, a UTF-8 text file in an existing
 skill, or an existing managed-tool source file. Binary skill resources are
@@ -905,7 +907,8 @@ mutation, and review UX remain outside the MVP and are not scaffolded. See
 
 ## Failure and safety behavior
 
-- Missing, stale, ambiguous, or edited harness setups fail closed.
+- Missing, stale, ambiguous, or edited generated harness integrations fail
+  closed.
 - Input, output, queue, process lifetime, state size, and protocol lines are
   bounded.
 - Durable state is owner-readable only and written atomically.
@@ -933,7 +936,8 @@ The MVP is complete when credential-free tests prove:
 
 1. One authored project compiles deterministically for both harnesses.
 2. Apply produces native, discoverable harness files and refuses conflicts.
-3. Both generated harness setups expose the same managed MCP tool surface.
+3. Both generated harness integrations expose the same managed MCP tool
+   surface.
 4. Both headless drivers start and resume sessions against fake harnesses.
 5. Input arriving during an active turn is durably accepted and processed
    later in FIFO order.

@@ -150,13 +150,15 @@ a generated custom subagent, and session resume in a fresh external workspace.
 - TypeScript and Python source should be loaded by generic long-lived hosts.
   Go requires minimal generated build glue and a compiled host cached by source
   fingerprint. No normalized tool manifest is persisted.
-- The project-visible harness setup contains only native harness files and one
-  internal apply record needed for safe ownership and stale-source checks.
+- The project-visible generated harness integration contains only native
+  harness files and one internal apply record needed for safe ownership and
+  stale-source checks.
   Runtime caches are disposable and stay outside authored source.
 - Agent-proposed improvements are inert, workspace-local, human-reviewed
   proposal directories. They bind one existing source file to its exact base
   content, never mutate active authored files automatically, and retain
-  immutable proposal evidence plus a later human decision. They must not retain
+  immutable proposal artifacts plus a later human decision. The artifacts do
+  not demonstrate that the proposed change will help. They must not retain
   credentials, secrets, raw tool outputs, or conversation transcripts.
 - [ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md) selects a
   local secretless operation broker before the first secret-bearing managed

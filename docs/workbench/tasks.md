@@ -266,8 +266,9 @@ changing. Each record holds a human-readable explanation and provenance, an
 exact base-content hash, and one bounded diff for an existing instruction,
 skill, or managed-tool source file. A human manually accepts by changing source
 and reapplying, or rejects it in a retained review record; stale proposals are
-never automatically rebased or applied. Proposal evidence is immutable and may
-not contain credentials, secrets, raw tool outputs, or conversation transcripts.
+never automatically rebased or applied. Proposal artifacts are immutable but
+do not demonstrate that the proposed change will help. They may not contain
+credentials, secrets, raw tool outputs, or conversation transcripts.
 
 **Evidence:** [ADR 0008](../adr/0008-keep-agent-proposals-workspace-local-and-inert.md)
 settles storage across the source/workspace boundary, target scope, provenance,

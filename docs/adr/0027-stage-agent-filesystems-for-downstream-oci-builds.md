@@ -78,11 +78,11 @@ harness selection without a shell wrapper supplied by the downstream build.
 
 The staged source and workspace remain separate as selected by ADR 0005.
 Portable source is immutable image content. The workspace contains generated
-harness setup, the apply record, and prepared tool execution artifacts, and is
-the harness working directory. A deployment must preserve those staged files
-and make the runtime-owned portions of the workspace writable; mounting an
-empty volume over the whole workspace would hide required setup and is not a
-supported composition.
+harness integration, the apply record, and prepared tool execution artifacts,
+and is the native harness working directory. A deployment must preserve those
+staged files and make the runtime-owned portions of the workspace writable;
+mounting an empty volume over the whole workspace would hide the required
+integration and is not a supported composition.
 
 `artifact.json` is generated bookkeeping, not author configuration. It records
 its schema version, hctl generator version, selected harness and version,

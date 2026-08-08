@@ -1,16 +1,20 @@
 # Glossary
 
-hctl follows Eve's filesystem-forward vocabulary when the concepts match. Its
-public language names the thing an author works with: tool, skill, channel, or
-connection. `Capability` came from Roster's internal umbrella for those
+hctl follows Eve's filesystem-forward vocabulary when the concepts match and
+uses harness-engineering distinctions where they clarify the product boundary.
+Its public language names the thing an author works with: tool, skill, channel,
+or connection. `Capability` came from Roster's internal umbrella for those
 different concepts; hctl should not use it as a synonym for `tool` in authored
 files, CLI guidance, or product documentation.
 
 | Term | Meaning |
 | --- | --- |
-| Agent project | The portable authored filesystem source for one agent: instructions, skills, tools, subagents, harness-specific files, and native dependency files. It is not coupled to the repository that stores it or the workspace where it is used. |
+| Agent project | The portable authored filesystem source for one root agent's hctl-managed harness components: instructions, skills, tools, subagents, harness-specific files, and native dependency files. It is not the running agent or complete harness, and it is not coupled to the repository that stores it or the workspace where it is used. |
 | Agent source | The selected agent-project directory from which hctl discovers and validates authored files. |
-| Workspace | The independently selected directory where the harness operates. Generated harness files, hctl state, caches, and authored tool processes belong here. It defaults to the agent source for a standalone agent. |
+| Workspace | The independently selected directory where the native harness operates. Generated harness files, hctl state, caches, and authored tool processes belong here. It defaults to the agent source for a standalone agent. |
+| Harness | The model-external system that shapes execution, including instructions and context, tools and interfaces, workflows, permissions, state, evaluation, and orchestration. Hctl contributes components to a harness but does not own the complete system. |
+| Native harness | The host agent product and runtime hctl prepares and extends, initially Claude Code or Codex. It owns the model loop, context management, native tools, approvals, and interactive UX. |
+| Harness component | One represented part of a harness, such as instructions, a skill, a tool contract or implementation, subagent configuration, middleware, memory, or runtime integration. Hctl manages only the component types inside its documented boundary. |
 | Instructions | Always-on authored guidance applied to the native harness. |
 | Skill | An open Agent Skills directory containing `SKILL.md` and optional supporting files loaded when relevant. A skill is not itself a callable tool. |
 | Skill resource | A regular file beneath a skill directory, commonly under `scripts/`, `references/`, or `assets/`. Hctl copies resources into native project skill directories without interpreting their content. |
@@ -18,6 +22,8 @@ files, CLI guidance, or product documentation.
 | Plugin MCP server | A native, unmanaged stdio or streamable-HTTP server declared by a vendored plugin. Hctl validates and generates its project configuration but does not start, authorize, proxy, supervise, observe, retry, or audit it. |
 | Plugin data | A private persistent workspace directory dedicated to one agent-and-plugin identity and supplied to its stdio MCP servers as `PLUGIN_DATA`. It is runtime state, not hctl-owned generated output, and is preserved when configuration is removed. |
 | Tool | A function the model can call through a declared, schema-validated input and output contract. |
+| Tool contract | The model-visible description and input/output schemas that govern discovery and invocation of a tool. |
+| Tool implementation | The executable behavior behind a tool contract. Hctl's authored tool formats colocate the contract and implementation in one source module, but they remain distinct failure surfaces. |
 | Tool file | Source under `tools/` that exports one tool using a supported language contract. Its path registers it by convention; there is no separate hctl manifest. |
 | Tool host | An hctl-owned, long-lived language process that loads tool files and exposes them through MCP. Authors write functions, not host protocol code. |
 | Dependency lockfile | A language-native file that pins code dependencies. It is allowed beside authored files but does not register tools with hctl. |
@@ -26,16 +32,15 @@ files, CLI guidance, or product documentation.
 | Sandbox | An execution boundary that restricts code access to host resources. Process validation and timeouts alone are not a sandbox. |
 | Subagent | A specialized native harness agent delegated work by a parent. In the MVP it supplies only instructions and inherits the parent's setup; it is not an independently applied agent project. |
 | Schedule | A root-agent Markdown task under `schedules/` whose path is its name, whose frontmatter contains a UTC cron cadence, and whose body is the prompt. Apply validates it without starting a clock; one-shot trigger or the explicit foreground clock opens a fresh native-harness session, bounds its turn independently, and discards model text. |
-| Harness | The native agent product hctl prepares and extends, initially Claude Code or Codex. The harness owns the model loop and interactive UX. |
-| Harness-specific file | A nonportable native project file authored beneath `harnesses/claude/.claude/` or `harnesses/codex/.codex/` and copied literally only for that selected harness. Hctl owns the workspace copy but does not interpret or enforce its contents. |
+| Harness-specific file | A nonportable native project file authored beneath `harnesses/claude/.claude/` or `harnesses/codex/.codex/` and copied literally only for that selected native harness. Hctl owns the workspace copy but does not interpret or enforce its contents. |
 | Apply | Validate an agent project and prepare the native harness files and local tool runtime needed to use it in a chosen workspace. |
-| Harness setup | The generated instructions, skills, and MCP configuration that make an agent project usable in one native harness. Individual files are called generated harness files. |
-| Apply record | Generated hctl bookkeeping used to detect a stale or edited harness setup. It is not authored configuration or a tool inventory. |
-| Staged agent filesystem | A complete runnable filesystem tree prepared by hctl at canonical final paths for a downstream image builder. It contains immutable agent source, generated workspace setup, the pinned harness and hctl, and only the selected execution runtime closure. |
+| Generated harness integration | The instructions, skills, subagent files, and MCP configuration generated by hctl to integrate an agent project with one native harness. It is not the complete harness. Individual files remain generated harness files. |
+| Apply record | Generated hctl bookkeeping used to detect a stale or edited generated harness integration. It is not authored configuration or a tool inventory. |
+| Staged agent filesystem | A complete runnable filesystem tree prepared by hctl at canonical final paths for a downstream image builder. It contains immutable agent source, a generated harness integration, the pinned native harness and hctl, and only the selected execution runtime closure. |
 | Hctl harness image | A published Codex- or Claude-specific image containing hctl, one pinned native harness, and all supported authored-tool build and execution inputs. Users may apply and ship it directly or use it as the first stage of a selective build. |
-| MCP | The protocol boundary through which a harness discovers and invokes tools. Local tool authors do not need to implement it. |
+| MCP | The protocol boundary through which a native harness discovers and invokes tools. Local tool authors do not need to implement it. |
 | Managed tool | A tool whose requests cross an hctl-owned validation, policy, execution, and audit boundary. |
-| Native tool | A harness-provided tool that remains available but is not governed or observed by hctl. |
+| Native tool | A native-harness-provided tool that remains available but is not governed or observed by hctl. |
 | Turn dispatcher | The optional headless boundary that connects input to a resumable native-harness session. |
 | Channel controller | The internal transport-neutral module that correlates normalized channel input with dispatcher events and produces semantic delivery outcomes. Vendor adapters retain credentials, native payload decoding, rendering, commands, and delivery. It is not a public plugin interface or model loop. |
 | Session | One resumable interaction context owned by the native harness and mapped by the turn dispatcher when used headlessly. |
@@ -51,7 +56,13 @@ files, CLI guidance, or product documentation.
 | Execution policy | The enforced native-harness and hctl-managed-operation capability level for a managed session. Channel sessions begin read-only; instructions describe when to request elevation but are not the enforcement boundary. |
 | Conversation worktree | A private branch-backed Git worktree assigned by hctl to one external conversation after an exact write-access request. It preserves that conversation's writable workspace across later turns and restarts without mutating the shared checkout. |
 | Worktree reconciliation | The conservative startup check that validates durable conversation-worktree ownership, preserves any work that is busy, uncertain, dirty, unmerged, or unverifiable, and retires only an exact inactive, clean, already-merged assignment. |
-| Proposal | A workspace-local, human-readable suggestion to change one existing UTF-8 instruction, skill, or managed-tool source file. Its immutable record holds provenance, the target's base content hash, and a diff; a later review record accepts or rejects it. It must not contain credentials, secrets, raw tool output, or conversation transcripts. |
+| Persistent state | Durable files or records that survive a run. Persistent state is not long-term memory unless a harness deliberately retrieves it into later model context. |
+| Long-term memory | Persisted information that a harness makes available to future model runs. Local state that is never loaded into model context is not memory in this sense. |
+| Execution trace | The ordered model, tool, and environment activity from a run. Research may call the same artifact a trajectory; an operational protocol trace may cover only part of it. |
+| Evidence | Retained information grounded by a verifier or another independently checkable source. A model-authored claim or proposed diff is not evidence that a diagnosis is correct or a change is beneficial. |
+| Evaluation | A defined procedure that judges an outcome against explicit criteria. Recording or reviewing a report is not an evaluation. |
+| Failure pattern | A recurring failure supported by evidence across executions. One model-authored report does not establish a failure pattern. |
+| Proposal | A workspace-local, human-readable suggestion to change one existing UTF-8 instruction, skill, or managed-tool source file. Its immutable artifacts hold provenance, the target's base content hash, and a diff; a later review record accepts or rejects it. The artifacts record the suggestion but are not evidence that it will help. They must not contain credentials, secrets, raw tool output, or conversation transcripts. |
 | Secretless operation broker | A future hctl-owned local process that resolves an opaque credential reference only for an authorized managed operation, uses the value itself against a constrained upstream target, and returns only safe results. It is an execution boundary, not a credential store, vault, or protection from peer processes or native harness capabilities running as the same OS user. |
 | Opaque credential reference | A bounded non-secret identifier that selects a credential inside the secretless operation broker. It is not a credential value, filesystem path, environment-variable name, command, or URI containing credentials. Its eventual author-facing syntax is deferred. |
 | Agent image | A downstream OCI image made either by applying an agent in an hctl harness image or by copying a staged agent filesystem onto its documented compatible base. Hctl prepares filesystems but does not build, publish, sign, deploy, or operate OCI images. |

@@ -3,18 +3,18 @@
 `hctl` is a temporary, functional name for an experimental local tool. The
 product name is intentionally deferred.
 
-Define an agent project as files and use it with the capable harness you
+Define an agent project as files and use it with the capable native harness you
 already trust. Apply portable instructions, skills, subagents, and managed
-tools to any workspace as native Claude Code or Codex setup without replacing
-their model loops or interfaces. For headless use, add a session-aware turn dispatcher
-that connects external input and governs only what crosses its managed
-boundary.
+tools to any workspace through a generated Claude Code or Codex integration
+without replacing their model loops or interfaces. For headless use, add a
+session-aware turn dispatcher that connects external input and governs only
+what crosses its managed boundary.
 
 ## Agent project
 
-An agent is an ordinary, portable directory. It needs an `instructions.md`
-file with a description and Markdown body; optional skills, tools, and
-inherited subagents are discovered by convention:
+An agent project is an ordinary, portable directory. It needs an
+`instructions.md` file with a description and Markdown body; optional skills,
+tools, and inherited subagents are discovered by convention:
 
 ```text
 my-agent/
@@ -277,10 +277,10 @@ using durable cleanup intent so an interrupted retirement can be retried safely.
 
 ## Product boundary
 
-Claude Code and Codex own model calls, context management, planning, native
-tools, approvals, and interactive UX. `hctl` owns only the filesystem
-compilation, generated harness files, session mapping, and tools routed
-through its managed boundary.
+Claude Code and Codex are the native harnesses and own model calls, context
+management, planning, native tools, approvals, and interactive UX. `hctl` owns
+only the filesystem compilation, generated harness files, session mapping, and
+tools routed through its managed boundary.
 
 Native harness tools remain available and unmanaged. Instructions and
 skills influence model behavior; they do not provide enforcement.

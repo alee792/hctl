@@ -23,8 +23,9 @@ time, the selected agent-source fingerprint, workspace, harness, session or
 run identifier when available, creation time, short reason, and any known
 limits. `change.diff` is a bounded unified diff from that exact file content.
 It is a suggestion, not an executable instruction. After publication,
-`proposal.md` and `change.diff` are immutable evidence for that suggestion;
-`review.md` is a separate, later decision record.
+`proposal.md` and `change.diff` are immutable proposal artifacts; they are not
+evidence that the suggestion will help. `review.md` is a separate, later
+decision record.
 
 One proposal changes one existing UTF-8 text file only. Its target is one of
 `instructions.md`; a text file in an existing `skills/NAME/` directory; or an

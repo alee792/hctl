@@ -27,11 +27,11 @@ func TestNativeMCPFixturesUseOneVendorNeutralContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SelectNativeMCP(%s): %v", test.file, err)
 		}
-		if selection.ExecutablePath != test.executable || selection.ManifestSHA256 != pkg.SHA256 {
+		if selection.Artifact.Executable.Path != test.executable || selection.ManifestSHA256 != pkg.Identity() {
 			t.Fatalf("selection for %s = %#v", test.file, selection)
 		}
-		if len(pkg.SHA256) != 64 {
-			t.Fatalf("manifest identity for %s = %q", test.file, pkg.SHA256)
+		if len(pkg.Identity()) != 64 {
+			t.Fatalf("manifest identity for %s = %q", test.file, pkg.Identity())
 		}
 	}
 }
@@ -70,7 +70,7 @@ func TestDecodeIsBoundedAndStrict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid reformatted manifest: %v", err)
 	}
-	if first.SHA256 == second.SHA256 {
+	if first.Identity() == second.Identity() {
 		t.Fatal("different exact manifest bytes received the same identity")
 	}
 	if _, err := Decode(strings.NewReader(strings.Replace(valid, `"license":"MIT"`, `"license":"MIT","unexpected":true`, 1))); err == nil || !strings.Contains(err.Error(), "unknown field") {
@@ -139,6 +139,9 @@ func TestManifestValidatesEveryMetadataGroup(t *testing.T) {
 		{name: "required environment description", mutate: func(m *Manifest) {
 			m.Capabilities[0].NativeMCP.RequiredEnvironment = []EnvironmentRequirement{{Name: "TOKEN", Description: ""}}
 		}, want: "description"},
+		{name: "required environment reference", mutate: func(m *Manifest) {
+			m.Capabilities[0].NativeMCP.RequiredEnvironment = []EnvironmentRequirement{{Name: "TOKEN", Description: "Read ${TOKEN}."}}
+		}, want: "reference syntax"},
 		{name: "required environment default collision", mutate: func(m *Manifest) {
 			m.Capabilities[0].NativeMCP.Environment = map[string]string{"TOKEN": "visible"}
 			m.Capabilities[0].NativeMCP.RequiredEnvironment = []EnvironmentRequirement{{Name: "TOKEN", Description: "Needed."}}
@@ -174,9 +177,90 @@ func TestCompatibilityAndPlatformSelection(t *testing.T) {
 			t.Fatalf("Contains(%q) = %t, %v", test.version, got, err)
 		}
 	}
-	pkg := Package{Manifest: validManifest(), SHA256: strings.Repeat("d", 64)}
+	pkg := Package{manifest: validManifest(), sha256: strings.Repeat("d", 64)}
 	if _, err := pkg.SelectNativeMCP("fixture", "linux", "amd64"); err == nil || !strings.Contains(err.Error(), "does not support") {
 		t.Fatalf("unsupported platform error = %v", err)
+	}
+}
+
+func TestPackageManifestAndSelectionsAreDefensiveCopies(t *testing.T) {
+	t.Parallel()
+	pkg, err := Load(filepath.Join("testdata", "native-mcp-fixture.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := pkg.Manifest()
+	manifest.ID = "changed"
+	manifest.Artifacts[0].Executable.Path = "bin/changed"
+	manifest.Capabilities[0].NativeMCP.Arguments[0] = "changed"
+	manifest.Capabilities[0].NativeMCP.Environment["FIXTURE_MODE"] = "changed"
+
+	selection, err := pkg.SelectNativeMCP("fixture", "darwin", "arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.PackageID != "fixture-native-mcp" || selection.Artifact.Executable.Path != "bin/fixture-mcp" || selection.Capability.Arguments[0] != "serve" || selection.Capability.Environment["FIXTURE_MODE"] != "deterministic" {
+		t.Fatalf("mutable copy changed immutable selection: %#v", selection)
+	}
+	selection.Capability.Arguments[0] = "changed-again"
+	again, err := pkg.SelectNativeMCP("fixture", "darwin", "arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Capability.Arguments[0] != "serve" {
+		t.Fatal("mutable selection changed retained package metadata")
+	}
+}
+
+func TestInstallationStateBindsTrustEnablementAndExactIdentities(t *testing.T) {
+	t.Parallel()
+	pkg, err := Load(filepath.Join("testdata", "native-mcp-fixture.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := pkg.Manifest()
+	state := InstallationState{
+		SchemaVersion:  InstallationStateVersion,
+		PackageID:      manifest.ID,
+		PackageVersion: manifest.Version,
+		ManifestSHA256: pkg.Identity(),
+		Trust:          TrustOperator,
+		Enabled:        true,
+		Artifacts: []InstalledArtifactIdentity{{
+			ID:               manifest.Artifacts[0].ID,
+			SHA256:           manifest.Artifacts[0].SHA256,
+			ExecutableSHA256: manifest.Artifacts[0].Executable.SHA256,
+		}},
+		Capabilities: []InstalledCapabilityIdentity{{
+			ID:      manifest.Capabilities[0].ID,
+			Type:    manifest.Capabilities[0].Type,
+			Version: manifest.Capabilities[0].Version,
+		}},
+	}
+	if err := state.Validate(pkg); err != nil {
+		t.Fatalf("valid installation state: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*InstallationState)
+		want   string
+	}{
+		{name: "schema", mutate: func(s *InstallationState) { s.SchemaVersion = 2 }, want: "schema_version"},
+		{name: "package", mutate: func(s *InstallationState) { s.PackageVersion = "2.0.0" }, want: "package identity"},
+		{name: "trust", mutate: func(s *InstallationState) { s.Trust = "package" }, want: "trust"},
+		{name: "artifact", mutate: func(s *InstallationState) { s.Artifacts[0].SHA256 = strings.Repeat("e", 64) }, want: "artifact"},
+		{name: "capability", mutate: func(s *InstallationState) { s.Capabilities[0].Version = 2 }, want: "capability"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := state
+			candidate.Artifacts = append([]InstalledArtifactIdentity(nil), state.Artifacts...)
+			candidate.Capabilities = append([]InstalledCapabilityIdentity(nil), state.Capabilities...)
+			test.mutate(&candidate)
+			if err := candidate.Validate(pkg); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

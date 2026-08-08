@@ -38,6 +38,11 @@ artifact. It does not resolve a symlink, fetch a URL, inspect an archive, load a
 library, or start a process. Installation and content verification are the
 separate work of #76.
 
+Decoded package values retain their validated manifest privately and return
+defensive metadata copies. Capability selection therefore always derives from
+the exact bytes named by the retained manifest SHA-256; mutating a caller's
+copy cannot create selection evidence with a stale identity.
+
 Capabilities are closed, tagged schemas with a stable capability id, type, and
 integer version. Schema 1 recognizes only `native-mcp` version 1. An unknown
 type or version rejects the manifest with a typed unsupported-capability error;
@@ -46,11 +51,15 @@ including `channel-adapter`, may share the envelope without adding fields to
 `native-mcp` or introducing one generic runtime interface.
 
 Package installation state is operator-owned and separate from the manifest.
-It binds the package id and version to the exact manifest and verified platform
-artifact identities and records package-level enablement. Portable source may
-request a known package capability, but it cannot choose a source or installed
-version, install or enable a package, grant machine trust, or carry a
-credential. #76 implements that state and its commands.
+Its closed schema version 1 records the package id and version, exact manifest
+SHA-256, explicit `operator` trust, package-level enabled flag, verified
+artifact and executable SHA-256 identities, and the exact id/type/version of
+every declared capability. Validation binds all fields back to the immutable
+manifest. It contains no executable path, credential material, or runtime
+value. #76 persists that state and implements its commands; it does not invent
+the state contract. Portable source may request a known package capability,
+but it cannot choose a source or installed version, install or enable a
+package, grant machine trust, or carry a credential.
 
 ### Native MCP capability version 1
 
@@ -87,6 +96,15 @@ cancellation, results, and errors. Hctl does not proxy, supervise, authorize,
 filter, confirm, retry, observe, or audit that traffic. Required ambient names
 are diagnostic metadata, not a credential channel; resolved values must not
 enter package state, generated files, staged filesystems, or retained evidence.
+
+The resolved ambient value is nevertheless available to the native
+harness-launched server and may also be visible to the harness,
+model-accessible shell or execution tools, and other inherited native
+processes. `native-mcp` does not claim to hide it. Required-environment
+descriptions are bounded prose and reject environment-placeholder, URI, and
+common credential-reference syntax. Like other allowed strings, hctl cannot
+reliably recognize an arbitrary secret disguised as prose; package authors
+remain prohibited from placing values or references there.
 
 ### Dependency direction
 

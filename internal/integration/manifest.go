@@ -23,19 +23,34 @@ import (
 )
 
 const (
-	SchemaVersion       = 1
-	NativeMCPType       = "native-mcp"
-	NativeMCPVersion    = 1
-	maxManifestBytes    = 256 << 10
-	maxArtifacts        = 64
-	maxCapabilities     = 64
-	maxArguments        = 128
-	maxEnvironment      = 128
-	maxRequiredEnv      = 128
-	maxArtifactBytes    = int64(2 << 30)
-	maxExecutableBytes  = int64(512 << 20)
-	maxArgumentBytes    = 4096
-	maxEnvironmentBytes = 4096
+	SchemaVersion                               = 1
+	InstallationStateVersion                    = 1
+	NativeMCPType                               = "native-mcp"
+	NativeMCPVersion                            = 1
+	OSDarwin                 OperatingSystem    = "darwin"
+	OSLinux                  OperatingSystem    = "linux"
+	ArchitectureARM64        Architecture       = "arm64"
+	ArchitectureAMD64        Architecture       = "amd64"
+	FormatBinary             ArtifactFormat     = "binary"
+	FormatTarGZ              ArtifactFormat     = "tar.gz"
+	FormatZIP                ArtifactFormat     = "zip"
+	SourcePackage            ArtifactSourceKind = "package"
+	SourceHTTPS              ArtifactSourceKind = "https"
+	CollisionReject          CollisionPolicy    = "reject"
+	StartupOptional          StartupPolicy      = "optional"
+	StartupRequired          StartupPolicy      = "required"
+	TrustNativeProject       NativeTrust        = "native-project"
+	TrustOperator            InstallationTrust  = "operator"
+	maxManifestBytes                            = 256 << 10
+	maxArtifacts                                = 64
+	maxCapabilities                             = 64
+	maxArguments                                = 128
+	maxEnvironment                              = 128
+	maxRequiredEnv                              = 128
+	maxArtifactBytes                            = int64(2 << 30)
+	maxExecutableBytes                          = int64(512 << 20)
+	maxArgumentBytes                            = 4096
+	maxEnvironmentBytes                         = 4096
 )
 
 var (
@@ -47,10 +62,21 @@ var (
 	checksumPattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
-// Package is one validated manifest and its immutable exact-byte identity.
+type OperatingSystem string
+type Architecture string
+type ArtifactFormat string
+type ArtifactSourceKind string
+type CollisionPolicy string
+type StartupPolicy string
+type NativeTrust string
+type InstallationTrust string
+
+// Package is one immutable validated manifest and its exact-byte identity.
+// Accessors return defensive copies so capability selection always remains
+// bound to the bytes decoded originally.
 type Package struct {
-	Manifest Manifest
-	SHA256   string
+	manifest Manifest
+	sha256   string
 }
 
 // Manifest is the common metadata envelope. Capability declarations remain
@@ -80,22 +106,22 @@ type Compatibility struct {
 }
 
 type Artifact struct {
-	ID           string         `json:"id"`
-	OS           string         `json:"os"`
-	Architecture string         `json:"architecture"`
-	Format       string         `json:"format"`
-	Source       ArtifactSource `json:"source"`
-	Size         int64          `json:"size"`
-	SHA256       string         `json:"sha256"`
-	Executable   Executable     `json:"executable"`
+	ID           string          `json:"id"`
+	OS           OperatingSystem `json:"os"`
+	Architecture Architecture    `json:"architecture"`
+	Format       ArtifactFormat  `json:"format"`
+	Source       ArtifactSource  `json:"source"`
+	Size         int64           `json:"size"`
+	SHA256       string          `json:"sha256"`
+	Executable   Executable      `json:"executable"`
 }
 
 // ArtifactSource is either a package-relative payload or an exact
 // checksum-and-size-pinned HTTPS payload. The tag is deliberately closed.
 type ArtifactSource struct {
-	Kind string `json:"kind"`
-	Path string `json:"path,omitempty"`
-	URL  string `json:"url,omitempty"`
+	Kind ArtifactSourceKind `json:"kind"`
+	Path string             `json:"path,omitempty"`
+	URL  string             `json:"url,omitempty"`
 }
 
 // Executable is the identity expected after a platform artifact is prepared.
@@ -123,7 +149,7 @@ type NativeMCP struct {
 	Version             int                      `json:"version"`
 	ID                  string                   `json:"id"`
 	ServerName          string                   `json:"server_name"`
-	Collision           string                   `json:"collision"`
+	Collision           CollisionPolicy          `json:"collision"`
 	Artifacts           []string                 `json:"artifacts"`
 	Executable          string                   `json:"executable"`
 	Arguments           []string                 `json:"arguments"`
@@ -139,23 +165,46 @@ type EnvironmentRequirement struct {
 }
 
 type NativeHarnessTarget struct {
-	Name    string `json:"name"`
-	Startup string `json:"startup"`
-	Trust   string `json:"trust"`
+	Name    string        `json:"name"`
+	Startup StartupPolicy `json:"startup"`
+	Trust   NativeTrust   `json:"trust"`
 }
 
 // NativeMCPSelection is content-free evidence binding one capability to an
 // exact package manifest, platform artifact, and executable identity. An
 // installer may add an absolute verified path; this contract does not.
 type NativeMCPSelection struct {
-	PackageID        string
-	PackageVersion   string
-	ManifestSHA256   string
-	Capability       NativeMCP
-	Artifact         Artifact
-	ExecutablePath   string
-	ExecutableSize   int64
-	ExecutableSHA256 string
+	PackageID      string
+	PackageVersion string
+	ManifestSHA256 string
+	Capability     NativeMCP
+	Artifact       Artifact
+}
+
+// InstallationState is the package-level operator-owned contract that later
+// storage and CLI work persists. It records no paths, credential material, or
+// runtime values.
+type InstallationState struct {
+	SchemaVersion  int                           `json:"schema_version"`
+	PackageID      string                        `json:"package_id"`
+	PackageVersion string                        `json:"package_version"`
+	ManifestSHA256 string                        `json:"manifest_sha256"`
+	Trust          InstallationTrust             `json:"trust"`
+	Enabled        bool                          `json:"enabled"`
+	Artifacts      []InstalledArtifactIdentity   `json:"artifacts"`
+	Capabilities   []InstalledCapabilityIdentity `json:"capabilities"`
+}
+
+type InstalledArtifactIdentity struct {
+	ID               string `json:"id"`
+	SHA256           string `json:"sha256"`
+	ExecutableSHA256 string `json:"executable_sha256"`
+}
+
+type InstalledCapabilityIdentity struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Version int    `json:"version"`
 }
 
 // UnsupportedCapabilityError reports a recognized tag whose schema hctl does
@@ -242,7 +291,17 @@ func Decode(reader io.Reader) (Package, error) {
 		return Package{}, err
 	}
 	digest := sha256.Sum256(content)
-	return Package{Manifest: manifest, SHA256: hex.EncodeToString(digest[:])}, nil
+	return Package{manifest: manifest, sha256: hex.EncodeToString(digest[:])}, nil
+}
+
+// Manifest returns a defensive copy of the validated package metadata.
+func (pkg Package) Manifest() Manifest {
+	return cloneManifest(pkg.manifest)
+}
+
+// Identity returns the SHA-256 of the exact manifest bytes originally decoded.
+func (pkg Package) Identity() string {
+	return pkg.sha256
 }
 
 func decodeCapability(raw []byte) (Capability, error) {
@@ -387,13 +446,13 @@ func (artifact Artifact) Validate() error {
 	if !artifactIDPattern.MatchString(artifact.ID) || len(artifact.ID) > 64 {
 		return errors.New("artifact id is invalid")
 	}
-	if artifact.OS != "darwin" && artifact.OS != "linux" {
+	if artifact.OS != OSDarwin && artifact.OS != OSLinux {
 		return errors.New("artifact os must be darwin or linux")
 	}
-	if artifact.Architecture != "arm64" && artifact.Architecture != "amd64" {
+	if artifact.Architecture != ArchitectureARM64 && artifact.Architecture != ArchitectureAMD64 {
 		return errors.New("artifact architecture must be arm64 or amd64")
 	}
-	if artifact.Format != "binary" && artifact.Format != "tar.gz" && artifact.Format != "zip" {
+	if artifact.Format != FormatBinary && artifact.Format != FormatTarGZ && artifact.Format != FormatZIP {
 		return errors.New("artifact format must be binary, tar.gz, or zip")
 	}
 	if err := artifact.Source.Validate(); err != nil {
@@ -414,7 +473,7 @@ func (artifact Artifact) Validate() error {
 	if !checksumPattern.MatchString(artifact.Executable.SHA256) {
 		return errors.New("artifact executable sha256 must be a lowercase SHA-256")
 	}
-	if artifact.Format == "binary" && (artifact.Size != artifact.Executable.Size || artifact.SHA256 != artifact.Executable.SHA256) {
+	if artifact.Format == FormatBinary && (artifact.Size != artifact.Executable.Size || artifact.SHA256 != artifact.Executable.SHA256) {
 		return errors.New("binary artifact and executable identities must match")
 	}
 	return nil
@@ -422,14 +481,14 @@ func (artifact Artifact) Validate() error {
 
 func (source ArtifactSource) Validate() error {
 	switch source.Kind {
-	case "package":
+	case SourcePackage:
 		if source.URL != "" {
 			return errors.New("package artifact source must not contain url")
 		}
 		if _, err := rootfs.CleanRelative(source.Path); err != nil {
 			return errors.New("package artifact source path must be package-relative")
 		}
-	case "https":
+	case SourceHTTPS:
 		if source.Path != "" {
 			return errors.New("HTTPS artifact source must not contain path")
 		}
@@ -452,7 +511,7 @@ func (native NativeMCP) Validate(artifacts map[string]Artifact) error {
 	if !serverNamePattern.MatchString(native.ServerName) || native.ServerName == "managed" {
 		return errors.New("native-mcp server_name is invalid or reserved")
 	}
-	if native.Collision != "reject" {
+	if native.Collision != CollisionReject {
 		return errors.New("native-mcp collision must be reject")
 	}
 	if len(native.Artifacts) == 0 || len(native.Artifacts) > maxArtifacts {
@@ -475,7 +534,7 @@ func (native NativeMCP) Validate(artifacts map[string]Artifact) error {
 		if artifact.Executable.Path != native.Executable {
 			return fmt.Errorf("native-mcp executable does not match artifact %q", id)
 		}
-		platform := artifact.OS + "/" + artifact.Architecture
+		platform := string(artifact.OS) + "/" + string(artifact.Architecture)
 		if seenPlatforms[platform] {
 			return fmt.Errorf("native-mcp has ambiguous artifacts for %s", platform)
 		}
@@ -520,7 +579,7 @@ func (native NativeMCP) Validate(artifacts map[string]Artifact) error {
 			return fmt.Errorf("required environment %q is duplicated", requirement.Name)
 		}
 		seenEnvironment[requirement.Name] = true
-		if err := validateText("required environment description", requirement.Description, 1, 512); err != nil {
+		if err := validateEnvironmentDescription(requirement.Description); err != nil {
 			return fmt.Errorf("required_environment[%d]: %w", index, err)
 		}
 	}
@@ -536,10 +595,10 @@ func (native NativeMCP) Validate(artifacts map[string]Artifact) error {
 			return fmt.Errorf("native-mcp harness %q is duplicated", target.Name)
 		}
 		seenHarnesses[target.Name] = true
-		if target.Startup != "optional" && target.Startup != "required" {
+		if target.Startup != StartupOptional && target.Startup != StartupRequired {
 			return fmt.Errorf("harnesses[%d]: startup must be optional or required", index)
 		}
-		if target.Trust != "native-project" {
+		if target.Trust != TrustNativeProject {
 			return fmt.Errorf("harnesses[%d]: trust must be native-project", index)
 		}
 	}
@@ -549,25 +608,22 @@ func (native NativeMCP) Validate(artifacts map[string]Artifact) error {
 // SelectNativeMCP resolves exact immutable metadata for one supported platform
 // without finding, opening, or executing an installed artifact.
 func (pkg Package) SelectNativeMCP(id, targetOS, targetArchitecture string) (NativeMCPSelection, error) {
-	if !checksumPattern.MatchString(pkg.SHA256) {
+	if !checksumPattern.MatchString(pkg.sha256) {
 		return NativeMCPSelection{}, errors.New("integration package manifest identity is invalid")
 	}
-	for _, capability := range pkg.Manifest.Capabilities {
+	for _, capability := range pkg.manifest.Capabilities {
 		if capability.ID != id || capability.NativeMCP == nil {
 			continue
 		}
 		for _, artifactID := range capability.NativeMCP.Artifacts {
-			for _, artifact := range pkg.Manifest.Artifacts {
-				if artifact.ID == artifactID && artifact.OS == targetOS && artifact.Architecture == targetArchitecture {
+			for _, artifact := range pkg.manifest.Artifacts {
+				if artifact.ID == artifactID && string(artifact.OS) == targetOS && string(artifact.Architecture) == targetArchitecture {
 					return NativeMCPSelection{
-						PackageID:        pkg.Manifest.ID,
-						PackageVersion:   pkg.Manifest.Version,
-						ManifestSHA256:   pkg.SHA256,
-						Capability:       *capability.NativeMCP,
-						Artifact:         artifact,
-						ExecutablePath:   artifact.Executable.Path,
-						ExecutableSize:   artifact.Executable.Size,
-						ExecutableSHA256: artifact.Executable.SHA256,
+						PackageID:      pkg.manifest.ID,
+						PackageVersion: pkg.manifest.Version,
+						ManifestSHA256: pkg.sha256,
+						Capability:     cloneNativeMCP(*capability.NativeMCP),
+						Artifact:       artifact,
 					}, nil
 				}
 			}
@@ -575,6 +631,84 @@ func (pkg Package) SelectNativeMCP(id, targetOS, targetArchitecture string) (Nat
 		return NativeMCPSelection{}, fmt.Errorf("native-mcp capability %q does not support %s/%s", id, targetOS, targetArchitecture)
 	}
 	return NativeMCPSelection{}, fmt.Errorf("native-mcp capability %q is not declared", id)
+}
+
+// Validate binds operator-owned install, trust, and enable state to exact
+// identities from one immutable package manifest.
+func (state InstallationState) Validate(pkg Package) error {
+	if state.SchemaVersion != InstallationStateVersion {
+		return fmt.Errorf("integration installation schema_version must be %d", InstallationStateVersion)
+	}
+	if state.PackageID != pkg.manifest.ID || state.PackageVersion != pkg.manifest.Version || state.ManifestSHA256 != pkg.sha256 {
+		return errors.New("integration installation package identity does not match manifest")
+	}
+	if state.Trust != TrustOperator {
+		return errors.New("integration installation trust must be operator")
+	}
+	if len(state.Artifacts) == 0 || len(state.Artifacts) > len(pkg.manifest.Artifacts) {
+		return errors.New("integration installation artifacts are empty or exceed the manifest")
+	}
+	manifestArtifacts := make(map[string]Artifact, len(pkg.manifest.Artifacts))
+	for _, artifact := range pkg.manifest.Artifacts {
+		manifestArtifacts[artifact.ID] = artifact
+	}
+	seenArtifacts := map[string]bool{}
+	for _, installed := range state.Artifacts {
+		if seenArtifacts[installed.ID] {
+			return fmt.Errorf("integration installation artifact %q is duplicated", installed.ID)
+		}
+		seenArtifacts[installed.ID] = true
+		artifact, ok := manifestArtifacts[installed.ID]
+		if !ok || installed.SHA256 != artifact.SHA256 || installed.ExecutableSHA256 != artifact.Executable.SHA256 {
+			return fmt.Errorf("integration installation artifact %q does not match manifest", installed.ID)
+		}
+	}
+	if len(state.Capabilities) == 0 || len(state.Capabilities) != len(pkg.manifest.Capabilities) {
+		return errors.New("integration installation capabilities do not match the manifest")
+	}
+	manifestCapabilities := make(map[string]Capability, len(pkg.manifest.Capabilities))
+	for _, capability := range pkg.manifest.Capabilities {
+		manifestCapabilities[capability.ID] = capability
+	}
+	seenCapabilities := map[string]bool{}
+	for _, installed := range state.Capabilities {
+		if seenCapabilities[installed.ID] {
+			return fmt.Errorf("integration installation capability %q is duplicated", installed.ID)
+		}
+		seenCapabilities[installed.ID] = true
+		capability, ok := manifestCapabilities[installed.ID]
+		if !ok || installed.Type != capability.Type || installed.Version != capability.Version {
+			return fmt.Errorf("integration installation capability %q does not match manifest", installed.ID)
+		}
+	}
+	return nil
+}
+
+func cloneManifest(manifest Manifest) Manifest {
+	cloned := manifest
+	cloned.Artifacts = append([]Artifact(nil), manifest.Artifacts...)
+	cloned.Capabilities = make([]Capability, len(manifest.Capabilities))
+	for index, capability := range manifest.Capabilities {
+		cloned.Capabilities[index] = capability
+		if capability.NativeMCP != nil {
+			native := cloneNativeMCP(*capability.NativeMCP)
+			cloned.Capabilities[index].NativeMCP = &native
+		}
+	}
+	return cloned
+}
+
+func cloneNativeMCP(native NativeMCP) NativeMCP {
+	cloned := native
+	cloned.Artifacts = append([]string(nil), native.Artifacts...)
+	cloned.Arguments = append([]string(nil), native.Arguments...)
+	cloned.Environment = make(map[string]string, len(native.Environment))
+	for name, value := range native.Environment {
+		cloned.Environment[name] = value
+	}
+	cloned.RequiredEnvironment = append([]EnvironmentRequirement(nil), native.RequiredEnvironment...)
+	cloned.Harnesses = append([]NativeHarnessTarget(nil), native.Harnesses...)
+	return cloned
 }
 
 func validateHTTPS(label, value string) error {
@@ -611,6 +745,19 @@ func validateLiteral(label, value string, maximum int) error {
 	for _, character := range value {
 		if character == 0 || character == '\r' || character == '\n' {
 			return fmt.Errorf("%s must not contain NUL or line breaks", label)
+		}
+	}
+	return nil
+}
+
+func validateEnvironmentDescription(value string) error {
+	if err := validateText("required environment description", value, 1, 512); err != nil {
+		return err
+	}
+	lower := strings.ToLower(value)
+	for _, forbidden := range []string{"${", "://", "env:", "file:", "keyring:", "secret:", "vault:", "="} {
+		if strings.Contains(lower, forbidden) {
+			return errors.New("required environment description must not contain a value or reference syntax")
 		}
 	}
 	return nil

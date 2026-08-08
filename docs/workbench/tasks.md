@@ -17,21 +17,11 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### [GitHub #76](https://github.com/alee792/hctl/issues/76) — Install and selectively prepare process-isolated integration packages
+### [GitHub #75](https://github.com/alee792/hctl/issues/75) — Define the integration package envelope and native MCP capability
 
-Implement capability-agnostic installation, shared verified storage, offline
-apply resolution, and selective staging over ADR 0030's merged contract.
-
-### [GitHub #65](https://github.com/alee792/hctl/issues/65) — Define the native unmanaged GitHub MCP and environment contract
-
-Specialize `native-mcp` for the official GitHub server and record the ambient
-PAT and native-harness ownership boundary without implementing an installer or
-credential broker.
-
-### [GitHub #82](https://github.com/alee792/hctl/issues/82) — Define the external channel-adapter capability and protocol
-
-Define the separate versioned `channel-adapter` capability and bounded semantic
-process protocol over the shared package envelope.
+Complete the shared metadata-first package envelope and the first narrow
+`native-mcp` capability contract. This is the sole initial frontier for the
+[process-isolated integrations initiative](process-isolated-integrations-plan.md).
 
 ## Ordered next
 
@@ -39,30 +29,14 @@ Follow the dependency graph below. Tasks on the same frontier may run
 concurrently only in isolated worktrees with explicit ownership; every task
 must adapt to its merged predecessors.
 
-1. After #65 and #76: #66. After #76 and #82: #83.
-2. After #65 and #66: #67. After #82 and #83: #84.
-3. After #67: #71. After #84: #85.
-4. After #71: #72.
-5. After all implementation issues: verify epics #74, #64, and #81.
+1. After #75: #76, #65, and #82.
+2. After #65 and #76: #66. After #76 and #82: #83.
+3. After #65 and #66: #67. After #82 and #83: #84.
+4. After #67: #71. After #84: #85.
+5. After #71: #72.
+6. After all implementation issues: verify epics #74, #64, and #81.
 
 ## Completed
-
-### [GitHub #75](https://github.com/alee792/hctl/issues/75) — Define the integration package envelope and native MCP capability
-
-**Outcome:** A strict metadata-only package contract validates stable identity,
-provenance, hctl compatibility, exact platform artifacts and executable
-identities, closed versioned capabilities, and selective closure without
-running package code. `native-mcp` v1 declares literal stdio configuration,
-ambient environment names without values, and native Claude/Codex startup and
-trust ownership. Vendor packages remain external processes and cannot add Go
-interfaces or SDK dependencies to core.
-
-**Evidence:** Credential-free fixtures prove a generic native MCP server and
-official `github-mcp-server` metadata use the same selection path. A future
-`channel-adapter` tag fails with a typed unsupported-capability result despite
-its artifact being absent. Field, bound, compatibility, platform, collision,
-and immutable-identity tests pass. See
-[ADR 0030](../adr/0030-use-process-isolated-integration-packages.md).
 
 ### [GitHub #43](https://github.com/alee792/hctl/issues/43) — Run schedules from a foreground local clock
 

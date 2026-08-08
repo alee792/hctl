@@ -675,6 +675,15 @@ install source or version, install or enable a package, grant machine trust, or
 carry a credential. The install/cache/CLI journey remains the next delivery;
 apply does not gain a network path from this contract alone.
 
+The closed installation-state schema records package id and version, manifest
+SHA-256, explicit operator trust, package-level enablement, verified artifact
+and executable hashes, and every declared capability's id, type, and version.
+It contains no path, credential, or runtime value and validates back to the
+immutable decoded manifest. Package metadata access and native-MCP selection
+use defensive copies, so caller mutation cannot pair changed executable data
+with the original manifest identity. The later installer persists this already
+defined state rather than defining another package contract.
+
 The first recognized capability is `native-mcp` version 1. It declares a
 stable native server name with collision behavior fixed to rejection, the exact
 artifact ids forming its selective runtime/staging closure, one matching
@@ -691,7 +700,12 @@ configuration in later capability-specific work; it does not proxy,
 supervise, authorize, filter, confirm, retry, observe, or audit native MCP
 traffic. Required ambient names are diagnostic metadata rather than a
 credential channel, and resolved values never belong in generated files,
-package state, staged filesystems, or retained evidence.
+package state, staged filesystems, or retained evidence. The value is available
+to the native harness-launched server and may be visible to the harness,
+model-accessible execution tools, and inherited native processes; this
+capability does not claim to hide it. Descriptions reject common value and
+reference syntax, though hctl cannot reliably detect an arbitrary secret
+disguised as otherwise allowed prose.
 
 Core depends only on validated package data and narrow capability consumers.
 Vendor packages depend inward on those contracts and run as separate

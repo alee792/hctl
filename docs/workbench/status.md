@@ -335,7 +335,7 @@ selective runtime/staging closure. A credentialless fixture and official
 selection path, while a future `channel-adapter` tag is rejected without
 artifact access or execution. No installer, cache, CLI, package execution,
 credential flow, native generation, or channel protocol is present yet. #76,
-#65, and #82 are the next independent consumers of that merged contract.
+#65, and #82 become the next independent consumers after #75 merges and closes.
 
 The channel runtime now owns explicit independent managed session lifecycles
 for its configured Discord guild and DM surfaces. Idle lifecycles release their

@@ -24,6 +24,7 @@ files, CLI guidance, or product documentation.
 | Integration package | An exact operator-installed, metadata-first machine dependency containing one or more external executables and closed versioned capability declarations. It is not portable agent source, a Go dependency, or an in-process plugin. |
 | Integration capability | An internal, versioned package declaration interpreted by one narrow hctl consumer, such as `native-mcp`. It is not an author-facing synonym for tool and does not create a generic plugin runtime. |
 | Integration manifest identity | The SHA-256 of the exact bounded integration manifest bytes, binding package metadata, artifacts, capabilities, and compatibility to one immutable identity. |
+| Integration installation state | Operator-owned metadata binding one installed package id/version, manifest identity, explicit trust, enablement, verified artifact/executable hashes, and capability identities. It contains no executable path, credential, or runtime value. |
 | Native MCP capability | A package capability that maps one exact external stdio MCP executable into native Claude Code or Codex configuration. The harness owns its process, credentials, approvals, calls, and effects; hctl validates artifacts and generates configuration but does not manage MCP traffic. |
 | Tool | A function the model can call through a declared, schema-validated input and output contract. |
 | Tool contract | The model-visible description and input/output schemas that govern discovery and invocation of a tool. |

@@ -640,10 +640,10 @@ func validateInteractionResult(value InteractionResult) error {
 			}
 			seenOptions[id] = true
 		}
-		if field.Freeform != nil && !validAnswerText(*field.Freeform, true) {
+		if field.Freeform != nil && !validAnswerText(*field.Freeform) {
 			return errors.New("answer freeform text is invalid")
 		}
-		if field.Text != nil && !validAnswerText(*field.Text, false) {
+		if field.Text != nil && !validAnswerText(*field.Text) {
 			return errors.New("answer text is invalid")
 		}
 		if field.DateTime != nil && validateContractText("answer date-time", *field.DateTime, 1, 128) != nil {
@@ -774,14 +774,14 @@ func validateContractText(label, value string, minimum, maximum int) error {
 }
 
 func validateMultilineText(label, value string, minimum, maximum int) error {
-	if !utf8.ValidString(value) || len(value) < minimum || len(value) > maximum || strings.TrimSpace(value) != value || containsControlExceptNewline(value) {
+	if !utf8.ValidString(value) || len(value) < minimum || len(value) > maximum || strings.TrimSpace(value) != value || containsUnsupportedMultilineControl(value) {
 		return fmt.Errorf("%s must be trimmed bounded UTF-8 without unsupported control characters", label)
 	}
 	return nil
 }
 
-func validAnswerText(value string, trimmed bool) bool {
-	return utf8.ValidString(value) && utf8.RuneCountInString(value) <= 4000 && (!trimmed || strings.TrimSpace(value) == value) && !containsControlExceptNewline(value)
+func validAnswerText(value string) bool {
+	return utf8.ValidString(value) && utf8.RuneCountInString(value) <= 4000 && !containsUnsupportedMultilineControl(value)
 }
 
 func containsControl(value string) bool {
@@ -793,7 +793,7 @@ func containsControl(value string) bool {
 	return false
 }
 
-func containsControlExceptNewline(value string) bool {
+func containsUnsupportedMultilineControl(value string) bool {
 	for _, character := range value {
 		if character < 0x20 && character != '\n' && character != '\t' || character == 0x7f {
 			return true

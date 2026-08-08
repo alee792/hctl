@@ -99,6 +99,28 @@ func TestInteractionValidationMatchesCanonicalBounds(t *testing.T) {
 	}
 }
 
+func TestInteractionFreeformAnswerAllowsCoreNormalization(t *testing.T) {
+	t.Parallel()
+	freeform := "  operator supplied value\n"
+	result := InteractionResult{
+		InteractionID: "interaction.1",
+		Answer: SemanticInteractionAnswer{
+			SchemaVersion: 1,
+			Action:        AnswerSubmit,
+			Fields:        []FieldAnswer{{FieldID: "choices", Freeform: &freeform}},
+		},
+	}
+	frame := Envelope{
+		ProtocolVersion: ProtocolVersion,
+		ID:              "adapter.interaction.1",
+		CorrelationID:   "host.interaction.1",
+		Payload:         result,
+	}
+	if _, err := MarshalFrame(frame, FromAdapter); err != nil {
+		t.Fatalf("raw freeform answer for core normalization: %v", err)
+	}
+}
+
 func TestDiagnosticLimitCoversCompletePayload(t *testing.T) {
 	t.Parallel()
 	diagnostic := Diagnostic{Class: DiagnosticProtocol, Severity: SeverityWarning, Code: "bounded", Message: ""}

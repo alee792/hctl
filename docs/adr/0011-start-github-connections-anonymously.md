@@ -1,6 +1,7 @@
 # ADR 0011: Start GitHub connections anonymously
 
-- Status: accepted
+- Status: superseded
+- Superseded by: [ADR 0031](0031-use-the-official-github-server-as-native-unmanaged-mcp.md)
 
 ## Plain-English summary
 

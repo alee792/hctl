@@ -42,7 +42,9 @@ The repository contains a small Go CLI that:
   bounded, agent-namespaced local notes without reading them back;
 - discovers a bounded `connections/github.md` description and exposes three
   fixed anonymous public GitHub repository and issue operations through the
-  same managed MCP server without contacting GitHub during apply;
+  same managed MCP server without contacting GitHub during apply; this legacy
+  implementation is superseded by the accepted native contract but is not yet
+  removed or rewired;
 - discovers a bounded `channels/discord.md` participation policy and runs one
   outbound conversational Discord Gateway adapter over the durable turn
   dispatcher, with independent managed session lifecycles for the authorized
@@ -205,12 +207,16 @@ a generated custom subagent, and session resume in a fresh external workspace.
   `harnesses/claude/.claude/` or `harnesses/codex/.codex/` tree. Only the
   selected tree is copied, its files share the existing source-fingerprint and
   apply-ownership protections, and hctl neither merges nor interprets them.
-- The first connection slice follows Eve's `connections/`, path-derived name,
-  model-facing description, and qualified-tool conventions. A bounded
-  `connections/github.md` definition enables only anonymous, public, read-only
-  repository and issue operations through hctl's existing managed MCP server.
-  It deliberately adds no credential, broker, generic OpenAPI runtime, or
-  remote MCP proxy.
+- The GitHub connection follows Eve's `connections/`, path-derived name, and
+  model-facing description conventions, but requests the installed official
+  `github-mcp-server` through native Claude or Codex MCP configuration. Its
+  `GITHUB_PERSONAL_ACCESS_TOKEN` is ambient and deliberately unmanaged: the
+  harness, model-accessible execution tools, and inherited processes may read
+  or transmit it, and hctl neither governs native calls nor persists the
+  resolved value. Fine-grained PAT scope, native trust, and operator judgment
+  are the boundary. Native Git and `gh` authentication remain separately
+  operator-owned. ADR 0031 records the exact command, working-directory,
+  startup, trust, collision, and diagnostic contract.
 - The Discord channel uses an outbound Gateway connection and a strict
   `channels/discord.md` participation policy. Runtime profiles pin the bot
   application and identity to one authorized user, guild channel, and DM;
@@ -293,7 +299,9 @@ The Codex native journey has live evidence, and the `darwin-arm64`
 clean-machine release archive journey is credential-free tested. Equivalent
 Claude acceptance remains. The credential-broker execution boundary is settled
 in ADR 0009; its backend and credential-owner decision remain deferred because
-the first GitHub slice is anonymous. HCTL-010 and HCTL-011 are complete.
+no secret-bearing managed operation is selected. The native unmanaged GitHub
+contract neither invokes nor weakens that future boundary. HCTL-010 and
+HCTL-011 are complete.
 HCTL-012's schedule source and one-shot dispatch are complete. Each occurrence
 uses a fresh native-harness task session, while its stable input ID deduplicates
 retries of that occurrence. HCTL-014 now gives the native task turn a separate
@@ -335,9 +343,19 @@ executables have immutable identities; capability artifact references form the
 selective runtime/staging closure. A credentialless fixture and official
 `github-mcp-server` metadata use the same vendor-neutral validation and
 selection path, while a future `channel-adapter` tag is rejected without
-artifact access or execution. No installer, cache, CLI, package execution,
-credential flow, native generation, or channel protocol is present yet. #76,
-#65, and #82 become the next independent consumers after #75 merges and closes.
+artifact access or execution. ADR 0031 now specializes that contract for the
+GitHub connection: native server name `github`, exact installed executable plus
+`stdio`, prepared package working directory, optional startup, native project
+trust, ambient `GITHUB_PERSONAL_ACCESS_TOKEN`, rejection on generated-name
+collision, and native ownership of missing-auth diagnostics and every GitHub
+effect. It prominently accepts that the harness/model can access the PAT,
+retains one local/headless environment contract, leaves native Git and `gh`
+operator-owned, and keeps ADR 0009 unchanged for future secret-bearing managed
+operations. The credentialless native fixture is the configuration-generation
+evidence path; no live PAT or broker is required. Installer/cache/CLI behavior
+remains #76, official artifact packaging remains #66, and native generation and
+runtime proof remain #67. The currently shipped anonymous managed GitHub code
+has not yet been removed.
 
 The channel runtime now owns explicit independent managed session lifecycles
 for its configured Discord guild and DM surfaces. Idle lifecycles release their

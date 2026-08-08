@@ -24,6 +24,7 @@ import (
 	"hctl/internal/harness/claude"
 	"hctl/internal/harness/codex"
 	"hctl/internal/integration"
+	"hctl/internal/interaction"
 	"hctl/internal/mcp"
 	"hctl/internal/project"
 	"hctl/internal/rootfs"
@@ -304,7 +305,7 @@ func runSchedule(args []string, output, stderr io.Writer, self string) error {
 	if err := ensureApplied(p, self, stderr); err != nil {
 		return err
 	}
-	currentDriver := &currentSetupDriver{Driver: driver, project: p, self: self, diagnostics: stderr}
+	currentDriver := newCurrentSetupDriver(driver, p, self, stderr)
 	result, triggerErr := schedule.TriggerWithTurnTimeout(ctx, p, currentDriver, args[2], *inputID, *turnTimeout)
 	if result.Status != "" {
 		if _, err := fmt.Fprintf(output, "schedule=%q input_id=%q status=%s duplicate=%t", result.Name, result.InputID, result.Status, result.Duplicate); err != nil {
@@ -391,7 +392,7 @@ func runScheduleClockContext(ctx context.Context, args []string, output, stderr 
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	currentDriver := &currentSetupDriver{Driver: driver, project: p, self: self, diagnostics: stderr}
+	currentDriver := newCurrentSetupDriver(driver, p, self, stderr)
 	runtime, err := dispatch.NewTaskRuntime(p, currentDriver, *turnTimeout, *maxActive)
 	if err != nil {
 		return err
@@ -424,8 +425,60 @@ type currentSetupDriver struct {
 	diagnostics io.Writer
 }
 
+type currentContinuationDriver struct {
+	*currentSetupDriver
+	continuation harness.ContinuationTurnDriver
+}
+
+func (d *currentContinuationDriver) ContinueTurn(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	return d.continuation.ContinueTurn(ctx, request, sessionID, intent, emit)
+}
+
+type currentDeferredDriver struct {
+	*currentSetupDriver
+	deferred harness.NativeDeferredToolDriver
+}
+
+func (d *currentDeferredDriver) ResumeDeferredTool(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	return d.deferred.ResumeDeferredTool(ctx, request, sessionID, intent, emit)
+}
+
+type currentContinuationDeferredDriver struct {
+	*currentSetupDriver
+	continuation harness.ContinuationTurnDriver
+	deferred     harness.NativeDeferredToolDriver
+}
+
+func (d *currentContinuationDeferredDriver) ContinueTurn(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	return d.continuation.ContinueTurn(ctx, request, sessionID, intent, emit)
+}
+
+func (d *currentContinuationDeferredDriver) ResumeDeferredTool(ctx context.Context, request harness.OpenRequest, sessionID string, intent interaction.ContinuationIntent, emit func(harness.Event)) interaction.ContinuationResult {
+	return d.deferred.ResumeDeferredTool(ctx, request, sessionID, intent, emit)
+}
+
+func newCurrentSetupDriver(driver harness.Driver, p *project.Project, self string, diagnostics io.Writer) harness.Driver {
+	current := &currentSetupDriver{Driver: driver, project: p, self: self, diagnostics: diagnostics}
+	continuation, hasContinuation := driver.(harness.ContinuationTurnDriver)
+	deferred, hasDeferred := driver.(harness.NativeDeferredToolDriver)
+	switch {
+	case hasContinuation && hasDeferred:
+		return &currentContinuationDeferredDriver{currentSetupDriver: current, continuation: continuation, deferred: deferred}
+	case hasContinuation:
+		return &currentContinuationDriver{currentSetupDriver: current, continuation: continuation}
+	case hasDeferred:
+		return &currentDeferredDriver{currentSetupDriver: current, deferred: deferred}
+	default:
+		return current
+	}
+}
+
 func (d *currentSetupDriver) Open(ctx context.Context, request harness.OpenRequest) (harness.Session, error) {
-	if err := ensureApplied(d.project, d.self, d.diagnostics); err != nil {
+	return d.OpenProject(ctx, d.project, request)
+}
+
+func (d *currentSetupDriver) OpenProject(ctx context.Context, p *project.Project, request harness.OpenRequest) (harness.Session, error) {
+	if err := ensureAppliedContext(ctx, p, d.self, d.diagnostics); err != nil {
 		return nil, err
 	}
 	return d.Driver.Open(ctx, request)
@@ -734,7 +787,8 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 	if err != nil {
 		return err
 	}
-	runtime, err := discord.New(p, driver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, MaxResident: *maxResident, MaxActive: *maxActive, Audit: stderr, Executable: hctlExecutable, NativeMCP: resolveProjectNativeMCP})
+	currentDriver := newCurrentSetupDriver(driver, p, self, stderr)
+	runtime, err := discord.New(p, currentDriver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, MaxResident: *maxResident, MaxActive: *maxActive, Audit: stderr, Executable: hctlExecutable, NativeMCP: resolveProjectNativeMCP})
 	if err != nil {
 		return err
 	}
@@ -744,7 +798,14 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 }
 
 func ensureApplied(p *project.Project, self string, stderr io.Writer) error {
-	nativeMCP, err := resolveProjectNativeMCP(context.Background(), p)
+	return ensureAppliedContext(context.Background(), p, self, stderr)
+}
+
+func ensureAppliedContext(ctx context.Context, p *project.Project, self string, stderr io.Writer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	nativeMCP, err := resolveProjectNativeMCP(ctx, p)
 	if err != nil {
 		return err
 	}
@@ -754,7 +815,7 @@ func ensureApplied(p *project.Project, self string, stderr io.Writer) error {
 	if err := setup.Verify(p); err == nil && len(nativeMCP) == 0 {
 		return nil
 	}
-	prepareContext, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	prepareContext, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if err := tool.Prepare(prepareContext, p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools); err != nil {
 		return err

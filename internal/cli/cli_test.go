@@ -276,6 +276,103 @@ func TestScheduledOpenRevalidatesCurrentGitHubPackageState(t *testing.T) {
 	}
 }
 
+func TestDelayedChannelOpenAndReopenUseCurrentGitHubPackage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := writeCLIGitHubPackage(t, "1.8.0", []byte("#!/bin/sh\n# channel-first\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "channel-github-agent")
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Channel GitHub agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "channels", "discord.md"), "---\nmode: ambient\n---\n\nParticipate when useful.\n", 0o644)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, err := resolveProjectNativeMCP(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.ApplyWithNativeMCP(p, self, servers); err != nil {
+		t.Fatal(err)
+	}
+	underlying := &countingOpenDriver{}
+	driver := &currentSetupDriver{Driver: underlying, project: p, self: self, diagnostics: io.Discard}
+
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", false); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.OpenProject(context.Background(), p, harness.OpenRequest{Root: source, Policy: harness.PolicyReadOnly}); err == nil || session != nil || underlying.opens != 0 {
+		t.Fatalf("delayed disabled channel open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", true); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.OpenProject(context.Background(), p, harness.OpenRequest{Root: source, Policy: harness.PolicyReadOnly}); err != nil || session == nil || underlying.opens != 1 {
+		t.Fatalf("enabled channel open = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	second := writeCLIGitHubPackage(t, "1.8.1", []byte("#!/bin/sh\n# channel-second\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: second, Trust: integration.TrustOperator, UpdatePackageID: "github-mcp-server"}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.OpenProject(context.Background(), p, harness.OpenRequest{Root: source, ResumeID: "after-hibernation", Policy: harness.PolicyReadOnly}); err != nil || session == nil || underlying.opens != 2 {
+		t.Fatalf("channel reopen = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+	if config := readCLIFile(t, filepath.Join(source, ".codex", "config.toml")); !strings.Contains(config, current.Executable) {
+		t.Fatalf("channel reopen retained stale executable: %s", config)
+	}
+	if err := os.Chmod(current.Executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(current.Executable, []byte("corrupt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := driver.OpenProject(context.Background(), p, harness.OpenRequest{Root: source, ResumeID: "second-reopen", Policy: harness.PolicyReadOnly}); err == nil || session != nil || underlying.opens != 2 {
+		t.Fatalf("corrupt channel reopen = session %#v, opens %d, error %v", session, underlying.opens, err)
+	}
+}
+
+func TestCurrentSetupOpenHonorsCallerCancellation(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "cancelled-agent")
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Cancelled setup agent.\n---\n\nBe concise.\n", 0o644)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	underlying := &countingOpenDriver{}
+	driver := &currentSetupDriver{Driver: underlying, project: p, self: "/usr/bin/true", diagnostics: io.Discard}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	deadline, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	for name, ctx := range map[string]context.Context{"cancelled": cancelled, "deadline": deadline} {
+		t.Run(name, func(t *testing.T) {
+			session, err := driver.Open(ctx, harness.OpenRequest{Root: source})
+			if err == nil || session != nil || underlying.opens != 0 || !errors.Is(err, ctx.Err()) {
+				t.Fatalf("canceled setup open = session %#v, opens %d, error %v", session, underlying.opens, err)
+			}
+		})
+	}
+	if entries, err := os.ReadDir(source); err != nil || len(entries) != 1 {
+		t.Fatalf("canceled preparation mutated workspace: %v, %v", entries, err)
+	}
+}
+
 func TestStageCreatesRunnableToolFreeFilesystem(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "sample-agent")
 	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)

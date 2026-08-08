@@ -228,20 +228,31 @@ func TestGeneratedGitHubNativeMCPLaunchesCredentialFreeFixture(t *testing.T) {
 				t.Fatal(err)
 			}
 			harnessExecutable := testNativeConfigHarness(t, harness)
-			run := func(value, projectTrust, serverTrust string) (string, string, error) {
-				process := exec.Command(harnessExecutable)
-				process.Env = []string{
-					"PATH=" + os.Getenv("PATH"), "FAKE_WORKSPACE=" + root,
-					"FAKE_PROJECT_TRUST=" + projectTrust, "FAKE_SERVER_TRUST=" + serverTrust,
-					"GITHUB_PERSONAL_ACCESS_TOKEN=" + value,
+			approvalEnv := func(project, server, tool string) []string {
+				if harness == "claude" {
+					return []string{"FAKE_CLAUDE_PROJECT_SERVER_APPROVAL=" + server}
 				}
+				return []string{
+					"FAKE_CODEX_PROJECT_TRUST=" + project,
+					"FAKE_CODEX_SERVER_APPROVAL=" + server,
+					"FAKE_CODEX_TOOL_APPROVAL=" + tool,
+				}
+			}
+			run := func(value string, approvals []string, runtimeEnv ...string) (string, string, error) {
+				process := exec.Command(harnessExecutable)
+				process.Env = append([]string{
+					"PATH=" + os.Getenv("PATH"), "FAKE_WORKSPACE=" + root,
+					"GITHUB_PERSONAL_ACCESS_TOKEN=" + value,
+				}, approvals...)
+				process.Env = append(process.Env, runtimeEnv...)
 				var stdout, stderr bytes.Buffer
 				process.Stdout = &stdout
 				process.Stderr = &stderr
 				err := process.Run()
 				return stdout.String(), stderr.String(), err
 			}
-			stdout, stderr, err := run(fakeValue, "approved", "approved")
+			approved := approvalEnv("approved", "approved", "approved")
+			stdout, stderr, err := run(fakeValue, approved)
 			if err != nil || stderr != "" {
 				t.Fatalf("native fixture launch = stdout %q, stderr %q, error %v", stdout, stderr, err)
 			}
@@ -255,16 +266,39 @@ func TestGeneratedGitHubNativeMCPLaunchesCredentialFreeFixture(t *testing.T) {
 			}
 
 			for _, value := range []string{"", "explicitly-invalid-fake-value"} {
-				stdout, stderr, err := run(value, "approved", "approved")
+				stdout, stderr, err := run(value, approved)
 				if err != nil || stdout != "" || !strings.Contains(stderr, "github optional startup failed") || (!strings.Contains(stderr, "authentication required") && !strings.Contains(stderr, "authentication rejected")) || strings.Contains(stderr, fakeValue) {
 					t.Fatalf("bounded authentication failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
 				}
 			}
-			if stdout, stderr, err := run(fakeValue, "missing", "approved"); err == nil || stdout != "" || !strings.Contains(stderr, "project approval required") {
-				t.Fatalf("project trust failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
+			if harness == "claude" {
+				if stdout, stderr, err := run(fakeValue, approvalEnv("approved", "missing", "approved")); err == nil || stdout != "" || !strings.Contains(stderr, "Claude project MCP server approval required") {
+					t.Fatalf("Claude project-server approval failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
+				}
+			} else {
+				for name, approvals := range map[string][]string{
+					"project trust":   approvalEnv("missing", "approved", "approved"),
+					"server approval": approvalEnv("approved", "missing", "approved"),
+					"tool approval":   approvalEnv("approved", "approved", "missing"),
+				} {
+					t.Run(name, func(t *testing.T) {
+						stdout, stderr, err := run(fakeValue, approvals)
+						if err == nil || stdout != "" || !strings.Contains(stderr, "Codex "+name+" required") {
+							t.Fatalf("%s failure = stdout %q, stderr %q, error %v", name, stdout, stderr, err)
+						}
+					})
+				}
 			}
-			if stdout, stderr, err := run(fakeValue, "approved", "missing"); err == nil || stdout != "" || !strings.Contains(stderr, "server approval required") {
-				t.Fatalf("server trust failure = stdout %q, stderr %q, error %v", stdout, stderr, err)
+			for name, runtimeEnv := range map[string]string{
+				"protocol version": "FAKE_MCP_PROTOCOL_VERSION=2099-01-01",
+				"server version":   "FAKE_MCP_SERVER_VERSION=999.0.0",
+			} {
+				t.Run("unsupported "+name, func(t *testing.T) {
+					stdout, stderr, err := run(fakeValue, approved, runtimeEnv)
+					if err != nil || stdout != "" || !strings.Contains(stderr, "github optional startup failed: unsupported MCP "+name) || strings.Contains(stderr, fakeValue) {
+						t.Fatalf("unsupported %s failure = stdout %q, stderr %q, error %v", name, stdout, stderr, err)
+					}
+				})
 			}
 			for _, evidenceRoot := range []string{packageRoot, storeRoot, root} {
 				assertTreeOmits(t, evidenceRoot, fakeValue)
@@ -288,7 +322,9 @@ fi
 IFS= read -r initialize
 IFS= read -r list
 IFS= read -r call
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}'
+protocol_version=${FAKE_MCP_PROTOCOL_VERSION-2025-06-18}
+server_version=${FAKE_MCP_SERVER_VERSION-1.8.0-fixture}
+printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"$protocol_version\",\"serverInfo\":{\"name\":\"github-mcp-server\",\"version\":\"$server_version\"}}}"
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fixture_read"}]}}'
 printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"structuredContent":{"ok":true}}}'
 `)
@@ -341,11 +377,11 @@ func testNativeConfigHarness(t *testing.T, harness string) string {
 	executable := filepath.Join(t.TempDir(), harness)
 	trust := `#!/bin/sh
 set -eu
-[ "${FAKE_PROJECT_TRUST-}" = approved ] || { echo 'project approval required' >&2; exit 30; }
-[ "${FAKE_SERVER_TRUST-}" = approved ] || { echo 'server approval required' >&2; exit 31; }
 `
 	var parse string
 	if harness == "claude" {
+		trust += `[ "${FAKE_CLAUDE_PROJECT_SERVER_APPROVAL-}" = approved ] || { echo 'Claude project MCP server approval required' >&2; exit 30; }
+`
 		parse = `config="$FAKE_WORKSPACE/.mcp.json"
 grep -F '"github": {' "$config" >/dev/null
 grep -F '"command": "/usr/bin/env"' "$config" >/dev/null
@@ -354,6 +390,10 @@ server=$(awk '/"github": \{/{github=1} github && /"args": \[/{args=1; next} args
 grep -F '"stdio"' "$config" >/dev/null
 `
 	} else {
+		trust += `[ "${FAKE_CODEX_PROJECT_TRUST-}" = approved ] || { echo 'Codex project trust required' >&2; exit 30; }
+[ "${FAKE_CODEX_SERVER_APPROVAL-}" = approved ] || { echo 'Codex server approval required' >&2; exit 31; }
+[ "${FAKE_CODEX_TOOL_APPROVAL-}" = approved ] || { echo 'Codex tool approval required' >&2; exit 32; }
+`
 		parse = `config="$FAKE_WORKSPACE/.codex/config.toml"
 grep -F '[mcp_servers."github"]' "$config" >/dev/null
 grep -F 'enabled = true' "$config" >/dev/null
@@ -375,6 +415,8 @@ if [ "$status" -ne 0 ]; then
   printf 'github optional startup failed: %s\n' "$(cat "$failure")" >&2
   exit 0
 fi
+printf '%s\n' "$output" | grep -F '"protocolVersion":"2025-06-18"' >/dev/null || { echo 'github optional startup failed: unsupported MCP protocol version' >&2; exit 0; }
+printf '%s\n' "$output" | grep -F '"version":"1.8.0-fixture"' >/dev/null || { echo 'github optional startup failed: unsupported MCP server version' >&2; exit 0; }
 printf '%s\n' "$output"
 `
 	write(t, executable, trust+parse+run)

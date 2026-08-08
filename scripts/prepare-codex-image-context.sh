@@ -73,6 +73,7 @@ done
 rootfs="$stage/rootfs"
 mkdir -p \
   "$rootfs/etc/ssl/certs" \
+  "$rootfs/home/hctl" \
   "$rootfs/opt/hctl/bin" \
   "$rootfs/opt/hctl/harness/bin" \
   "$rootfs/opt/hctl/runtimes/deno/bin" \
@@ -87,6 +88,13 @@ tar -xzf "$downloads/go" -C "$rootfs/opt/hctl/runtimes" go
 tar -xzf "$downloads/python" -C "$rootfs/opt/hctl/runtimes" python
 cp "$rootfs/opt/hctl/runtimes/python/lib/python3.13/site-packages/pip/_vendor/certifi/cacert.pem" "$rootfs/etc/ssl/certs/ca-certificates.crt"
 cp "$manifest" "$rootfs/opt/hctl/image-inputs.json"
+
+"$repo_root/scripts/materialize-integration-package.sh" \
+  --package "$repo_root/integrations/github-mcp-server" \
+  --platform linux-amd64 \
+  --output "$downloads/github-mcp-server-package"
+HOME="$rootfs/home/hctl" XDG_CONFIG_HOME="$rootfs/home/hctl/.config" \
+  "$hctl_executable" integration install "$downloads/github-mcp-server-package" --trust operator >/dev/null
 chmod 755 \
   "$rootfs/opt/hctl/bin/hctl" \
   "$rootfs/opt/hctl/harness/bin/codex" \

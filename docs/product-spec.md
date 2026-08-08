@@ -292,6 +292,19 @@ directory is the exact prepared package root. The target is enabled but
 startup-optional, so GitHub unavailability does not disable unrelated managed
 tools or the rest of the native session.
 
+The curated package pins official release `v1.8.0` for `darwin-arm64` and
+`linux-amd64`, including immutable release URLs, archive sizes and SHA-256
+checksums, exact three-file archive layout, and the extracted executable size
+and SHA-256. `./integrations/github-mcp-server/install.sh` is the explicit
+operator preparation and trust journey: it selects the host platform, follows
+GitHub's single HTTPS release-asset redirect under a pinned destination-origin
+policy, verifies every pinned identity, materializes a local package source,
+and invokes the generic package installer. Hctl itself still follows no
+redirect and contains no GitHub downloader, cache, SDK, or vendor switch.
+Users do not select an asset, install Go, copy a binary onto `PATH`, or know the
+shared cache layout. Once installed, verification, apply, resolution, and
+staging are offline and use the exact prepared state rather than `PATH`.
+
 Claude receives a project `.mcp.json` stdio entry using `/usr/bin/env -C` to
 enter that package root and exec the exact installed server. Codex receives a
 project `[mcp_servers.github]` entry with the exact command, `args = ["stdio"]`,
@@ -737,6 +750,15 @@ following symlinks. A pinned HTTPS artifact is fetched only from the exact
 manifest URL, without redirects, and accepted only at its exact declared size
 and SHA-256. There is no registry search, package script, dependency resolver,
 git/npm/Go installer, or signature claim.
+
+An integration's reviewed distribution tooling may materialize such a local
+package source from separately pinned upstream delivery metadata. That tooling
+remains outside hctl and must verify the upstream transfer, archive layout, and
+post-preparation executable identity before handing the source to the generic
+installer. The curated GitHub package uses this seam because GitHub's stable
+release URLs redirect to signed release-asset URLs, while hctl deliberately
+does not follow redirects. This does not create an apply-time network path or
+a vendor-specific branch in package storage.
 
 Installation validates the manifest, closed capability metadata, current hctl
 compatibility, and the host platform before preparing an artifact. It rejects

@@ -358,9 +358,17 @@ operations. The credentialless native fixture is the configuration-generation
 evidence path; no live PAT or broker is required. #76 resolves that fixture to
 an offline harness-targeted launch descriptor and selectively stages its exact
 closure, but it does not map authored source or write native configuration.
-Official artifact packaging remains #66, and source-to-Claude/Codex generation
-and native runtime proof remain #67. The currently shipped anonymous managed GitHub code
-has not yet been removed.
+The curated `v1.8.0` package now pins official Darwin/arm64 and Linux/amd64
+release archives plus their extracted executable identities. A small generic
+build-time materializer follows only the reviewed GitHub release redirect,
+checks the exact archive layout, and emits the local source consumed by #76;
+hctl's store keeps its no-redirect policy and gains no vendor code. The direct
+Codex image prepares and verifies the Linux package before publication, while
+credential-free tests prove exact installed-path resolution, offline reuse,
+concurrency, interruption, corruption, unsupported-platform rejection,
+descriptor drift, and selective staging or omission. Source-to-Claude/Codex
+generation and native runtime proof remain #67. The currently shipped
+anonymous managed GitHub code has not yet been removed.
 
 ADR 0032 and the dependency-free `hctl/channeladapter` module now define the
 second closed capability and its version-1 process protocol. Package metadata
@@ -391,8 +399,9 @@ credential-free launch descriptor without reading ambient values or generating
 harness files. No package execution, credential flow, native MCP generation,
 or channel protocol is present in the installer. #65
 and #82 supply the two closed capability contracts, while #76 supplies their
-shared installed-artifact boundary. #66 and #67 consume that boundary for the
-official GitHub package and native harness generation; #83 and #84 consume it
+shared installed-artifact boundary. #66 now supplies the official GitHub
+package through that boundary, while #67 consumes it for native harness
+generation; #83 and #84 consume it
 for the external channel-adapter host and Discord module.
 
 The channel runtime now owns explicit independent managed session lifecycles

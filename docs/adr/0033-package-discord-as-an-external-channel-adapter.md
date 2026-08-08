@@ -50,7 +50,9 @@ handles and pending adapter interaction state, and shares the four-transfer
 ceiling across both transfer directions. READY and RESUMED both restore the
 protocol connection state and replay stable unacknowledged event bytes.
 Shutdown closes vendor admission, cancels and retires transfers, drains prior
-protocol output, and only then emits shutdown completion.
+protocol output, and only then emits shutdown completion. The per-application
+lock remains held through the bounded admitted-work drain and is released on
+every shutdown return path.
 
 Hctl will continue to own portable participation policy, controller and
 dispatcher state, model execution, sessions, worktrees, capacity, hibernation,

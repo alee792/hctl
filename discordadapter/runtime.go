@@ -1166,15 +1166,18 @@ func (runtime *Runtime) closeWithContext(ctx context.Context) error {
 	if client != nil {
 		_ = client.Close()
 	}
-	if lock != nil {
-		_ = lock.Unlock()
-	}
 	if wait != nil {
 		select {
 		case <-wait:
 		case <-ctx.Done():
+			if lock != nil {
+				_ = lock.Unlock()
+			}
 			return errors.New("Discord adapter vendor admission did not stop before shutdown")
 		}
+	}
+	if lock != nil {
+		_ = lock.Unlock()
 	}
 	return runtime.writer.sendContext(ctx, channeladapter.Connection{State: channeladapter.ConnectionClosed, Attempt: max(1, runtime.connectionTry)}, "")
 }

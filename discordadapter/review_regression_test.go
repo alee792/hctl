@@ -99,6 +99,28 @@ func (writer *blockingWriter) Write(data []byte) (int, error) {
 
 func (writer *blockingWriter) unblock() { writer.once.Do(func() { close(writer.release) }) }
 
+type observableApplicationLock struct {
+	mu     sync.Mutex
+	locked bool
+}
+
+func (lock *observableApplicationLock) TryLock() (bool, error) {
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	if lock.locked {
+		return false, nil
+	}
+	lock.locked = true
+	return true, nil
+}
+
+func (lock *observableApplicationLock) Unlock() error {
+	lock.mu.Lock()
+	lock.locked = false
+	lock.mu.Unlock()
+	return nil
+}
+
 type partialBlockingWriter struct {
 	firstWrite chan struct{}
 	release    chan struct{}
@@ -715,6 +737,74 @@ func TestShutdownDeadlineCancelsBlockedVendorAdmissionBeforeBarrier(t *testing.T
 		t.Fatal("shutdown cancellation retained the blocked inbound event")
 	}
 	blocked.unblock()
+}
+
+func TestShutdownHoldsApplicationLockUntilAdmissionDrainAndReleasesOnReturn(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		release bool
+		wantErr bool
+	}{
+		{name: "drained admission", timeout: time.Second, release: true},
+		{name: "admission timeout", timeout: 100 * time.Millisecond, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, err := NewRuntime(io.Discard, fixtureDependencies(&fakeDiscord{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lock := &observableApplicationLock{}
+			if locked, err := lock.TryLock(); err != nil || !locked {
+				t.Fatalf("initial lock = %t, %v", locked, err)
+			}
+			runtime.lock = lock
+			if !runtime.beginVendorAdmission() {
+				t.Fatal("vendor admission was rejected before shutdown")
+			}
+			releaseAdmission := make(chan struct{})
+			admissionDone := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseAdmission) }) }
+			go func() {
+				<-releaseAdmission
+				runtime.endVendorAdmission()
+				close(admissionDone)
+			}()
+			defer func() {
+				release()
+				<-admissionDone
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), test.timeout)
+			defer cancel()
+			shutdownDone := make(chan error, 1)
+			go func() { shutdownDone <- runtime.closeWithContext(ctx) }()
+			waitUntil(t, func() bool {
+				runtime.mu.Lock()
+				defer runtime.mu.Unlock()
+				return runtime.shuttingDown && runtime.activeAdmissions == 1
+			})
+			if available, err := lock.TryLock(); err != nil || available {
+				if available {
+					_ = lock.Unlock()
+				}
+				t.Fatalf("application lock became available while admitted work was active: %t, %v", available, err)
+			}
+			if test.release {
+				release()
+			}
+			shutdownErr := <-shutdownDone
+			if (shutdownErr != nil) != test.wantErr {
+				t.Fatalf("shutdown error = %v, want error %t", shutdownErr, test.wantErr)
+			}
+			if available, err := lock.TryLock(); err != nil || !available {
+				t.Fatalf("application lock after shutdown return = %t, %v", available, err)
+			} else {
+				_ = lock.Unlock()
+			}
+		})
+	}
 }
 
 func canonicalInitialize() channeladapter.Initialize {

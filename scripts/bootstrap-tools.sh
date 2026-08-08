@@ -91,6 +91,7 @@ install_tool gopls golang.org/x/tools/gopls golang.org/x/tools/gopls v0.23.0
 install_tool golangci-lint github.com/golangci/golangci-lint/v2/cmd/golangci-lint github.com/golangci/golangci-lint/v2 v2.12.2
 install_tool goimports golang.org/x/tools/cmd/goimports golang.org/x/tools v0.48.0
 install_tool govulncheck golang.org/x/vuln/cmd/govulncheck golang.org/x/vuln v1.6.0
+install_tool actionlint github.com/rhysd/actionlint/cmd/actionlint github.com/rhysd/actionlint v1.7.12
 
 "$go_bin" clean -cache -modcache
 

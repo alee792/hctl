@@ -46,8 +46,10 @@ func TestManagerOwnsIndependentConversationLifecycles(t *testing.T) {
 		}
 	}
 
-	driver.waitStarted(t, "message-1")
-	driver.waitStarted(t, "message-2")
+	started := map[string]bool{driver.waitAnyStarted(t): true, driver.waitAnyStarted(t): true}
+	if len(started) != 2 || !started["message-1"] || !started["message-2"] {
+		t.Fatalf("independent turns started = %v", started)
+	}
 	waitManagedEvents(t, events, "turn.started", map[string]string{
 		"discord-guild": "message-1",
 		"discord-dm":    "message-2",

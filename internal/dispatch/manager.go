@@ -66,6 +66,7 @@ type Manager struct {
 	closeOnce           sync.Once
 	continueWG          sync.WaitGroup
 	diagnostics         []string
+	diagnosticSink      func(string)
 	requestInputFactory func(string) RequestInputHandler
 	interactionReady    func(string) bool
 	expiryStops         map[string]chan struct{}
@@ -96,6 +97,21 @@ func (m *Manager) ConfigureInteractionReady(ready func(string) bool) error {
 		return errors.New("interaction readiness must be configured before channel admission")
 	}
 	m.interactionReady = ready
+	return nil
+}
+
+// ConfigureDiagnosticSink binds safe operator diagnostics before admission.
+// Runtime failures sent here must never be routed through dispatch events.
+func (m *Manager) ConfigureDiagnosticSink(sink func(string)) error {
+	if sink == nil {
+		return errors.New("managed diagnostic sink is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || len(m.workers) != 0 || m.diagnosticSink != nil {
+		return errors.New("managed diagnostic sink must be configured before channel admission")
+	}
+	m.diagnosticSink = sink
 	return nil
 }
 
@@ -719,6 +735,7 @@ func (c *managerContinuation) Resume(ctx context.Context, intent interaction.Con
 		}
 		p, err = m.workspaces.Resolve(ctx, c.conversation, worktree.Assignment{Root: snapshot.workspace, Branch: snapshot.branch})
 		if err != nil {
+			m.reportDiagnostic(fmt.Sprintf("native continuation workspace resolution failed: %v", err))
 			return interaction.ContinuationResult{Effect: interaction.EffectFailed, OriginOutcome: "failed"}
 		}
 		policy = harness.PolicyWorkspaceWrite
@@ -826,6 +843,16 @@ func (m *Manager) Diagnostics() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.diagnostics...)
+}
+
+func (m *Manager) reportDiagnostic(message string) {
+	m.mu.Lock()
+	m.diagnostics = append(m.diagnostics, message)
+	sink := m.diagnosticSink
+	m.mu.Unlock()
+	if sink != nil {
+		sink(message)
+	}
 }
 
 func (m *Manager) reconcileWorkspaces(ctx context.Context) error {

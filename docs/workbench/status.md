@@ -393,9 +393,12 @@ starts the native process. The guard preserves ordinary read-only setup or the
 already-resolved relocated workspace-write setup instead of changing its
 policy. Writable Discord conversation promotion and reuse carry the same
 capability-generic resolver into the relocated worktree rather than dropping
-its GitHub entry. Credential-free harness fixtures separately prove Claude's
-one-time project-server approval, Codex project/server/tool approval, and
-bounded unsupported MCP protocol or server-version diagnostics.
+its GitHub entry. A package-state failure while resolving a parked writable
+continuation is retained in the operator audit and manager diagnostics, but
+never enters Discord dispatch content or starts the stale native process.
+Credential-free harness fixtures separately prove Claude's one-time
+project-server approval, Codex project/server/tool approval, and bounded
+unsupported MCP protocol or server-version diagnostics.
 
 ADR 0032 and the dependency-free `hctl/channeladapter` module now define the
 second closed capability and its version-1 process protocol. Package metadata

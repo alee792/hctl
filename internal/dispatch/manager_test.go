@@ -2,11 +2,15 @@ package dispatch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +18,7 @@ import (
 	"time"
 
 	"hctl/internal/harness"
+	"hctl/internal/integration"
 	"hctl/internal/interaction"
 	"hctl/internal/project"
 	"hctl/internal/session"
@@ -1954,6 +1959,96 @@ func TestManagerPassesResolvedWritableProjectToContinuationGuard(t *testing.T) {
 	}
 }
 
+func TestWritableParkedContinuationAuditsPackageResolutionFailures(t *testing.T) {
+	for _, harnessName := range []string{"codex", "claude"} {
+		for _, state := range []string{"disabled", "removed", "corrupt"} {
+			t.Run(harnessName+"/"+state, func(t *testing.T) {
+				store := integration.NewStore(t.TempDir(), nil)
+				packageRoot := writeDispatchGitHubPackage(t)
+				if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+					t.Fatal(err)
+				}
+				resolved, err := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+				if err != nil {
+					t.Fatal(err)
+				}
+				p := testProject(t)
+				p.Harness = harnessName
+				workspace := t.TempDir()
+				assignment := worktree.Assignment{Root: workspace, Branch: "hctl/test/parked-" + state}
+				provider := &packageCheckingWorkspaceProvider{project: projectAtWorkspace(p, workspace), assignment: assignment, store: store}
+				driver := newGuardedContinuationManagerDriver(harnessName)
+				var audit diagnosticRecorder
+				var dispatchContent diagnosticRecorder
+				manager, err := NewManagerWithWorkspace(context.Background(), p, driver, time.Minute, time.Hour, func(_ string, event Event) error {
+					dispatchContent.add(fmt.Sprintf("%+v", event))
+					return nil
+				}, provider)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(manager.Close)
+				if err := manager.ConfigureDiagnosticSink(audit.add); err != nil {
+					t.Fatal(err)
+				}
+				continuation := interaction.ContinuationTurn
+				continuationKey := ""
+				if harnessName == "claude" {
+					continuation = interaction.ContinuationNativeDeferredTool
+					continuationKey = "toolu_parked_exact"
+				}
+				coordinator := prepareWritableParkedContinuation(t, manager, assignment, continuation, continuationKey)
+				switch state {
+				case "disabled":
+					if err := store.SetEnabled(context.Background(), "github-mcp-server", false); err != nil {
+						t.Fatal(err)
+					}
+				case "removed":
+					if err := store.Remove(context.Background(), "github-mcp-server"); err != nil {
+						t.Fatal(err)
+					}
+				case "corrupt":
+					if err := os.Chmod(resolved.Executable, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(resolved.Executable, []byte("corrupt"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				_, expectedErr := store.ResolveNativeMCP(context.Background(), "github-mcp-server", "github")
+				if expectedErr == nil {
+					t.Fatal("mutated package unexpectedly resolved")
+				}
+				expectedDiagnostic := "native continuation workspace resolution failed: " + expectedErr.Error()
+				if err := coordinator.Resume(context.Background()); !errors.Is(err, interaction.ErrResumeFailed) {
+					t.Fatalf("parked continuation resume = %v", err)
+				}
+				manager.Close()
+				if driver.startCount() != 0 {
+					t.Fatalf("stale continuation processes = %d", driver.startCount())
+				}
+				if got := audit.string(); got != expectedDiagnostic {
+					t.Fatalf("audit = %q, want %q", got, expectedDiagnostic)
+				}
+				if diagnostics := strings.Join(manager.Diagnostics(), "\n"); !strings.Contains(diagnostics, expectedDiagnostic) {
+					t.Fatalf("manager diagnostics omitted exact failure: %s", diagnostics)
+				}
+				if strings.Contains(dispatchContent.string(), expectedErr.Error()) {
+					t.Fatalf("package failure crossed dispatch content: %s", dispatchContent.string())
+				}
+				durable, err := session.Load(p.WorkspaceRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				conversation := findConversation(durable, "discord-guild")
+				if conversation == nil || conversation.WorkspaceRoot != assignment.Root || conversation.WorktreeBranch != assignment.Branch {
+					t.Fatalf("writable policy assignment changed: %#v", conversation)
+				}
+			})
+		}
+	}
+}
+
 func TestManagerRestartClaimsDurableAnsweredContinuationOnce(t *testing.T) {
 	p := testProject(t)
 	ref := conversationRef{agentID: p.AgentID, harness: "codex", id: "discord-guild", fingerprint: p.SourceFingerprint}
@@ -2252,6 +2347,44 @@ func prepareDurableAnsweredInteraction(t *testing.T, p *project.Project, ref con
 	return store, pending
 }
 
+func prepareWritableParkedContinuation(t *testing.T, manager *Manager, assignment worktree.Assignment, mode interaction.ContinuationMode, continuationKey string) *interaction.Coordinator {
+	t.Helper()
+	ref := manager.reference("discord-guild")
+	if _, _, err := manager.store.assignWorkspaceAndAccept(ref, assignment.Root, assignment.Branch, "message-1", "origin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.store.startNext(ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.store.setSessionID(ref, "thread-1"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 8, 4, 0, 0, 0, time.UTC)
+	coordinator, err := manager.NewInteractionCoordinator("discord-guild", dispatchRendererFunc(func(context.Context, interaction.RenderIntent) interaction.EffectOutcome {
+		return interaction.EffectSucceeded
+	}), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := storeTestLifecycle("package-state")
+	pending.InputID = "message-1"
+	pending.ExpiresAt = now.Add(time.Hour)
+	if err := coordinator.Request(interaction.OpenRequest{
+		InteractionID: pending.ID, InputID: pending.InputID, Owner: pending.Owner,
+		Request: pending.Request, Resolution: pending.Resolution, Continuation: mode, ContinuationKey: continuationKey,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Render(context.Background(), pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := true
+	if _, err := coordinator.AcceptAnswer(interaction.AnswerAttempt{InteractionID: pending.ID, Owner: pending.Owner, Answer: interaction.Answer{SchemaVersion: interaction.SchemaVersion, Action: interaction.ActionSubmit, Fields: []interaction.FieldAnswer{{FieldID: "approved", Confirmed: &confirmed}}}}); err != nil {
+		t.Fatal(err)
+	}
+	return coordinator
+}
+
 type continuationManagerDriver struct {
 	*managerDriver
 	started chan struct{}
@@ -2263,6 +2396,36 @@ type projectAwareContinuationManagerDriver struct {
 	project       *project.Project
 	policy        harness.ExecutionPolicy
 	standardCalls int
+}
+
+type guardedContinuationManagerDriver struct {
+	*managerDriver
+	mu     sync.Mutex
+	starts int
+}
+
+func newGuardedContinuationManagerDriver(name string) *guardedContinuationManagerDriver {
+	return &guardedContinuationManagerDriver{managerDriver: newNamedManagerDriver(name)}
+}
+
+func (d *guardedContinuationManagerDriver) ContinueTurn(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult {
+	d.mu.Lock()
+	d.starts++
+	d.mu.Unlock()
+	return interaction.ContinuationResult{Effect: interaction.EffectSucceeded, OriginOutcome: "completed"}
+}
+
+func (d *guardedContinuationManagerDriver) ResumeDeferredTool(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult {
+	d.mu.Lock()
+	d.starts++
+	d.mu.Unlock()
+	return interaction.ContinuationResult{Effect: interaction.EffectSucceeded, OriginOutcome: "completed"}
+}
+
+func (d *guardedContinuationManagerDriver) startCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.starts
 }
 
 func (d *projectAwareContinuationManagerDriver) ContinueTurn(context.Context, harness.OpenRequest, string, interaction.ContinuationIntent, func(harness.Event)) interaction.ContinuationResult {
@@ -2557,6 +2720,45 @@ type fakeWorkspaceProvider struct {
 	removed      int
 }
 
+type packageCheckingWorkspaceProvider struct {
+	project    *project.Project
+	assignment worktree.Assignment
+	store      *integration.Store
+}
+
+func (p *packageCheckingWorkspaceProvider) Provision(context.Context, string) (*project.Project, worktree.Assignment, error) {
+	return p.project, p.assignment, nil
+}
+
+func (p *packageCheckingWorkspaceProvider) Resolve(ctx context.Context, _ string, assignment worktree.Assignment) (*project.Project, error) {
+	if assignment != p.assignment {
+		return nil, errors.New("unexpected package-checking assignment")
+	}
+	if _, err := p.store.ResolveNativeMCP(ctx, "github-mcp-server", "github"); err != nil {
+		return nil, err
+	}
+	return p.project, nil
+}
+
+func (*packageCheckingWorkspaceProvider) Remove(context.Context, worktree.Assignment) {}
+
+type diagnosticRecorder struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (r *diagnosticRecorder) add(message string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.entries = append(r.entries, message)
+}
+
+func (r *diagnosticRecorder) string() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return strings.Join(r.entries, "\n")
+}
+
 type multiWorkspaceProvider struct {
 	mu              sync.Mutex
 	base            *project.Project
@@ -2687,6 +2889,50 @@ func projectAtWorkspace(base *project.Project, root string) *project.Project {
 	copy := *base
 	copy.WorkspaceRoot = root
 	return &copy
+}
+
+func writeDispatchGitHubPackage(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	payload := []byte("#!/bin/sh\nexit 0\n")
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "github-mcp-server", "version": "1.8.0", "name": "GitHub MCP fixture", "description": "Package-state fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://github.com/github/github-mcp-server", "revision": "v1.8.0"},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary",
+			"source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID}, "executable": "github-mcp-server",
+			"arguments": []string{"stdio"}, "working_directory": ".", "environment": map[string]string{},
+			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
+			"harnesses": []any{
+				map[string]any{"name": "claude", "startup": "optional", "trust": "native-project"},
+				map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"},
+			},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string][]byte{
+		filepath.Join(root, "integration.json"):             append(manifest, '\n'),
+		filepath.Join(root, "payload", "github-mcp-server"): payload,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
 }
 
 func (d *managerDriver) blockProcessClose() {

@@ -181,6 +181,11 @@ func New(ctx context.Context, config Config, delivery Delivery) (*Controller, er
 	var managed *dispatch.Manager
 	var configured interactionManager
 	configure := func(manager *dispatch.Manager) error {
+		if err := manager.ConfigureDiagnosticSink(func(diagnostic string) {
+			_, _ = fmt.Fprintf(c.audit, "%s %s\n", c.auditPrefix, diagnostic)
+		}); err != nil {
+			return err
+		}
 		configured = manager
 		c.interactionMgr = manager
 		c.adapter = config.Interactions

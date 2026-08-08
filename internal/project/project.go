@@ -38,21 +38,26 @@ import (
 
 const (
 	maxSourceBytes        = 128 << 10
-	maxSkills             = 8
-	maxPlugins            = 32
-	maxPluginSkills       = 128
-	maxPluginMCPServers   = 32
+	maxSkills             = 256
+	maxPlugins            = 128
+	maxPluginSkills       = 1024
+	maxPluginMCPServers   = 128
 	maxPluginCommandBytes = 8 << 20
-	maxSkillFiles         = 128
-	maxSkillFileBytes     = 1 << 20
-	maxSkillBytes         = 8 << 20
-	maxHarnessFiles       = 128
+	maxSkillFiles         = 1024
+	maxSkillSetFiles      = 8192
+	maxSkillFileBytes     = 16 << 20
+	maxSkillBytes         = 64 << 20
+	maxSkillSetBytes      = 64 << 20
+	maxHarnessFiles       = 1024
+	maxHarnessFileBytes   = 1 << 20
 	maxHarnessBytes       = 8 << 20
 	maxConnectionBytes    = 8 << 10
 	maxChannelBytes       = 8 << 10
-	maxSchedules          = 32
+	maxSchedules          = 256
+	maxScheduleBytes      = 16 << 20
 	maxSchedulePrompt     = 32 << 10
-	maxSubagents          = 8
+	maxSubagents          = 128
+	maxSubagentBytes      = 16 << 20
 	echoMaxInputBytes     = 1024
 )
 
@@ -90,6 +95,39 @@ type File struct {
 	Path       string
 	Content    []byte
 	Executable bool
+}
+
+type skillSetBudget struct {
+	files    int
+	bytes    int64
+	maxFiles int
+	maxBytes int64
+}
+
+type byteBudget struct {
+	used  int64
+	max   int64
+	label string
+}
+
+func (budget *byteBudget) claim(path string, size int) error {
+	if budget.used+int64(size) > budget.max {
+		return fmt.Errorf("%s exceeds the aggregate %s limit of %d bytes", path, budget.label, budget.max)
+	}
+	budget.used += int64(size)
+	return nil
+}
+
+func (budget *skillSetBudget) claim(path string, size int64) error {
+	if budget.files == budget.maxFiles {
+		return fmt.Errorf("%s exceeds the aggregate %d-file skill-set limit", path, budget.maxFiles)
+	}
+	if budget.bytes+size > budget.maxBytes {
+		return fmt.Errorf("%s exceeds the aggregate %d-byte skill-set limit", path, budget.maxBytes)
+	}
+	budget.files++
+	budget.bytes += size
+	return nil
 }
 
 type Subagent struct {
@@ -248,11 +286,12 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 		return nil, fmt.Errorf("instructions: %w", err)
 	}
 
-	skills, err := loadSkills(sourceRoot)
+	skillBudget := &skillSetBudget{maxFiles: maxSkillSetFiles, maxBytes: maxSkillSetBytes}
+	skills, err := loadSkills(sourceRoot, skillBudget)
 	if err != nil {
 		return nil, err
 	}
-	skills, pluginMCPServers, pluginSources, diagnostics, err := loadPlugins(sourceRoot, workspaceRoot, harness, agentID, skills)
+	skills, pluginMCPServers, pluginSources, diagnostics, err := loadPlugins(sourceRoot, workspaceRoot, harness, agentID, skills, skillBudget)
 	if err != nil {
 		return nil, err
 	}
@@ -369,6 +408,7 @@ func loadSchedules(root string) ([]Schedule, error) {
 	}
 
 	result := []Schedule{}
+	budget := &byteBudget{max: maxScheduleBytes, label: "schedule-source"}
 	err = filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return errors.New("cannot read schedules directory")
@@ -395,9 +435,6 @@ func loadSchedules(root string) ([]Schedule, error) {
 		if !entryInfo.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".md" {
 			return fmt.Errorf("schedules supports Markdown files only; found %q", entry.Name())
 		}
-		if len(result) == maxSchedules {
-			return fmt.Errorf("agent may contain at most %d schedules", maxSchedules)
-		}
 		relative, err := filepath.Rel(root, path)
 		if err != nil {
 			return errors.New("cannot describe schedule path")
@@ -410,12 +447,18 @@ func loadSchedules(root string) ([]Schedule, error) {
 			return fmt.Errorf("schedule %q has an invalid path", relative)
 		}
 		name := strings.TrimSuffix(strings.TrimPrefix(relative, "schedules/"), ".md")
+		if len(result) == maxSchedules {
+			return fmt.Errorf("%s exceeds the agent limit of at most %d schedules", relative, maxSchedules)
+		}
 		if len([]rune(name)) > 128 {
 			return fmt.Errorf("schedule name %q exceeds 128 characters", name)
 		}
 		source, err := rootfs.ReadSource(root, relative, maxSourceBytes)
 		if err != nil {
 			return fmt.Errorf("schedule %q: %w", name, err)
+		}
+		if err := budget.claim(relative, len(source)); err != nil {
+			return err
 		}
 		cron, prompt, err := parseSchedule(source)
 		if err != nil {
@@ -642,7 +685,7 @@ func loadHarnessFiles(root, harness string) ([]File, error) {
 	}
 
 	files := []File{}
-	total := 0
+	budget := &byteBudget{max: maxHarnessBytes, label: "harness-specific source"}
 	err = filepath.WalkDir(nativeDirectory, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return fmt.Errorf("cannot read harnesses/%s/%s", harness, nativeDirectoryName)
@@ -660,9 +703,6 @@ func loadHarnessFiles(root, harness string) ([]File, error) {
 		if !info.Mode().IsRegular() {
 			return errors.New("harness-specific entries must be regular files or real directories")
 		}
-		if len(files) == maxHarnessFiles {
-			return fmt.Errorf("harnesses/%s may contain at most %d files", harness, maxHarnessFiles)
-		}
 		relative, err := filepath.Rel(selectedDirectory, path)
 		if err != nil {
 			return errors.New("cannot describe harness-specific file path")
@@ -678,13 +718,15 @@ func loadHarnessFiles(root, harness string) ([]File, error) {
 			return fmt.Errorf("harness-specific file %q is reserved for hctl", relative)
 		}
 		sourcePath := "harnesses/" + harness + "/" + relative
-		content, err := rootfs.ReadSource(root, sourcePath, maxSkillFileBytes)
+		if len(files) == maxHarnessFiles {
+			return fmt.Errorf("harness-specific file %q exceeds the limit of at most %d files", sourcePath, maxHarnessFiles)
+		}
+		content, err := rootfs.ReadSource(root, sourcePath, maxHarnessFileBytes)
 		if err != nil {
 			return err
 		}
-		total += len(content)
-		if total > maxHarnessBytes {
-			return fmt.Errorf("harnesses/%s files exceed %d bytes", harness, maxHarnessBytes)
+		if err := budget.claim(sourcePath, len(content)); err != nil {
+			return err
 		}
 		files = append(files, File{Path: relative, Content: content, Executable: info.Mode().Perm()&0o111 != 0})
 		return nil
@@ -770,12 +812,13 @@ func loadSubagents(root string) ([]Subagent, error) {
 		return nil, errors.New("cannot read subagents directory")
 	}
 	result := make([]Subagent, 0, len(entries))
+	budget := &byteBudget{max: maxSubagentBytes, label: "subagent-source"}
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		if len(result) == maxSubagents {
-			return nil, fmt.Errorf("agent may contain at most %d subagents", maxSubagents)
+			return nil, fmt.Errorf("subagents/%s exceeds the agent limit of at most %d subagents", entry.Name(), maxSubagents)
 		}
 		if !portableName.MatchString(entry.Name()) {
 			return nil, fmt.Errorf("subagent directory %q must use lowercase letters, numbers, and hyphens", entry.Name())
@@ -801,6 +844,9 @@ func loadSubagents(root string) ([]Subagent, error) {
 		source, err := rootfs.ReadSource(root, path, maxSourceBytes)
 		if err != nil {
 			return nil, fmt.Errorf("subagent %q: %w", entry.Name(), err)
+		}
+		if err := budget.claim(path, len(source)); err != nil {
+			return nil, err
 		}
 		description, effort, instructions, err := parseSubagentInstructions(source)
 		if err != nil {
@@ -892,7 +938,7 @@ func parseEffort(raw string) (string, error) {
 	return effort, nil
 }
 
-func loadSkills(root string) ([]Skill, error) {
+func loadSkills(root string, budget *skillSetBudget) ([]Skill, error) {
 	directory := filepath.Join(root, "skills")
 	info, err := os.Lstat(directory)
 	if errors.Is(err, os.ErrNotExist) {
@@ -919,13 +965,13 @@ func loadSkills(root string) ([]Skill, error) {
 			return nil, fmt.Errorf("skills may contain real skill directories only; found %q", entry.Name())
 		}
 		if len(skills) == maxSkills {
-			return nil, fmt.Errorf("agent may contain at most %d skills", maxSkills)
+			return nil, fmt.Errorf("skills/%s exceeds the agent limit of at most %d skills", entry.Name(), maxSkills)
 		}
 		name := entry.Name()
 		if !validSkillName(name) {
 			return nil, fmt.Errorf("skill directory %q must be 1-64 lowercase ASCII letters, numbers, and single hyphens", name)
 		}
-		skill, err := loadSkill(root, "skills/"+name, name)
+		skill, err := loadSkill(root, "skills/"+name, name, budget)
 		if err != nil {
 			return nil, fmt.Errorf("skill %q: %w", name, err)
 		}
@@ -934,8 +980,8 @@ func loadSkills(root string) ([]Skill, error) {
 	return skills, nil
 }
 
-func loadSkill(root, sourcePath, name string) (Skill, error) {
-	files, err := loadSkillFiles(root, sourcePath)
+func loadSkill(root, sourcePath, name string, budget *skillSetBudget) (Skill, error) {
+	files, err := loadSkillFiles(root, sourcePath, budget)
 	if err != nil {
 		return Skill{}, err
 	}
@@ -960,10 +1006,10 @@ func loadSkill(root, sourcePath, name string) (Skill, error) {
 	}, nil
 }
 
-func loadSkillFiles(root, sourcePath string) ([]File, error) {
+func loadSkillFiles(root, sourcePath string, budget *skillSetBudget) ([]File, error) {
 	directory := filepath.Join(root, filepath.FromSlash(sourcePath))
 	files := []File{}
-	total := 0
+	var total int64
 	err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return errors.New("cannot read skill directory")
@@ -990,7 +1036,7 @@ func loadSkillFiles(root, sourcePath string) ([]File, error) {
 			return fmt.Errorf("%s must be a regular file", sourcePath)
 		}
 		if len(files) == maxSkillFiles {
-			return fmt.Errorf("may contain at most %d files", maxSkillFiles)
+			return fmt.Errorf("%s exceeds the per-skill limit of at most %d files", sourcePath, maxSkillFiles)
 		}
 		relative, err := filepath.Rel(directory, path)
 		if err != nil {
@@ -1001,14 +1047,20 @@ func loadSkillFiles(root, sourcePath string) ([]File, error) {
 		if relative == "SKILL.md" {
 			limit = maxSourceBytes
 		}
+		if info.Size() > limit {
+			return fmt.Errorf("%s exceeds %d bytes", sourcePath, limit)
+		}
+		if total+info.Size() > maxSkillBytes {
+			return fmt.Errorf("%s exceeds the per-skill aggregate of %d bytes", sourcePath, maxSkillBytes)
+		}
+		if err := budget.claim(sourcePath, info.Size()); err != nil {
+			return err
+		}
 		content, err := rootfs.ReadSource(root, sourcePath, limit)
 		if err != nil {
 			return err
 		}
-		total += len(content)
-		if total > maxSkillBytes {
-			return fmt.Errorf("resources exceed %d bytes", maxSkillBytes)
-		}
+		total += int64(len(content))
 		files = append(files, File{Path: relative, Content: content, Executable: info.Mode().Perm()&0o111 != 0})
 		return nil
 	})
@@ -1033,7 +1085,7 @@ func loadSkillFiles(root, sourcePath string) ([]File, error) {
 	return files, nil
 }
 
-func loadPlugins(root, workspace, harness, agentID string, skills []Skill) ([]Skill, []PluginMCPServer, []SourceRecord, []Diagnostic, error) {
+func loadPlugins(root, workspace, harness, agentID string, skills []Skill, budget *skillSetBudget) ([]Skill, []PluginMCPServer, []SourceRecord, []Diagnostic, error) {
 	directory := filepath.Join(root, "plugins")
 	info, err := os.Lstat(directory)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1133,13 +1185,16 @@ func loadPlugins(root, workspace, harness, agentID string, skills []Skill) ([]Sk
 				diagnostics = append(diagnostics, Diagnostic{Path: sourcePath, Message: fmt.Sprintf("plugin skill skipped: skill name %q is already provided by an earlier source", name)})
 				continue
 			}
-			skill, err := loadSkill(root, sourcePath, name)
-			if err != nil {
-				diagnostics = append(diagnostics, Diagnostic{Path: sourcePath, Message: "plugin skill skipped: " + err.Error()})
+			if len(skills) == maxSkills {
+				diagnostics = append(diagnostics, Diagnostic{Path: sourcePath, Message: fmt.Sprintf("plugin skill skipped: agent may contain at most %d skills", maxSkills)})
 				continue
 			}
-			if len(skills) == maxSkills {
-				return nil, nil, nil, nil, fmt.Errorf("agent may contain at most %d skills", maxSkills)
+			budgetBefore := *budget
+			skill, err := loadSkill(root, sourcePath, name, budget)
+			if err != nil {
+				*budget = budgetBefore
+				diagnostics = append(diagnostics, Diagnostic{Path: sourcePath, Message: "plugin skill skipped: " + err.Error()})
+				continue
 			}
 			seen[name] = true
 			skills = append(skills, skill)

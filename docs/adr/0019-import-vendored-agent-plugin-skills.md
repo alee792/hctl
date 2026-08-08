@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Extended by: [ADR 0020](0020-map-plugin-mcp-through-native-harness-configuration.md)
+- Count ceilings superseded by: [ADR 0029](0029-bound-authored-projects-with-aggregate-budgets.md)
 
 ## Plain-English summary
 

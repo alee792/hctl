@@ -1,6 +1,7 @@
 # ADR 0013: Dispatch schedules as fresh tasks
 
 - Status: accepted
+- Schedule count superseded by: [ADR 0029](0029-bound-authored-projects-with-aggregate-budgets.md)
 
 ## Plain-English summary
 
@@ -22,7 +23,7 @@ Root-agent schedules use Eve's Markdown convention at
 name. Frontmatter contains exactly one string field named `cron`; it must be a
 bounded, standard five-field printable-ASCII expression. The non-empty Markdown
 body is the prompt; matching Eve, only one optional blank line after the closing
-frontmatter delimiter is removed. Apply discovers at most 32 schedules,
+frontmatter delimiter is removed. Apply discovers a bounded number of schedules,
 validates their real paths and bounded contents, and includes their original
 bytes in the source fingerprint. It starts no harness process, clock, or
 external registration.

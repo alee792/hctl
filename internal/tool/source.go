@@ -13,10 +13,10 @@ import (
 )
 
 const (
-	maxFiles       = 128
-	maxTools       = 32
+	maxFiles       = 1024
+	maxTools       = 128
 	maxFileBytes   = 1 << 20
-	maxSourceBytes = 8 << 20
+	maxSourceBytes = 64 << 20
 )
 
 var portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
@@ -169,7 +169,7 @@ func addSource(inventory *Inventory, seen map[string]string, source Source) erro
 		return fmt.Errorf("duplicate tool name %q from %s and %s", source.Name, prior, source.Path)
 	}
 	if len(inventory.Sources) == maxTools {
-		return fmt.Errorf("agent may contain at most %d tools", maxTools)
+		return fmt.Errorf("tool %q at %s exceeds the agent limit of at most %d tools", source.Name, source.Path, maxTools)
 	}
 	seen[source.Name] = source.Path
 	inventory.Sources = append(inventory.Sources, source)
@@ -178,17 +178,31 @@ func addSource(inventory *Inventory, seen map[string]string, source Source) erro
 
 func addFile(root, path string, inventory *Inventory, total *int) error {
 	if len(inventory.Files) == maxFiles {
-		return fmt.Errorf("tool source may contain at most %d files", maxFiles)
+		return fmt.Errorf("tool source file %q exceeds the limit of at most %d files", path, maxFiles)
+	}
+	info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(path)))
+	if err != nil {
+		return fmt.Errorf("cannot inspect tool source file %q", path)
+	}
+	if info.Mode().IsRegular() && info.Size() <= maxFileBytes && int64(*total)+info.Size() > maxSourceBytes {
+		return fmt.Errorf("tool source file %q exceeds the aggregate source limit of %d bytes", path, maxSourceBytes)
 	}
 	data, err := rootfs.ReadSource(root, path, maxFileBytes)
 	if err != nil {
 		return err
 	}
-	*total += len(data)
-	if *total > maxSourceBytes {
-		return fmt.Errorf("tool source exceeds %d bytes", maxSourceBytes)
+	if err := claimSourceBytes(path, total, len(data)); err != nil {
+		return err
 	}
 	inventory.Files = append(inventory.Files, File{Path: path, SHA256: rootfs.SHA256(data)})
+	return nil
+}
+
+func claimSourceBytes(path string, total *int, size int) error {
+	if *total+size > maxSourceBytes {
+		return fmt.Errorf("tool source file %q exceeds the aggregate source limit of %d bytes", path, maxSourceBytes)
+	}
+	*total += size
 	return nil
 }
 

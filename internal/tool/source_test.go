@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,57 @@ func TestDiscoverAllowsEmptyToolsDirectory(t *testing.T) {
 	}
 	if len(inventory.Sources) != 0 || len(inventory.Files) != 0 {
 		t.Fatalf("inventory = %#v", inventory)
+	}
+}
+
+func TestDiscoverRaisedToolBoundary(t *testing.T) {
+	root := t.TempDir()
+	for index := 0; index < maxTools; index++ {
+		write(t, root, fmt.Sprintf("tools/tool-%03d.ts", index), "export default {}\n")
+	}
+	write(t, root, "deno.json", "{}\n")
+	write(t, root, "deno.lock", "{}\n")
+	inventory, err := Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Sources) != maxTools {
+		t.Fatalf("maximum tool count loaded %d tools", len(inventory.Sources))
+	}
+	write(t, root, "tools/overflow.ts", "export default {}\n")
+	if _, err := Discover(root); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d", maxTools)) {
+		t.Fatalf("tool limit was not enforced: %v", err)
+	}
+}
+
+func TestDiscoverRaisedToolFileBoundary(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "tools/main.ts", "export default {}\n")
+	for index := 0; index < maxFiles-3; index++ {
+		write(t, root, fmt.Sprintf("tools/_helper-%04d.ts", index), "export {}\n")
+	}
+	write(t, root, "deno.json", "{}\n")
+	write(t, root, "deno.lock", "{}\n")
+	inventory, err := Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Files) != maxFiles {
+		t.Fatalf("maximum tool file count loaded %d files", len(inventory.Files))
+	}
+	write(t, root, "tools/_overflow.ts", "export {}\n")
+	if _, err := Discover(root); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d", maxFiles)) {
+		t.Fatalf("tool file limit was not enforced: %v", err)
+	}
+}
+
+func TestToolSourceByteBoundary(t *testing.T) {
+	total := maxSourceBytes - 1
+	if err := claimSourceBytes("tools/final.ts", &total, 1); err != nil {
+		t.Fatalf("maximum tool-source size was rejected: %v", err)
+	}
+	if err := claimSourceBytes("tools/overflow.ts", &total, 1); err == nil || !strings.Contains(err.Error(), "tools/overflow.ts") {
+		t.Fatalf("tool source above maximum was not rejected at its path: %v", err)
 	}
 }
 

@@ -526,7 +526,7 @@ func TestLoadRejectsUnsafeHarnessFiles(t *testing.T) {
 
 	t.Run("oversized", func(t *testing.T) {
 		root := agent(t, "portable")
-		writeBytes(t, filepath.Join(root, "harnesses", "claude", ".claude", "large.bin"), make([]byte, maxSkillFileBytes+1), 0o644)
+		writeBytes(t, filepath.Join(root, "harnesses", "claude", ".claude", "large.bin"), make([]byte, maxHarnessFileBytes+1), 0o644)
 		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "exceeds") {
 			t.Fatalf("oversized harness file was not rejected: %v", err)
 		}
@@ -921,15 +921,27 @@ func TestPluginMCPComponentValidationAndBounds(t *testing.T) {
 		root := agent(t, "portable")
 		write(t, filepath.Join(root, "plugins", "example", "plugin.json"), pluginManifest("example"))
 		servers := map[string]any{}
-		for index := 0; index <= maxPluginMCPServers; index++ {
+		for index := 0; index < maxPluginMCPServers; index++ {
 			servers[fmt.Sprintf("server-%02d", index)] = map[string]any{"type": "stdio", "command": "node"}
 		}
-		content, err := json.Marshal(map[string]any{"$schema": pluginMCPSchema, "mcpServers": servers})
+		writePluginMCP := func() {
+			content, err := json.Marshal(map[string]any{"$schema": pluginMCPSchema, "mcpServers": servers})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeBytes(t, filepath.Join(root, "plugins", "example", "mcp.json"), content, 0o644)
+		}
+		writePluginMCP()
+		loaded, err := Load(root, "codex")
 		if err != nil {
 			t.Fatal(err)
 		}
-		writeBytes(t, filepath.Join(root, "plugins", "example", "mcp.json"), content, 0o644)
-		loaded, err := Load(root, "codex")
+		if len(loaded.PluginMCPServers) != maxPluginMCPServers {
+			t.Fatalf("maximum MCP server count loaded %d servers", len(loaded.PluginMCPServers))
+		}
+		servers["overflow"] = map[string]any{"type": "stdio", "command": "node"}
+		writePluginMCP()
+		loaded, err = Load(root, "codex")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1091,17 +1103,39 @@ func TestPluginFilesystemBoundaries(t *testing.T) {
 			name := fmt.Sprintf("plugin-%d", index)
 			write(t, filepath.Join(root, "plugins", "many", "skills", name, "SKILL.md"), fmt.Sprintf("---\nname: %s\ndescription: Extra.\n---\n", name))
 		}
-		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "at most") {
-			t.Fatalf("aggregate skill limit was not enforced: %v", err)
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.Skills) != maxSkills || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, fmt.Sprintf("at most %d", maxSkills)) {
+			t.Fatalf("aggregate plugin skill limit was not isolated: skills=%d diagnostics=%#v", len(loaded.Skills), loaded.Diagnostics)
+		}
+	})
+
+	t.Run("aggregate plugin skill byte budget", func(t *testing.T) {
+		root := agent(t, "portable")
+		write(t, filepath.Join(root, "plugins", "bounded", "plugin.json"), pluginManifest("bounded"))
+		write(t, filepath.Join(root, "plugins", "bounded", "skills", "large", "SKILL.md"), "---\nname: large\ndescription: Extra.\n---\n")
+		budget := &skillSetBudget{maxFiles: maxSkillSetFiles, maxBytes: 1}
+		loaded, _, _, diagnostics, err := loadPlugins(root, root, "claude", "portable", nil, budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded) != 0 || len(diagnostics) != 1 || diagnostics[0].Path != "plugins/bounded/skills/large" || !strings.Contains(diagnostics[0].Message, "aggregate") {
+			t.Fatalf("aggregate plugin skill byte limit was not isolated at its path: skills=%#v diagnostics=%#v", loaded, diagnostics)
 		}
 	})
 
 	t.Run("plugin directory entry limit", func(t *testing.T) {
 		root := agent(t, "portable")
-		for index := 0; index <= maxPlugins; index++ {
+		for index := 0; index < maxPlugins; index++ {
 			write(t, filepath.Join(root, "plugins", fmt.Sprintf("plugin-%02d", index), "plugin.json"), pluginManifest(fmt.Sprintf("plugin-%02d", index)))
 		}
-		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "at most 32") {
+		if _, err := Load(root, "claude"); err != nil {
+			t.Fatalf("maximum plugin directory count was rejected: %v", err)
+		}
+		write(t, filepath.Join(root, "plugins", "overflow", "plugin.json"), pluginManifest("overflow"))
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d", maxPlugins)) {
 			t.Fatalf("plugin directory entry limit was not enforced: %v", err)
 		}
 	})
@@ -1109,16 +1143,22 @@ func TestPluginFilesystemBoundaries(t *testing.T) {
 	t.Run("plugin skill entry limit", func(t *testing.T) {
 		root := agent(t, "portable")
 		write(t, filepath.Join(root, "plugins", "many", "plugin.json"), pluginManifest("many"))
-		for index := 0; index <= maxPluginSkills; index++ {
+		for index := 0; index < maxPluginSkills; index++ {
 			if err := os.MkdirAll(filepath.Join(root, "plugins", "many", "skills", fmt.Sprintf("entry-%03d", index)), 0o755); err != nil {
 				t.Fatal(err)
 			}
+		}
+		if _, err := Load(root, "claude"); err != nil {
+			t.Fatalf("maximum plugin skill directory count was rejected: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(root, "plugins", "many", "skills", "overflow"), 0o755); err != nil {
+			t.Fatal(err)
 		}
 		loaded, err := Load(root, "claude")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(loaded.Skills) != 1 || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, "at most 128") {
+		if len(loaded.Skills) != 1 || len(loaded.Diagnostics) != 1 || !strings.Contains(loaded.Diagnostics[0].Message, fmt.Sprintf("at most %d", maxPluginSkills)) {
 			t.Fatalf("plugin skill entry limit was not isolated: skills=%#v diagnostics=%#v", loaded.Skills, loaded.Diagnostics)
 		}
 	})
@@ -1325,9 +1365,17 @@ func TestSkillResourceValidation(t *testing.T) {
 
 	t.Run("resource count", func(t *testing.T) {
 		root := agent(t, "portable")
-		for index := 0; index < maxSkillFiles; index++ {
+		for index := 0; index < maxSkillFiles-1; index++ {
 			write(t, filepath.Join(root, "skills", "echo", "assets", fmt.Sprintf("%03d.bin", index)), "")
 		}
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.Skills[0].Files) != maxSkillFiles {
+			t.Fatalf("maximum resource count loaded %d files", len(loaded.Skills[0].Files))
+		}
+		write(t, filepath.Join(root, "skills", "echo", "assets", "overflow.bin"), "")
 		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "at most") {
 			t.Fatalf("resource count was not bounded: %v", err)
 		}
@@ -1339,8 +1387,119 @@ func TestSkillResourceValidation(t *testing.T) {
 		for index := 0; index <= maxSkillBytes/maxSkillFileBytes; index++ {
 			writeBytes(t, filepath.Join(root, "skills", "echo", "assets", fmt.Sprintf("%02d.bin", index)), content, 0o644)
 		}
-		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "resources exceed") {
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "per-skill aggregate") {
 			t.Fatalf("aggregate resource size was not bounded: %v", err)
+		}
+	})
+}
+
+func TestAggregateSkillBudget(t *testing.T) {
+	budget := &skillSetBudget{maxFiles: 2, maxBytes: 3}
+	if err := budget.claim("skills/one/SKILL.md", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.claim("skills/two/SKILL.md", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.claim("skills/overflow/SKILL.md", 0); err == nil || !strings.Contains(err.Error(), "skills/overflow/SKILL.md exceeds the aggregate 2-file") {
+		t.Fatalf("aggregate file budget was not enforced: %v", err)
+	}
+	bytesBudget := &skillSetBudget{maxFiles: 2, maxBytes: 2}
+	if err := bytesBudget.claim("skills/large/SKILL.md", 3); err == nil || !strings.Contains(err.Error(), "skills/large/SKILL.md exceeds the aggregate 2-byte") {
+		t.Fatalf("aggregate byte budget was not enforced: %v", err)
+	}
+
+	realFileBudget := &skillSetBudget{files: maxSkillSetFiles - 1, maxFiles: maxSkillSetFiles, maxBytes: maxSkillSetBytes}
+	if err := realFileBudget.claim("skills/final/SKILL.md", 0); err != nil {
+		t.Fatalf("real aggregate file maximum was rejected: %v", err)
+	}
+	if err := realFileBudget.claim("plugins/overflow/skills/next/SKILL.md", 0); err == nil || !strings.Contains(err.Error(), "plugins/overflow/skills/next/SKILL.md") {
+		t.Fatalf("file above real aggregate maximum was not rejected at its path: %v", err)
+	}
+
+	realByteBudget := &skillSetBudget{bytes: maxSkillSetBytes - 1, maxFiles: maxSkillSetFiles, maxBytes: maxSkillSetBytes}
+	if err := realByteBudget.claim("skills/final/resource.bin", 1); err != nil {
+		t.Fatalf("real aggregate byte maximum was rejected: %v", err)
+	}
+	if err := realByteBudget.claim("plugins/overflow/skills/next/resource.bin", 1); err == nil || !strings.Contains(err.Error(), "plugins/overflow/skills/next/resource.bin") {
+		t.Fatalf("byte above real aggregate maximum was not rejected at its path: %v", err)
+	}
+}
+
+func TestAuthoredByteBudgetBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		max  int64
+	}{
+		{name: "subagent-source", max: maxSubagentBytes},
+		{name: "schedule-source", max: maxScheduleBytes},
+		{name: "harness-specific source", max: maxHarnessBytes},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			budget := &byteBudget{used: test.max - 1, max: test.max, label: test.name}
+			if err := budget.claim("authored/final", 1); err != nil {
+				t.Fatalf("maximum was rejected: %v", err)
+			}
+			if err := budget.claim("authored/overflow", 1); err == nil || !strings.Contains(err.Error(), "authored/overflow") {
+				t.Fatalf("value above maximum was not rejected at its path: %v", err)
+			}
+		})
+	}
+}
+
+func TestRaisedAuthoredCountBoundaries(t *testing.T) {
+	t.Run("subagents", func(t *testing.T) {
+		root := agent(t, "portable")
+		for index := 0; index < maxSubagents; index++ {
+			write(t, filepath.Join(root, "subagents", fmt.Sprintf("agent-%03d", index), "instructions.md"), instructions("Review."))
+		}
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.Subagents) != maxSubagents {
+			t.Fatalf("maximum subagent count loaded %d subagents", len(loaded.Subagents))
+		}
+		write(t, filepath.Join(root, "subagents", "overflow", "instructions.md"), instructions("Review."))
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "subagents/overflow") || !strings.Contains(err.Error(), fmt.Sprintf("at most %d", maxSubagents)) {
+			t.Fatalf("subagent limit was not enforced: %v", err)
+		}
+	})
+
+	t.Run("schedules", func(t *testing.T) {
+		root := agent(t, "portable")
+		content := "---\ncron: \"0 0 * * *\"\n---\n\nRun.\n"
+		for index := 0; index < maxSchedules; index++ {
+			write(t, filepath.Join(root, "schedules", fmt.Sprintf("task-%03d.md", index)), content)
+		}
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.Schedules) != maxSchedules {
+			t.Fatalf("maximum schedule count loaded %d schedules", len(loaded.Schedules))
+		}
+		write(t, filepath.Join(root, "schedules", "overflow.md"), content)
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "schedules/") || !strings.Contains(err.Error(), ".md") || !strings.Contains(err.Error(), fmt.Sprintf("at most %d", maxSchedules)) {
+			t.Fatalf("schedule limit was not enforced: %v", err)
+		}
+	})
+
+	t.Run("harness files", func(t *testing.T) {
+		root := agent(t, "portable")
+		for index := 0; index < maxHarnessFiles; index++ {
+			write(t, filepath.Join(root, "harnesses", "claude", ".claude", "rules", fmt.Sprintf("rule-%04d.md", index)), "rule\n")
+		}
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.HarnessFiles) != maxHarnessFiles {
+			t.Fatalf("maximum harness file count loaded %d files", len(loaded.HarnessFiles))
+		}
+		write(t, filepath.Join(root, "harnesses", "claude", ".claude", "rules", "overflow.md"), "rule\n")
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d", maxHarnessFiles)) {
+			t.Fatalf("harness file limit was not enforced: %v", err)
 		}
 	})
 }
@@ -1438,11 +1597,19 @@ func TestLoadRejectsUnsafeOrAmbiguousSources(t *testing.T) {
 
 	t.Run("skill limit", func(t *testing.T) {
 		root := agent(t, "portable")
-		for index := 0; index < maxSkills; index++ {
+		for index := 0; index < maxSkills-1; index++ {
 			name := fmt.Sprintf("extra-%d", index)
 			write(t, filepath.Join(root, "skills", name, "SKILL.md"), fmt.Sprintf("---\nname: %s\ndescription: Extra.\n---\n", name))
 		}
-		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "at most") {
+		loaded, err := Load(root, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.Skills) != maxSkills {
+			t.Fatalf("maximum skill count loaded %d skills", len(loaded.Skills))
+		}
+		write(t, filepath.Join(root, "skills", "overflow", "SKILL.md"), "---\nname: overflow\ndescription: Extra.\n---\n")
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "skills/overflow") || !strings.Contains(err.Error(), "at most") {
 			t.Fatalf("skill limit was not enforced: %v", err)
 		}
 	})

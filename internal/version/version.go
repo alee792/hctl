@@ -7,7 +7,7 @@ import (
 )
 
 // Value is replaced with an exact release version by the artifact build.
-var Value = "0.9.0-dev"
+var Value = "0.1.0-dev"
 
 func Validate(value string) error {
 	coreAndPre, build, hasBuild := strings.Cut(value, "+")

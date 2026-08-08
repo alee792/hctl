@@ -1,6 +1,7 @@
 ---
-description: Inspect public GitHub repository and issue context.
+description: Inspect GitHub through its official native MCP server.
 ---
 
-Use the managed GitHub tools for public repository and issue facts. Treat
-native harness tools as available but outside hctl's governance.
+Use discovered native GitHub tools by intended outcome. Treat the ambient PAT,
+tool catalog, calls, and effects as outside hctl's managed boundary. Native Git
+and `gh` require separately operator-configured authentication.

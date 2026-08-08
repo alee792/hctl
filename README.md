@@ -101,12 +101,12 @@ harness receives them. Hctl copies those files literally and owns their
 workspace copies, but does not merge, validate, or promise that the harness
 honors their contents. Generated skills, subagents, and MCP configuration stay
 reserved for hctl. Do not put credentials in authored harness files. A bounded
-Markdown description at `connections/github.md` adds anonymous, public,
-read-only GitHub repository and issue access through the same managed MCP
-server in either harness. It exposes `github__get-repository`,
-`github__list-issues`, and `github__get-issue`; apply never contacts GitHub.
-Private repositories, credentials, writes, generic OpenAPI loading, and remote
-MCP proxying are not part of this first connection. See the
+Markdown description at `connections/github.md` requests an operator-installed
+copy of GitHub's official MCP server through native Claude Code or Codex project
+configuration. The harness discovers the live tool catalog and the server reads
+an ambient `GITHUB_PERSONAL_ACCESS_TOKEN`; hctl does not read or persist the
+value and does not filter, confirm, authorize, or audit native GitHub effects.
+Native Git and `gh` authentication remain separately operator-owned. See the
 [minimal example](examples/minimal), [plugin example](examples/plugins),
 [public GitHub example](examples/github),
 [Discord source example](examples/discord), and the

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -611,6 +612,122 @@ func TestRunJSONLAutoAppliesAndScrubsDiscordToken(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "AGENTS.md")); err != nil {
 		t.Fatal("run did not auto-apply")
+	}
+}
+
+func TestRunGitHubNativeMCPEnvironmentAndOptionalFailureForClaudeAndCodex(t *testing.T) {
+	const fakeValue = "conspicuous-headless-fake-pat"
+	commands := map[string]string{
+		"claude": `#!/bin/sh
+if [ "${1-}" = "--version" ]; then echo "2.1.221 (Claude Code)"; exit 0; fi
+if [ "${1-}" = "--permission-mode" ]; then echo "--permission-mode plan acceptEdits"; exit 0; fi
+token=missing
+[ -n "${GITHUB_PERSONAL_ACCESS_TOKEN-}" ] && token=present
+trust=missing
+[ "${FAKE_NATIVE_GITHUB_TRUST-}" = approved ] && trust=approved
+config=missing
+grep -F '"github": {' .mcp.json >/dev/null && config=present
+printf 'start token=%s trust=%s config=%s policy=%s\n' "$token" "$trust" "$config" "${HCTL_EXECUTION_POLICY-}" >> "$FAKE_RUNTIME_LOG"
+IFS= read -r line || exit 1
+session_id="11111111-1111-4111-8111-111111111111"
+printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session_id"
+printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"github optional; managed session available"}\n' "$session_id"
+`,
+		"codex": `#!/bin/sh
+if [ "${1-}" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+token=missing
+[ -n "${GITHUB_PERSONAL_ACCESS_TOKEN-}" ] && token=present
+trust=missing
+[ "${FAKE_NATIVE_GITHUB_TRUST-}" = approved ] && trust=approved
+config=missing
+grep -F '[mcp_servers."github"]' .codex/config.toml >/dev/null && config=present
+printf 'start token=%s trust=%s config=%s policy=%s\n' "$token" "$trust" "$config" "${HCTL_EXECUTION_POLICY-}" >> "$FAKE_RUNTIME_LOG"
+while IFS= read -r line; do
+ case "$line" in
+  *'"method":"initialize"'*) echo '{"id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.1"}}' ;;
+  *'"method":"thread/start"'*|*'"method":"thread/resume"'*) echo '{"id":2,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"}}}' ;;
+  *'"method":"turn/start"'*)
+    echo '{"id":3,"result":{"turn":{"id":"01922222-2222-7222-8222-222222222222","items":[],"status":"inProgress"}}}'
+    echo '{"method":"turn/completed","params":{"threadId":"01911111-1111-7111-8111-111111111111","turn":{"id":"01922222-2222-7222-8222-222222222222","items":[],"status":"completed"}}}'
+    ;;
+ esac
+done
+`,
+	}
+	for harnessName, script := range commands {
+		t.Run(harnessName, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			store, err := integration.NewDefaultStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			packageRoot := writeCLIGitHubPackage(t, "1.8.0", []byte("#!/bin/sh\nexit 0\n"))
+			if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+				t.Fatal(err)
+			}
+			source := filepath.Join(t.TempDir(), "maintainer")
+			writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Headless GitHub fixture.\n---\n\nUse discovered GitHub outcomes.\n", 0o644)
+			writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+			command := filepath.Join(t.TempDir(), harnessName)
+			writeCLIFile(t, command, script, 0o755)
+			logPath := filepath.Join(t.TempDir(), harnessName+"-runtime.log")
+			t.Setenv("FAKE_RUNTIME_LOG", logPath)
+			t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", fakeValue)
+			t.Setenv("FAKE_NATIVE_GITHUB_TRUST", "approved")
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := func(workspace, conversation, inputID string) (string, string, error) {
+				var output, stderr bytes.Buffer
+				input := `{"input_id":"` + inputID + `","text":"inspect GitHub"}` + "\n"
+				err := Run([]string{"run", source, "--workspace", workspace, "--harness", harnessName, "--command", command, "--input", "jsonl", "--conversation", conversation}, strings.NewReader(input), &output, &stderr, self)
+				return output.String(), stderr.String(), err
+			}
+
+			workspace := t.TempDir()
+			for _, inputID := range []string{"first", "after-restart"} {
+				output, stderr, err := run(workspace, "maintainer", inputID)
+				if err != nil || !strings.Contains(output, `"type":"turn.completed"`) || strings.Contains(output, fakeValue) || strings.Contains(stderr, fakeValue) {
+					t.Fatalf("headless %s run %s = output %q, stderr %q, error %v", harnessName, inputID, output, stderr, err)
+				}
+			}
+			t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "")
+			t.Setenv("FAKE_NATIVE_GITHUB_TRUST", "")
+			output, stderr, err := run(workspace, "maintainer", "github-unavailable")
+			if err != nil || !strings.Contains(output, `"type":"turn.completed"`) || strings.Contains(stderr, fakeValue) {
+				t.Fatalf("optional GitHub failure broke %s session = output %q, stderr %q, error %v", harnessName, output, stderr, err)
+			}
+			t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", fakeValue)
+			t.Setenv("FAKE_NATIVE_GITHUB_TRUST", "approved")
+			type result struct {
+				output string
+				stderr string
+				err    error
+			}
+			results := make(chan result, 2)
+			for index := range 2 {
+				workspace := t.TempDir()
+				conversation := "concurrent-" + strconv.Itoa(index)
+				inputID := "input-" + strconv.Itoa(index)
+				go func() {
+					out, diagnostic, runErr := run(workspace, conversation, inputID)
+					results <- result{output: out, stderr: diagnostic, err: runErr}
+				}()
+			}
+			for range 2 {
+				result := <-results
+				if result.err != nil || !strings.Contains(result.output, `"type":"turn.completed"`) || strings.Contains(result.stderr, fakeValue) {
+					t.Fatalf("concurrent %s headless session = output %q, stderr %q, error %v", harnessName, result.output, result.stderr, result.err)
+				}
+			}
+			log := readCLIFile(t, logPath)
+			if strings.Count(log, "token=present trust=approved config=present") < 4 || !strings.Contains(log, "token=missing trust=missing config=present") || strings.Contains(log, fakeValue) {
+				t.Fatalf("headless %s environment/trust evidence = %q", harnessName, log)
+			}
+		})
 	}
 }
 

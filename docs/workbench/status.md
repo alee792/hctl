@@ -43,11 +43,10 @@ The repository contains a small Go CLI that:
   functions beside the bounded built-in `echo` tool through stdio MCP, plus an
   optional default-off `record-friction` built-in that retains private,
   bounded, agent-namespaced local notes without reading them back;
-- discovers a bounded `connections/github.md` description and exposes three
-  fixed anonymous public GitHub repository and issue operations through the
-  same managed MCP server without contacting GitHub during apply; this legacy
-  implementation is superseded by the accepted native contract but is not yet
-  removed or rewired;
+- discovers a bounded `connections/github.md` description, resolves the exact
+  installed official GitHub MCP package offline, and exposes its discovered
+  catalog through native Claude or Codex configuration without adding GitHub
+  code or credentials to hctl's managed server;
 - discovers a bounded `channels/discord.md` participation policy and runs one
   outbound conversational Discord Gateway adapter over the durable turn
   dispatcher, with independent managed session lifecycles for the authorized
@@ -382,8 +381,13 @@ prove that only the environment-variable name enters native configuration or
 retained evidence. Agents without the connection neither resolve nor stage the
 package. The superseded anonymous managed GitHub client and tool definitions
 have been removed; the managed server, authored tools, channel input, and
-plugin-native MCP behavior remain unchanged. Full local/headless maintainer
-journey evidence remains #71 and the documented operator journey remains #72.
+plugin-native MCP behavior remain unchanged. Credential-free #71 acceptance
+now proves local discovery and calls, bounded missing-auth and native-trust
+failure, repeated and concurrent native launches, ambient inheritance through
+headless Claude and Codex sessions, and the fact that a read-only workspace
+does not constrain simulated native GitHub effects. A deterministic eligible
+tracker fixture verifies the maintainer's claim-first guidance without claiming
+hctl authorization. The complete documented operator journey remains #72.
 Every hctl-owned scheduled or channel session open, channel reopen, and native
 continuation process start re-resolves and verifies current offline package
 state before opening the harness, so disablement, removal, updates, or

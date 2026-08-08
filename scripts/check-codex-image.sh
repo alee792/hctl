@@ -89,15 +89,19 @@ docker build --platform linux/amd64 --pull \
   --file "$repo_root/images/codex/Dockerfile" \
   "$work/context"
 
-docker run --rm --entrypoint /bin/sh --env "EXPECTED_SHARED_LIBRARIES=$shared_libraries" "$source_image" -c '
+docker run --rm --network none --entrypoint /bin/sh --env "EXPECTED_SHARED_LIBRARIES=$shared_libraries" "$source_image" -c '
   set -eux
   test "$(id -u):$(id -g)" = "65532:65532"
   test "$(hctl --version)" = "hctl '"$hctl_version"'"
   test -d /home/hctl/.codex
   test -z "$(find /home/hctl/.codex -mindepth 1 -print -quit)"
-  test -z "$(find /home/hctl -mindepth 1 -maxdepth 1 ! -name .codex -print -quit)"
+  test -z "$(find /home/hctl -mindepth 1 -maxdepth 1 ! -name .codex ! -name .config -print -quit)"
   test -z "$(find /workspace -mindepth 1 -print -quit)"
   test ! -e /agent
+  hctl integration verify github-mcp-server | grep -F "verified integration=github-mcp-server version=1.8.0" >/dev/null
+  hctl integration inspect github-mcp-server | grep -F "required_environment=GITHUB_PERSONAL_ACCESS_TOKEN" >/dev/null
+  hctl integration inspect github-mcp-server | grep -F "value=not-read" >/dev/null
+  if grep -R "hctl-ci-fake-github-token-must-not-persist" /home/hctl/.config/hctl/integrations; then exit 1; fi
   mkdir -p /tmp/codex-version
   CODEX_HOME=/tmp/codex-version codex --version | grep -F "'"$codex_version"'" >/dev/null
   deno --version >/dev/null
@@ -134,7 +138,7 @@ if docker run --rm "$direct_image" >"$work/direct-entrypoint.out" 2>&1; then
   exit 1
 fi
 grep -F "agent has no configured channels; use --input jsonl or add channels/discord.md" "$work/direct-entrypoint.out" >/dev/null
-docker run --rm --entrypoint /bin/sh "$direct_image" -c '
+docker run --rm --network none --entrypoint /bin/sh "$direct_image" -c '
   set -eu
   test "$(id -u):$(id -g)" = "65532:65532"
   test -f /workspace/.codex/config.toml
@@ -142,6 +146,8 @@ docker run --rm --entrypoint /bin/sh "$direct_image" -c '
   test ! -e /workspace/.claude
   test ! -e /workspace/CLAUDE.md
   test -z "$(find /home/hctl/.codex -mindepth 1 -print -quit)"
+  hctl integration verify github-mcp-server >/dev/null
+  test ! -e /workspace/.hctl/integrations
 '
 
 docker build --platform linux/amd64 \
@@ -161,6 +167,8 @@ docker run --rm --entrypoint /bin/sh "$staged_image" -c '
   test -x /opt/hctl/bin/agent-entrypoint
   test -x /opt/hctl/harness/bin/codex
   test ! -e /opt/hctl/runtimes
+  test ! -e /opt/hctl/integrations
+  test ! -e /home/hctl/.config/hctl/integrations
   grep -F "\"runtimes\": []" /opt/hctl/artifact.json >/dev/null
   test -f /workspace/.codex/config.toml
   test -s /etc/ssl/certs/ca-certificates.crt

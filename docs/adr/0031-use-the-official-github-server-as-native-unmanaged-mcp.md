@@ -32,6 +32,17 @@ rewrite or freeze the official server's tool catalog or schemas. Installation,
 enablement, exact version selection, and operator trust are machine state owned
 by the package journey implemented by #76.
 
+The initial curated distribution selects official release `v1.8.0` for
+`darwin-arm64` and `linux-amd64`. Its checked manifest pins archive and
+executable identities; a separate declarative source lock additionally pins
+the official release URLs, one allowed GitHub release-asset redirect origin,
+and exact archive layout. The one-command package installer performs that
+download and materialization outside hctl, then supplies the resulting local
+source to #76's generic explicit-trust installer. This preserves #76's
+no-redirect fetch contract and adds no GitHub downloader, cache, or vendor
+switch to hctl. Direct image construction may run the same reviewed
+materialization while it has network access; runtime verification is offline.
+
 The official `github/github-mcp-server` executable supplies GitHub's MCP tool
 catalog, schemas, protocol behavior, authentication, requests, results, and
 failures. The first hctl delivery selects only its PAT path: the server reads
@@ -161,9 +172,12 @@ does not satisfy, invoke, weaken, or replace the secretless broker decision.
   the native delivery is wired; they are not retained as an automatic fallback.
 - Agents without `connections/github.md` generate and stage no GitHub package
   entry or runtime artifact.
-- Package installation and preparation reuse #76; this ADR adds no installer,
-  cache, downloader, credential store, broker, proxy, Git client, or GitHub API
-  client.
+- Package installation and preparation reuse #76; this specialization adds no
+  GitHub-specific installer, cache, or downloader to hctl core and no credential
+  store, broker, proxy, Git client, or GitHub API client anywhere.
+- The curated package's small build-time materializer is distribution tooling,
+  not an hctl runtime or store path. Its downloaded official binaries are not
+  vendored in this repository.
 - Native tool names and catalogs are discovered from the official server and
   are not frozen into hctl's portable contract.
 - Hardening follow-ups #70, #73, and #77 through #80 remain separate work.

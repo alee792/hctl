@@ -24,6 +24,7 @@ import (
 	"hctl/internal/harness"
 	"hctl/internal/harness/claude"
 	"hctl/internal/harness/codex"
+	"hctl/internal/integration"
 	"hctl/internal/mcp"
 	"hctl/internal/project"
 	"hctl/internal/rootfs"
@@ -40,6 +41,7 @@ Commands:
   version                                 Print the hctl build version
   apply AGENT --harness <claude|codex>    Prepare tools and native files
   stage AGENT --harness <claude|codex>    Prepare a runnable filesystem tree
+  integration <command>                   Manage external integration packages
   run AGENT --harness <claude|codex>      Run configured conversational channels
   channel setup discord AGENT             Enroll an existing Discord bot
   channel status discord AGENT            Validate Discord configuration
@@ -63,6 +65,8 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 		return runApply(args[1:], output, stderr, self)
 	case "stage":
 		return runStage(args[1:], output, stderr, self)
+	case "integration":
+		return runIntegration(args[1:], output, stderr)
 	case "run":
 		return runAgent(args[1:], input, output, stderr, self)
 	case "channel":
@@ -74,8 +78,173 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 	case "hook":
 		return runHook(args[1:], input, output)
 	default:
-		return fmt.Errorf("unknown command %q; expected version, apply, stage, run, channel, or schedule", args[0])
+		return fmt.Errorf("unknown command %q; expected version, apply, stage, integration, run, channel, or schedule", args[0])
 	}
+}
+
+func runIntegration(args []string, output, stderr io.Writer) error {
+	const usage = `Usage:
+  hctl integration install SOURCE --trust operator
+  hctl integration update ID SOURCE --trust operator
+  hctl integration inspect ID
+  hctl integration verify ID
+  hctl integration list
+  hctl integration enable ID
+  hctl integration disable ID
+  hctl integration remove ID
+`
+	if len(args) == 0 || len(args) == 1 && isHelp(args[0]) {
+		_, err := io.WriteString(output, usage)
+		return err
+	}
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	switch args[0] {
+	case "install":
+		if len(args) < 2 {
+			return errors.New("usage: hctl integration install SOURCE --trust operator")
+		}
+		fs := flag.NewFlagSet("integration install", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		trust := fs.String("trust", "", "explicit package trust owner")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("unexpected integration install arguments")
+		}
+		installed, err := store.Install(ctx, integration.InstallOptions{Source: args[1], Trust: integration.InstallationTrust(*trust)})
+		if err != nil {
+			return err
+		}
+		return printIntegrationSummary(output, "installed", installed)
+	case "update":
+		if len(args) < 3 {
+			return errors.New("usage: hctl integration update ID SOURCE --trust operator")
+		}
+		fs := flag.NewFlagSet("integration update", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		trust := fs.String("trust", "", "explicit package trust owner")
+		if err := fs.Parse(args[3:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("unexpected integration update arguments")
+		}
+		installed, err := store.Install(ctx, integration.InstallOptions{Source: args[2], Trust: integration.InstallationTrust(*trust), Update: args[1]})
+		if err != nil {
+			return err
+		}
+		return printIntegrationSummary(output, "updated", installed)
+	case "list":
+		if len(args) != 1 {
+			return errors.New("usage: hctl integration list")
+		}
+		entries, err := store.List(ctx)
+		if err != nil {
+			return err
+		}
+		if len(entries) == 0 {
+			_, err = fmt.Fprintln(output, "no integration packages installed")
+			return err
+		}
+		for _, entry := range entries {
+			if err := printIntegrationSummary(output, "integration", entry); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "inspect":
+		if len(args) != 2 {
+			return errors.New("usage: hctl integration inspect ID")
+		}
+		entry, err := store.Inspect(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		consumers, err := store.Consumers(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		return printIntegrationInspect(output, entry, consumers)
+	case "verify":
+		if len(args) != 2 {
+			return errors.New("usage: hctl integration verify ID")
+		}
+		entry, err := store.Verify(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		return printIntegrationSummary(output, "verified", entry)
+	case "enable", "disable":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: hctl integration %s ID", args[0])
+		}
+		enabled := args[0] == "enable"
+		if err := store.SetEnabled(ctx, args[1], enabled); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintf(output, "%sd integration=%s\n", args[0], args[1])
+		return err
+	case "remove":
+		if len(args) != 2 {
+			return errors.New("usage: hctl integration remove ID")
+		}
+		if err := store.Remove(ctx, args[1]); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintf(output, "removed integration=%s; shared immutable cache retained\n", args[1])
+		return err
+	default:
+		return fmt.Errorf("unknown integration command %q; expected install, update, inspect, verify, list, enable, disable, or remove", args[0])
+	}
+}
+
+func printIntegrationSummary(output io.Writer, action string, entry integration.Installed) error {
+	manifest := entry.Package.Manifest()
+	_, err := fmt.Fprintf(output, "%s integration=%s version=%s manifest=%s trust=%s enabled=%t verified_platform_artifacts=%d\n", action, manifest.ID, manifest.Version, entry.Package.Identity(), entry.State.Trust, entry.State.Enabled, len(entry.State.Artifacts))
+	return err
+}
+
+func printIntegrationInspect(output io.Writer, entry integration.Installed, consumers []integration.Consumption) error {
+	manifest := entry.Package.Manifest()
+	if err := printIntegrationSummary(output, "integration", entry); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(output, "name=%s\ndescription=%s\nlicense=%s\nprovenance=%s revision=%s\ncompatibility=[%s,%s)\ninstalled_verification=exact-manifest-artifact-executable\noffline_status=run-hctl-integration-verify\n", manifest.Name, manifest.Description, manifest.License, manifest.Provenance.Source, manifest.Provenance.Revision, manifest.Compatibility.Minimum, manifest.Compatibility.Before); err != nil {
+		return err
+	}
+	for _, artifact := range manifest.Artifacts {
+		if _, err := fmt.Fprintf(output, "artifact=%s platform=%s/%s format=%s sha256=%s executable=%s executable_sha256=%s\n", artifact.ID, artifact.OS, artifact.Architecture, artifact.Format, artifact.SHA256, artifact.Executable.Path, artifact.Executable.SHA256); err != nil {
+			return err
+		}
+	}
+	for _, capability := range manifest.Capabilities {
+		if _, err := fmt.Fprintf(output, "capability=%s type=%s version=%d\n", capability.ID, capability.Type, capability.Version); err != nil {
+			return err
+		}
+		if capability.NativeMCP != nil {
+			for _, required := range capability.NativeMCP.RequiredEnvironment {
+				if _, err := fmt.Fprintf(output, "required_environment=%s description=%s value=not-read\n", required.Name, required.Description); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if len(consumers) == 0 {
+		_, err := fmt.Fprintln(output, "consuming_agents=none")
+		return err
+	}
+	for _, consumer := range consumers {
+		if _, err := fmt.Fprintf(output, "consuming_agent=%s id=%s capabilities=%s\n", consumer.AgentName, consumer.AgentID, strings.Join(consumer.Capabilities, ",")); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runHook(args []string, input io.Reader, output io.Writer) error {

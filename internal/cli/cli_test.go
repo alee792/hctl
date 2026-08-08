@@ -3,10 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -45,6 +49,70 @@ func TestHeadlessCommandIsNamedRun(t *testing.T) {
 	err := Run([]string{"gateway"}, strings.NewReader(""), &output, &stderr, "")
 	if err == nil || !strings.Contains(err.Error(), `unknown command "gateway"`) {
 		t.Fatalf("legacy gateway command error = %v", err)
+	}
+}
+
+func TestIntegrationPackageCLIJourneyIsExplicitAndContentFree(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "must-not-appear")
+	packageRoot := t.TempDir()
+	payload := []byte("#!/bin/sh\necho fixture\n")
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	document := map[string]any{
+		"schema_version": 1, "id": "cli-fixture", "version": "1.0.0", "name": "CLI fixture", "description": "Credentialless CLI package fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://example.invalid/cli-fixture", "revision": "fixture-v1"},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": "current", "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary",
+			"source": map[string]any{"kind": "package", "path": "payload/server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "bin/server", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "native-mcp", "version": 1, "id": "fixture", "server_name": "fixture", "collision": "reject", "artifacts": []string{"current"}, "executable": "bin/server",
+			"arguments": []string{}, "working_directory": ".", "environment": map[string]string{},
+			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
+			"harnesses":            []any{map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"}},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(packageRoot, "integration.json"), string(manifest)+"\n", 0o600)
+	writeCLIFile(t, filepath.Join(packageRoot, "payload", "server"), string(payload), 0o600)
+
+	var output, stderr bytes.Buffer
+	if err := runIntegration([]string{"install", packageRoot}, &output, &stderr); err == nil || !strings.Contains(err.Error(), "--trust operator") {
+		t.Fatalf("implicit trust error = %v", err)
+	}
+	if err := runIntegration([]string{"install", packageRoot, "--trust", "operator"}, &output, &stderr); err != nil {
+		t.Fatalf("install error = %v", err)
+	}
+	if !strings.Contains(output.String(), "installed integration=cli-fixture") {
+		t.Fatalf("install output = %q", output.String())
+	}
+	output.Reset()
+	if err := runIntegration([]string{"inspect", "cli-fixture"}, &output, &stderr); err != nil {
+		t.Fatalf("inspect error = %v", err)
+	}
+	if got := output.String(); !strings.Contains(got, "required_environment=GITHUB_PERSONAL_ACCESS_TOKEN") || !strings.Contains(got, "value=not-read") || strings.Contains(got, "must-not-appear") {
+		t.Fatalf("inspect output = %q", got)
+	}
+	output.Reset()
+	if err := runIntegration([]string{"verify", "cli-fixture"}, &output, &stderr); err != nil || !strings.Contains(output.String(), "verified integration=cli-fixture") {
+		t.Fatalf("verify = %q, %v", output.String(), err)
+	}
+	if err := runIntegration([]string{"disable", "cli-fixture"}, io.Discard, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if err := runIntegration([]string{"enable", "cli-fixture"}, io.Discard, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if err := runIntegration([]string{"remove", "cli-fixture"}, io.Discard, &stderr); err != nil {
+		t.Fatal(err)
 	}
 }
 

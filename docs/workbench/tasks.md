@@ -17,11 +17,11 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### [GitHub #75](https://github.com/alee792/hctl/issues/75) — Define the integration package envelope and native MCP capability
+### [GitHub #76](https://github.com/alee792/hctl/issues/76) — Install and selectively prepare process-isolated integration packages
 
-Complete the shared metadata-first package envelope and the first narrow
-`native-mcp` capability contract. This is the sole initial frontier for the
-[process-isolated integrations initiative](process-isolated-integrations-plan.md).
+Implement the capability-agnostic install, owner-controlled shared cache,
+offline lookup, lifecycle CLI, and selective preparation boundary over the
+merged package contract.
 
 ## Ordered next
 
@@ -37,6 +37,49 @@ must adapt to its merged predecessors.
 6. After all implementation issues: verify epics #74, #64, and #81.
 
 ## Completed
+
+### [GitHub #82](https://github.com/alee792/hctl/issues/82) — Define the versioned external channel-adapter capability and process protocol
+
+**Outcome:** ADR 0032 and the dependency-free `hctl/channeladapter` module
+define the closed `channel-adapter` version-1 package capability and its bounded
+semantic JSONL process protocol. Deterministic no-op fixtures prove the seam
+without vendor dependencies, credentials, package execution, or a generic
+runtime host.
+
+**Evidence:** Merged commit
+[`ed41480`](https://github.com/alee792/hctl/commit/ed41480df98a874be2ec05d0eb5a10afec42ffbe)
+adds strict manifest selection plus protocol validation, codec, replay,
+backpressure, lifecycle, attachment, diagnostic, and shutdown tests. The root
+module does not import the separate protocol module.
+
+### [GitHub #65](https://github.com/alee792/hctl/issues/65) — Define the native unmanaged GitHub MCP and environment contract
+
+**Outcome:** ADR 0031 specializes the `native-mcp` capability for the official
+external GitHub server and records the deliberately unmanaged ambient
+`GITHUB_PERSONAL_ACCESS_TOKEN` boundary. Native Git and `gh` remain
+operator-owned; hctl does not broker, persist, proxy, observe, or authorize
+native GitHub MCP calls.
+
+**Evidence:** Merged commit
+[`5724625`](https://github.com/alee792/hctl/commit/5724625)
+adds the literal product, security, local/headless, collision, ownership, and
+credential-free evidence contracts without adding a vendor dependency or live
+credential path.
+
+### [GitHub #75](https://github.com/alee792/hctl/issues/75) — Define the integration package envelope and native MCP capability
+
+**Outcome:** ADR 0030 and the root package contract define one metadata-first
+schema-versioned envelope, immutable manifest/artifact/executable identities,
+operator-owned installation state, half-open hctl compatibility, and the first
+closed `native-mcp` v1 capability. Metadata validation and defensive selection
+perform no artifact access or package execution, unknown capability versions
+fail closed, and vendor code remains outside hctl's root module.
+
+**Evidence:** Merged PR
+[#86](https://github.com/alee792/hctl/pull/86) added fixture-driven validation
+and mutation-isolation tests for the credentialless native server, official
+GitHub metadata, and unsupported future capability. Repository checks and both
+independent Standards and issue-spec reviews passed without findings.
 
 ### [GitHub #43](https://github.com/alee792/hctl/issues/43) — Run schedules from a foreground local clock
 

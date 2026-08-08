@@ -2,6 +2,8 @@ package channeladapter
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -37,6 +39,124 @@ func TestFrameCodecIsClosedBoundedAndDirectional(t *testing.T) {
 	unknownVersion := bytes.Replace(data, []byte(`"protocol_version":1`), []byte(`"protocol_version":2`), 1)
 	if _, err := DecodeFrame(unknownVersion, FromHost); err == nil || !strings.Contains(err.Error(), "version 2 is unsupported") {
 		t.Fatalf("unknown-version error = %v", err)
+	}
+}
+
+func TestInteractionValidationMatchesCanonicalBounds(t *testing.T) {
+	t.Parallel()
+	valid := func() SemanticInteractionRequest {
+		return SemanticInteractionRequest{
+			SchemaVersion: 1,
+			Kind:          InteractionChooseMany,
+			Prompt:        "Choose one or more\nInternal tabs\tare allowed.",
+			FallbackText:  "Reply with selections.",
+			Policy:        InteractionPolicy{ExpiresAfterSeconds: 60, Cancellation: CancellationAllowed},
+			Field: &Field{
+				ID: "choices", Kind: InteractionChooseMany, Label: "Choices", Description: "Available choices", Required: true,
+				Options:       []Option{{ID: "first", Label: "First", Description: "First choice", Value: "first-value"}, {ID: "second", Label: "Second", Value: "second-value"}},
+				MinSelections: 1, MaxSelections: 2,
+			},
+		}
+	}
+	if err := validateSemanticRequest(valid()); err != nil {
+		t.Fatalf("canonical request: %v", err)
+	}
+	tooMany := valid()
+	tooMany.Field.MaxSelections = 3
+	if err := validateSemanticRequest(tooMany); err == nil || !strings.Contains(err.Error(), "selection bounds") {
+		t.Fatalf("choose-many cardinality error = %v", err)
+	}
+	withFreeform := valid()
+	withFreeform.Field.AllowFreeform = true
+	withFreeform.Field.MinLength = 0
+	withFreeform.Field.MaxLength = 4000
+	withFreeform.Field.MaxSelections = 3
+	if err := validateSemanticRequest(withFreeform); err != nil {
+		t.Fatalf("options plus freeform cardinality: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*SemanticInteractionRequest)
+	}{
+		{name: "prompt leading space", mutate: func(request *SemanticInteractionRequest) { request.Prompt = " prompt" }},
+		{name: "prompt control", mutate: func(request *SemanticInteractionRequest) { request.Prompt = "prompt\x01" }},
+		{name: "fallback trailing space", mutate: func(request *SemanticInteractionRequest) { request.FallbackText = "fallback " }},
+		{name: "label newline", mutate: func(request *SemanticInteractionRequest) { request.Field.Label = "choice\nlabel" }},
+		{name: "description leading space", mutate: func(request *SemanticInteractionRequest) { request.Field.Description = " description" }},
+		{name: "option label trailing space", mutate: func(request *SemanticInteractionRequest) { request.Field.Options[0].Label = "First " }},
+		{name: "option description control", mutate: func(request *SemanticInteractionRequest) { request.Field.Options[0].Description = "first\x7f" }},
+		{name: "option value tab", mutate: func(request *SemanticInteractionRequest) { request.Field.Options[0].Value = "first\tvalue" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := valid()
+			test.mutate(&request)
+			if err := validateSemanticRequest(request); err == nil {
+				t.Fatal("non-canonical text was accepted")
+			}
+		})
+	}
+}
+
+func TestDiagnosticLimitCoversCompletePayload(t *testing.T) {
+	t.Parallel()
+	diagnostic := Diagnostic{Class: DiagnosticProtocol, Severity: SeverityWarning, Code: "bounded", Message: ""}
+	empty, err := json.Marshal(diagnostic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostic.Message = strings.Repeat("a", MaxDiagnosticBytes-len(empty))
+	exact, err := json.Marshal(diagnostic)
+	if err != nil || len(exact) != MaxDiagnosticBytes {
+		t.Fatalf("exact diagnostic payload size = %d, %v", len(exact), err)
+	}
+	frame := Envelope{ProtocolVersion: 1, ID: "adapter.diagnostic.exact", Payload: diagnostic}
+	if _, err := MarshalFrame(frame, FromAdapter); err != nil {
+		t.Fatalf("exact diagnostic payload: %v", err)
+	}
+	diagnostic.Message += "a"
+	frame.Payload = diagnostic
+	if _, err := MarshalFrame(frame, FromAdapter); err == nil || !strings.Contains(err.Error(), "diagnostic payload exceeds") {
+		t.Fatalf("oversized diagnostic payload error = %v", err)
+	}
+}
+
+func TestTypedNilPayloadsFailWithoutPanicking(t *testing.T) {
+	t.Parallel()
+	payloads := []Payload{
+		(*Hello)(nil),
+		(*Initialize)(nil),
+		(*Ready)(nil),
+		(*InboundMessage)(nil),
+		(*ControlRequest)(nil),
+		(*ControlResult)(nil),
+		(*EventAck)(nil),
+		(*Activity)(nil),
+		(*Delivery)(nil),
+		(*DeliveryResult)(nil),
+		(*InteractionRequest)(nil),
+		(*InteractionCancel)(nil),
+		(*InteractionResult)(nil),
+		(*AttachmentFetch)(nil),
+		(*AttachmentChunk)(nil),
+		(*AttachmentDeliver)(nil),
+		(*AttachmentResult)(nil),
+		(*Connection)(nil),
+		(*Diagnostic)(nil),
+		(*Shutdown)(nil),
+		(*ShutdownComplete)(nil),
+	}
+	for index, payload := range payloads {
+		t.Run(fmt.Sprintf("%02d-%T", index, payload), func(t *testing.T) {
+			envelope := Envelope{ProtocolVersion: ProtocolVersion, ID: "host.typed-nil.1", Payload: payload}
+			if err := ValidateEnvelope(envelope, FromHost); err == nil || !strings.Contains(err.Error(), "payload is missing") {
+				t.Fatalf("ValidateEnvelope() error = %v", err)
+			}
+			if _, err := MarshalFrame(envelope, FromHost); err == nil || !strings.Contains(err.Error(), "payload is missing") {
+				t.Fatalf("MarshalFrame() error = %v", err)
+			}
+		})
 	}
 }
 

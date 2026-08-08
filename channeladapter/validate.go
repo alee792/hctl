@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -27,7 +28,7 @@ func ValidateEnvelope(envelope Envelope, direction Direction) error {
 	if !frameIDPattern.MatchString(envelope.ID) {
 		return errors.New("channel-adapter frame id is invalid")
 	}
-	if envelope.Payload == nil {
+	if payloadMissing(envelope.Payload) {
 		return errors.New("channel-adapter payload is missing")
 	}
 	kind := envelope.Payload.frameKind()
@@ -49,6 +50,14 @@ func ValidateEnvelope(envelope Envelope, direction Direction) error {
 		return errors.New("channel-adapter frame cannot correlate to itself")
 	}
 	return validatePayload(envelope.Payload)
+}
+
+func payloadMissing(payload Payload) bool {
+	if payload == nil {
+		return true
+	}
+	value := reflect.ValueOf(payload)
+	return value.Kind() == reflect.Pointer && value.IsNil()
 }
 
 func directionAllows(direction Direction, kind Kind) bool {
@@ -464,11 +473,13 @@ func validateSemanticRequest(request SemanticInteractionRequest) error {
 	if request.SchemaVersion != 1 {
 		return errors.New("interaction schema version is invalid")
 	}
-	if err := validateText("interaction prompt", request.Prompt, 1, 2<<10); err != nil {
+	if err := validateMultilineText("interaction prompt", request.Prompt, 1, 2<<10); err != nil {
 		return err
 	}
-	if err := validateText("interaction fallback", request.FallbackText, 0, 4<<10); err != nil {
-		return err
+	if request.FallbackText != "" {
+		if err := validateMultilineText("interaction fallback", request.FallbackText, 1, 4<<10); err != nil {
+			return err
+		}
 	}
 	if request.Policy.ExpiresAfterSeconds < 60 || request.Policy.ExpiresAfterSeconds > 7*24*60*60 || request.Policy.Cancellation != CancellationAllowed && request.Policy.Cancellation != CancellationForbidden {
 		return errors.New("interaction policy is invalid")
@@ -497,11 +508,13 @@ func validateSemanticRequest(request SemanticInteractionRequest) error {
 			return errors.New("interaction field is invalid or duplicated")
 		}
 		seen[field.ID] = true
-		if err := validateText("interaction field label", field.Label, 1, 100); err != nil {
+		if err := validateContractText("interaction field label", field.Label, 1, 100); err != nil {
 			return err
 		}
-		if err := validateText("interaction field description", field.Description, 0, 300); err != nil {
-			return err
+		if field.Description != "" {
+			if err := validateContractText("interaction field description", field.Description, 1, 300); err != nil {
+				return err
+			}
 		}
 		if err := validateField(field); err != nil {
 			return err
@@ -527,7 +540,11 @@ func validateField(field Field) error {
 		if len(field.Options) == 0 || len(field.Options) > 25 {
 			return errors.New("choice options are invalid")
 		}
-		if field.Kind == InteractionChooseOne && (field.MaxSelections != 1 || field.MinSelections < 0 || field.MinSelections > 1) || field.Kind == InteractionChooseMany && (field.MaxSelections < 1 || field.MaxSelections > 26 || field.MinSelections < 0 || field.MinSelections > field.MaxSelections) {
+		maximumSelections := len(field.Options)
+		if field.AllowFreeform {
+			maximumSelections++
+		}
+		if field.Kind == InteractionChooseOne && (field.MaxSelections != 1 || field.MinSelections < 0 || field.MinSelections > 1) || field.Kind == InteractionChooseMany && (field.MaxSelections < 1 || field.MaxSelections > maximumSelections || field.MinSelections < 0 || field.MinSelections > field.MaxSelections) {
 			return errors.New("choice selection bounds are invalid")
 		}
 		if field.Required && field.MinSelections < 1 {
@@ -539,7 +556,7 @@ func validateField(field Field) error {
 				return errors.New("choice option id is invalid or duplicated")
 			}
 			seen[option.ID] = true
-			if validateText("option label", option.Label, 1, 100) != nil || validateText("option description", option.Description, 0, 300) != nil || validateText("option value", option.Value, 1, 256) != nil {
+			if validateContractText("option label", option.Label, 1, 100) != nil || option.Description != "" && validateContractText("option description", option.Description, 1, 300) != nil || validateContractText("option value", option.Value, 1, 256) != nil {
 				return errors.New("choice option text is invalid")
 			}
 		}
@@ -623,10 +640,14 @@ func validateInteractionResult(value InteractionResult) error {
 			}
 			seenOptions[id] = true
 		}
-		for _, text := range []*string{field.Freeform, field.Text, field.DateTime} {
-			if text != nil && validateText("answer text", *text, 0, 4<<10) != nil {
-				return errors.New("answer text is invalid")
-			}
+		if field.Freeform != nil && !validAnswerText(*field.Freeform, true) {
+			return errors.New("answer freeform text is invalid")
+		}
+		if field.Text != nil && !validAnswerText(*field.Text, false) {
+			return errors.New("answer text is invalid")
+		}
+		if field.DateTime != nil && validateContractText("answer date-time", *field.DateTime, 1, 128) != nil {
+			return errors.New("answer date-time is invalid")
 		}
 	}
 	return nil
@@ -699,7 +720,14 @@ func validateDiagnostic(value Diagnostic) error {
 	if !validDiagnosticClass(value.Class) || value.Severity != SeverityInfo && value.Severity != SeverityWarning && value.Severity != SeverityError || !codePattern.MatchString(value.Code) {
 		return errors.New("diagnostic classification is invalid")
 	}
-	return validateText("diagnostic message", value.Message, 1, MaxDiagnosticBytes)
+	if err := validateText("diagnostic message", value.Message, 1, MaxDiagnosticBytes); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil || len(encoded) > MaxDiagnosticBytes {
+		return fmt.Errorf("diagnostic payload exceeds %d bytes", MaxDiagnosticBytes)
+	}
+	return nil
 }
 func validateFailure(value Failure) error {
 	if !validDiagnosticClass(value.Class) || !codePattern.MatchString(value.Code) {
@@ -736,6 +764,42 @@ func validateText(label, value string, minimum, maximum int) error {
 		return fmt.Errorf("%s must be bounded UTF-8 without NUL", label)
 	}
 	return nil
+}
+
+func validateContractText(label, value string, minimum, maximum int) error {
+	if !utf8.ValidString(value) || len(value) < minimum || len(value) > maximum || strings.TrimSpace(value) != value || containsControl(value) {
+		return fmt.Errorf("%s must be trimmed bounded UTF-8 without control characters", label)
+	}
+	return nil
+}
+
+func validateMultilineText(label, value string, minimum, maximum int) error {
+	if !utf8.ValidString(value) || len(value) < minimum || len(value) > maximum || strings.TrimSpace(value) != value || containsControlExceptNewline(value) {
+		return fmt.Errorf("%s must be trimmed bounded UTF-8 without unsupported control characters", label)
+	}
+	return nil
+}
+
+func validAnswerText(value string, trimmed bool) bool {
+	return utf8.ValidString(value) && utf8.RuneCountInString(value) <= 4000 && (!trimmed || strings.TrimSpace(value) == value) && !containsControlExceptNewline(value)
+}
+
+func containsControl(value string) bool {
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func containsControlExceptNewline(value string) bool {
+	for _, character := range value {
+		if character < 0x20 && character != '\n' && character != '\t' || character == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func ValidateOperationResult(result OperationResult) error {

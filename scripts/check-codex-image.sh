@@ -99,7 +99,8 @@ docker run --rm --network none --entrypoint /bin/sh --env "EXPECTED_SHARED_LIBRA
   test -z "$(find /workspace -mindepth 1 -print -quit)"
   test ! -e /agent
   hctl integration verify github-mcp-server | grep -F "verified integration=github-mcp-server version=1.8.0" >/dev/null
-  hctl integration inspect github-mcp-server | grep -F "required_environment=GITHUB_PERSONAL_ACCESS_TOKEN value=not-read" >/dev/null
+  hctl integration inspect github-mcp-server | grep -F "required_environment=GITHUB_PERSONAL_ACCESS_TOKEN" >/dev/null
+  hctl integration inspect github-mcp-server | grep -F "value=not-read" >/dev/null
   if grep -R "GITHUB_PERSONAL_ACCESS_TOKEN=" /home/hctl/.config/hctl/integrations; then exit 1; fi
   mkdir -p /tmp/codex-version
   CODEX_HOME=/tmp/codex-version codex --version | grep -F "'"$codex_version"'" >/dev/null

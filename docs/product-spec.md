@@ -392,15 +392,31 @@ identity, authorization ID, profile, or credential. It joins the source
 fingerprint, and apply adds its policy plus the exact `HCTL_NO_REPLY` control
 result to generated native instructions.
 
-`hctl channel setup discord` enrolls an existing bot. Local non-secret profiles
-live in owner-only TOML beneath the OS user configuration directory; tokens live
-in the OS credential store. Deployment selects an owner-only mounted config and
-injects `HCTL_DISCORD_TOKEN`. Every run validates the token's application and bot
-IDs against the selected profile before opening an outbound Gateway connection,
-and removes the token from every child-process environment.
+`hctl channel setup discord` resolves the one installed and enabled `discord`
+channel-adapter capability and runs its exact setup mode. The external adapter
+owns enrollment, non-secret profile data, legacy profile migration, bot
+identity validation, and the `hctl.discord` OS credential-store entry. Status
+and remove use its exact bounded modes. Deployment may inject
+`HCTL_DISCORD_TOKEN`; hctl passes that opaque value only to the selected
+adapter and removes it from every other child environment.
+
+Profile selection remains `--profile`, then the existing
+`HCTL_DISCORD_PROFILE`, then the persisted non-secret per-agent channel
+selection, a legacy per-agent/default selector during the transition, and
+finally `default`. Successful setup records only the agent, channel kind, and
+opaque profile id in hctl's owner-only selection store; successful remove
+clears that binding only when it still names the removed profile. Hctl reads no
+Discord profile fields or credential through either lookup. Operators can roll
+back with a previous hctl binary while the old implementation and legacy
+configuration remain through the final dependency cutover; the new production
+path itself never falls back silently.
 
 `hctl run` auto-applies a missing or stale generated harness integration, then
-serves the authorized user in one guild channel and DM. Each surface has
+resolves the exact apply-time package selection and launches the external
+adapter automatically. Missing, disabled, incompatible, ambiguous, or stale
+selection fails with an install, enable, setup, or reapply remedy and never
+falls back to the retained in-process code. The adapter serves the authorized
+user in one guild channel and DM. Each surface has
 independent durable dispatcher state. A transport-neutral channel controller
 owns surface registration, pending-turn correlation, complete-response
 buffering and control-result handling, typing readiness, terminal
@@ -943,10 +959,12 @@ amd64/arm64 package metadata that installs and selectively stages through the
 shared package store. Credential-free fakes prove its four modes and runtime
 protocol. See [ADR 0033](adr/0033-package-discord-as-an-external-channel-adapter.md).
 
-The current production `hctl run` path is not routed to that executable yet.
-The generic process host and final dependency cutover remain separate
-deliveries; until then the old in-process runtime remains the shipped path and
-the root module temporarily retains its existing Discord dependencies.
+The production `hctl channel setup|status|remove discord` and `hctl run` paths
+now select the exact installed executable and use the generic bounded process
+host. Apply records the exact package/capability consumption; a later package
+change requires reapply before launch. The retained in-process implementation
+is not a fallback. Its code and Discord-only root dependencies remain
+temporarily for rollback until the separate final-cutover delivery.
 
 Core depends only on validated package data and narrow capability consumers.
 Vendor packages depend inward on those contracts and run as separate

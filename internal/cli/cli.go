@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -10,15 +9,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
 
-	"golang.org/x/term"
-
-	"hctl/internal/channel/discord"
+	"hctl/internal/channel/adapterhost"
 	"hctl/internal/channelconfig"
-	"hctl/internal/credential"
+	"hctl/internal/channelselection"
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
 	"hctl/internal/harness/claude"
@@ -43,8 +41,8 @@ Commands:
   stage AGENT --harness <claude|codex>    Prepare a runnable filesystem tree
   integration <command>                   Manage external integration packages
   run AGENT --harness <claude|codex>      Run configured conversational channels
-  channel setup discord AGENT             Enroll an existing Discord bot
-  channel status discord AGENT            Validate Discord configuration
+  channel <setup|status|remove> discord AGENT
+                                          Manage the installed Discord adapter
   schedule trigger AGENT NAME [options]   Run one scheduled occurrence
   schedule run AGENT [options]            Run schedules from a foreground clock
 
@@ -506,56 +504,176 @@ func (d *currentSetupDriver) OpenProject(ctx context.Context, p *project.Project
 }
 
 func runChannel(args []string, input io.Reader, output, stderr io.Writer) error {
-	if len(args) < 3 || args[1] != "discord" || (args[0] != "setup" && args[0] != "status") {
-		return errors.New("usage: hctl channel <setup|status> discord AGENT [--profile NAME] [--config PATH]")
+	if len(args) < 3 || args[1] != "discord" || (args[0] != "setup" && args[0] != "status" && args[0] != "remove") {
+		return errors.New("usage: hctl channel <setup|status|remove> discord AGENT [--profile NAME] [--config PATH]")
 	}
 	fs := flag.NewFlagSet("channel "+args[0]+" discord", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	profileName := fs.String("profile", "", "Discord runtime profile")
-	configPath := fs.String("config", "", "hctl configuration path")
+	configPath := fs.String("config", "", "legacy hctl configuration path used only for profile selection")
 	if err := fs.Parse(args[3:]); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("unexpected channel setup arguments")
 	}
-	path, err := channelconfig.SelectedPath(*configPath)
-	if err != nil {
-		return err
-	}
-	config, err := channelconfig.Load(path, args[0] == "setup")
-	if err != nil {
-		return err
-	}
-	if args[0] == "setup" {
-		return setupDiscord(args[2], *profileName, path, config, input, output)
-	}
 	p, err := project.Load(args[2], "codex")
 	if err != nil {
 		return err
 	}
-	if p.DiscordChannel == nil {
-		return errors.New("agent project does not define channels/discord.md")
-	}
-	name, profile, err := channelconfig.Resolve(config, p.AgentID, *profileName)
+	profile, err := selectedAdapterProfile(p.AgentID, *profileName, *configPath)
 	if err != nil {
 		return err
 	}
-	token, err := credential.Resolve(credential.OSStore{}, name)
+	store, err := integration.NewDefaultStore()
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	identity, err := discord.ValidateIdentity(ctx, token)
+	ctx := context.Background()
+	resolved, err := store.ResolveChannelAdapter(ctx, "discord")
+	if err != nil {
+		return discordAdapterRemedy(err, args[2])
+	}
+	mode := map[string]integration.ChannelAdapterMode{"setup": integration.ChannelAdapterSetup, "status": integration.ChannelAdapterStatus, "remove": integration.ChannelAdapterRemove}[args[0]]
+	launch, err := resolved.LaunchDescriptor(mode, profile)
+	if err != nil {
+		return discordAdapterRemedy(err, args[2])
+	}
+	result, err := adapterhost.RunOperation(ctx, launch, adapterhost.AdapterEnvironment("HCTL_DISCORD_TOKEN"), input, stderr)
 	if err != nil {
 		return err
 	}
-	if err := discord.ValidateProfile(identity, profile); err != nil {
+	if result.Operation != args[0] || result.ProfileID != profile {
+		return errors.New("channel-adapter operation result does not match the requested operation and profile")
+	}
+	selections, err := channelselection.DefaultStore()
+	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "Discord profile %s is valid for agent %s.\n", name, p.Name)
+	switch args[0] {
+	case "setup":
+		if err := selections.Set(p.AgentID, "discord", profile); err != nil {
+			return err
+		}
+	case "remove":
+		if err := selections.Delete(p.AgentID, "discord", profile); err != nil {
+			return err
+		}
+	}
+	if args[0] == "setup" && p.DiscordChannel == nil {
+		root, rootErr := rootfs.CanonicalDir(args[2])
+		if rootErr != nil {
+			return rootErr
+		}
+		defaultSource := []byte("---\nmode: ambient\n---\n\nRespond conversationally to greetings, direct questions, follow-ups, and messages within this agent's responsibilities. Stay silent only during clearly unrelated conversation when no contribution is useful.\n")
+		if err := rootfs.WriteAtomic(root, "channels/discord.md", defaultSource, 0o644); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintf(output, "channel=%s operation=%s profile=%s status=%s", launch.ChannelKind, result.Operation, result.ProfileID, result.Status)
+	if err != nil {
+		return err
+	}
+	if result.Identity != "" {
+		if _, err = fmt.Fprintf(output, " identity=%s", result.Identity); err != nil {
+			return err
+		}
+	}
+	if result.Message != "" {
+		if _, err = fmt.Fprintf(output, " message=%s", result.Message); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintln(output)
 	return err
+}
+
+func selectedAdapterProfile(agentID, explicit, configPath string) (string, error) {
+	if explicit != "" {
+		if err := integration.ValidateChannelProfileID(explicit); err != nil {
+			return "", err
+		}
+		return explicit, nil
+	}
+	if ambient := os.Getenv("HCTL_DISCORD_PROFILE"); ambient != "" {
+		if err := integration.ValidateChannelProfileID(ambient); err != nil {
+			return "", err
+		}
+		return ambient, nil
+	}
+	selections, err := channelselection.DefaultStore()
+	if err != nil {
+		return "", err
+	}
+	name, err := selections.Get(agentID, "discord")
+	if err != nil {
+		return "", err
+	}
+	if name != "" {
+		if err := integration.ValidateChannelProfileID(name); err != nil {
+			return "", err
+		}
+		return name, nil
+	}
+	path, err := channelconfig.SelectedPath(configPath)
+	if err != nil {
+		return "", err
+	}
+	config, err := channelconfig.LoadProfileSelection(path, true)
+	if err != nil {
+		return "", err
+	}
+	name = config.AgentProfiles[agentID]
+	if name == "" {
+		name = config.DefaultProfile
+	}
+	if name == "" {
+		name = "default"
+	}
+	if err := integration.ValidateChannelProfileID(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func discordAdapterRemedy(err error, agent string) error {
+	return fmt.Errorf("discord channel adapter is unavailable: %w; install and enable the exact hctl-discord package, then run hctl channel setup discord %s", err, agent)
+}
+
+func resolveChannelAdapter(ctx context.Context, p *project.Project) (*integration.Store, integration.ChannelAdapterResolution, error) {
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		return nil, integration.ChannelAdapterResolution{}, err
+	}
+	resolved, err := store.ResolveChannelAdapter(ctx, "discord")
+	if err != nil {
+		return nil, integration.ChannelAdapterResolution{}, discordAdapterRemedy(err, p.SourceRoot)
+	}
+	return store, resolved, nil
+}
+
+func recordChannelConsumption(ctx context.Context, p *project.Project) error {
+	if p.DiscordChannel == nil {
+		return nil
+	}
+	store, resolved, err := resolveChannelAdapter(ctx, p)
+	if err != nil {
+		return err
+	}
+	return store.RecordConsumption(ctx, resolved.Selection.PackageID, p.AgentID, p.Name, []string{resolved.Selection.Capability.ID})
+}
+
+func verifyChannelConsumption(ctx context.Context, store *integration.Store, resolved integration.ChannelAdapterResolution, p *project.Project) error {
+	consumers, err := store.Consumers(ctx, resolved.Selection.PackageID)
+	if err != nil {
+		return err
+	}
+	for _, consumer := range consumers {
+		if consumer.AgentID == p.AgentID && slices.Contains(consumer.Capabilities, resolved.Selection.Capability.ID) {
+			return nil
+		}
+	}
+	return errors.New("channel-adapter generated state is stale or missing; run hctl apply again before hctl run")
 }
 
 func runMCP(args []string, input io.Reader, output, stderr io.Writer) error {
@@ -598,6 +716,13 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if err != nil {
 		return err
 	}
+	if p.DiscordChannel != nil {
+		resolveContext, cancelResolve := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelResolve()
+		if _, _, err := resolveChannelAdapter(resolveContext, p); err != nil {
+			return err
+		}
+	}
 	driver, err := newDriver(*harnessName, *command)
 	if err != nil {
 		return err
@@ -623,6 +748,11 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	}
 	result, err := setup.ApplyWithNativeMCP(p, self, nativeMCP)
 	if err != nil {
+		return err
+	}
+	recordContext, cancelRecord := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelRecord()
+	if err := recordChannelConsumption(recordContext, p); err != nil {
 		return err
 	}
 	for _, diagnostic := range result.Diagnostics {
@@ -788,28 +918,29 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 	if p.DiscordChannel == nil {
 		return errors.New("agent has no configured channels; use --input jsonl or add channels/discord.md")
 	}
-	path, err := channelconfig.SelectedPath(*configPath)
+	name, err := selectedAdapterProfile(p.AgentID, *profileName, *configPath)
 	if err != nil {
 		return err
 	}
-	config, err := channelconfig.Load(path, false)
+	resolveCtx, cancelResolve := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelResolve()
+	store, resolved, err := resolveChannelAdapter(resolveCtx, p)
 	if err != nil {
 		return err
 	}
-	name, profile, err := channelconfig.Resolve(config, p.AgentID, *profileName)
-	if err != nil {
+	if err := verifyChannelConsumption(resolveCtx, store, resolved, p); err != nil {
 		return err
 	}
-	token, err := credential.Resolve(credential.OSStore{}, name)
+	launch, err := resolved.LaunchDescriptor(integration.ChannelAdapterRuntime, "")
 	if err != nil {
-		return err
+		return discordAdapterRemedy(err, args[0])
 	}
 	hctlExecutable, err := resolvedSelf(self)
 	if err != nil {
 		return err
 	}
 	currentDriver := newCurrentSetupDriver(driver, p, self, stderr)
-	runtime, err := discord.New(p, currentDriver, discord.Config{Profile: name, Runtime: profile, Token: token, TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, MaxResident: *maxResident, MaxActive: *maxActive, Audit: stderr, Executable: hctlExecutable, NativeMCP: resolveProjectNativeMCP})
+	runtime, err := adapterhost.New(adapterhost.Config{Project: p, Driver: currentDriver, Launch: launch, ProfileID: name, Environment: adapterhost.AdapterEnvironment("HCTL_DISCORD_TOKEN"), TurnTimeout: *turnTimeout, IdleTimeout: *idleTimeout, MaxResident: *maxResident, MaxActive: *maxActive, Audit: stderr, Executable: hctlExecutable})
 	if err != nil {
 		return err
 	}
@@ -862,6 +993,11 @@ func ensureAppliedForPolicyContext(ctx context.Context, p *project.Project, self
 	if err != nil {
 		return err
 	}
+	recordContext, cancelRecord := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelRecord()
+	if err := recordChannelConsumption(recordContext, p); err != nil {
+		return err
+	}
 	for _, diagnostic := range result.Diagnostics {
 		_, _ = fmt.Fprintln(stderr, diagnostic.String())
 	}
@@ -887,115 +1023,6 @@ func resolveProjectNativeMCP(ctx context.Context, p *project.Project) ([]integra
 	}
 	return []integration.NativeMCPLaunchDescriptor{descriptor}, nil
 }
-
-func setupDiscord(source, requestedProfile, path string, config channelconfig.Config, input io.Reader, output io.Writer) error {
-	root, err := rootfs.CanonicalDir(source)
-	if err != nil {
-		return err
-	}
-	channelPath := filepath.Join(root, "channels", "discord.md")
-	_, channelErr := os.Lstat(channelPath)
-	channelMissing := errors.Is(channelErr, os.ErrNotExist)
-	if channelErr != nil && !channelMissing {
-		return errors.New("cannot inspect Discord channel declaration")
-	}
-	p, err := project.Load(root, "codex")
-	if err != nil {
-		return err
-	}
-	reader := bufio.NewReader(input)
-	profileName := requestedProfile
-	if profileName == "" {
-		profileName = "default"
-	}
-	if _, err := fmt.Fprint(output, "Discord bot token: "); err != nil {
-		return err
-	}
-	var token string
-	if file, ok := input.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
-		secret, readErr := term.ReadPassword(int(file.Fd()))
-		_, _ = fmt.Fprintln(output)
-		if readErr != nil {
-			return errors.New("cannot read Discord bot token")
-		}
-		token = string(secret)
-	} else {
-		token, err = reader.ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return errors.New("cannot read Discord bot token")
-		}
-	}
-	token = strings.TrimSpace(token)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	identity, err := discord.ValidateIdentity(ctx, token)
-	if err != nil {
-		return err
-	}
-	invite := fmt.Sprintf("https://discord.com/oauth2/authorize?client_id=%s&scope=bot%%20applications.commands&permissions=274877975552", identity.ApplicationID)
-	if _, err := fmt.Fprintf(output, "\nInstall the bot in the target server: %s\nEnable Message Content Intent in the Discord Developer Portal, then enter the authorized scope below.\n", invite); err != nil {
-		return err
-	}
-	readID := func(label string) (string, error) {
-		if _, err := fmt.Fprint(output, label+": "); err != nil {
-			return "", err
-		}
-		value, err := reader.ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return "", err
-		}
-		value = strings.TrimSpace(value)
-		if !channelconfig.Snowflake(value) {
-			return "", fmt.Errorf("%s must be a Discord snowflake", label)
-		}
-		return value, nil
-	}
-	allowedUser, err := readID("Authorized user ID")
-	if err != nil {
-		return err
-	}
-	allowedGuild, err := readID("Guild ID")
-	if err != nil {
-		return err
-	}
-	allowedChannel, err := readID("Channel ID")
-	if err != nil {
-		return err
-	}
-	profile := channelconfig.Profile{ApplicationID: identity.ApplicationID, BotUserID: identity.BotUserID, AllowedUserID: allowedUser, AllowedGuildID: allowedGuild, AllowedChannelID: allowedChannel}
-	if err := discord.ValidateScope(ctx, token, profile); err != nil {
-		return err
-	}
-	if channelMissing {
-		defaultSource := []byte("---\nmode: ambient\n---\n\nRespond conversationally to greetings, direct questions, follow-ups, and messages within this agent's responsibilities. Stay silent only during clearly unrelated conversation when no contribution is useful.\n")
-		if err := rootfs.WriteAtomic(root, "channels/discord.md", defaultSource, 0o644); err != nil {
-			return err
-		}
-	}
-	if config.Discord.Profiles == nil {
-		config.Discord.Profiles = map[string]channelconfig.Profile{}
-	}
-	if config.AgentProfiles == nil {
-		config.AgentProfiles = map[string]string{}
-	}
-	config.SchemaVersion = 1
-	config.Discord.Profiles[profileName] = profile
-	if config.Discord.DefaultProfile == "" || profileName == "default" {
-		config.Discord.DefaultProfile = profileName
-	}
-	config.AgentProfiles[p.AgentID] = profileName
-	store := credential.OSStore{}
-	if err := store.Set(profileName, token); err != nil {
-		return err
-	}
-	if err := channelconfig.Save(path, config); err != nil {
-		_ = store.Delete(profileName)
-		return err
-	}
-	_, err = fmt.Fprintf(output, "\nSaved Discord profile %s for agent %s. Run hctl run to connect it.\n", profileName, p.Name)
-	return err
-}
-
 func newDriver(name, override string) (harness.Driver, error) {
 	if name != "claude" && name != "codex" {
 		return nil, errors.New("--harness must be claude or codex")

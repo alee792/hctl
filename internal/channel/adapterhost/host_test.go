@@ -1,0 +1,256 @@
+package adapterhost
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"hctl/channeladapter"
+	"hctl/internal/harness/codex"
+	"hctl/internal/integration"
+	"hctl/internal/project"
+	"hctl/internal/secureenv"
+	"hctl/internal/setup"
+)
+
+func TestCredentialFreeInstalledAdapterConversationAndIsolation(t *testing.T) {
+	if os.Getenv("HCTL_FAKE_ADAPTER") == "1" {
+		t.Skip("parent-only test")
+	}
+	source := t.TempDir()
+	writeFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Adapter host fixture.\n---\n\nReply briefly.\n", 0o644)
+	writeFile(t, filepath.Join(source, "channels", "discord.md"), "---\nmode: ambient\n---\n\nReply to relevant messages.\n", 0o644)
+	harness := filepath.Join(t.TempDir(), "codex")
+	writeFile(t, harness, `#!/bin/sh
+if [ -n "${HCTL_DISCORD_TOKEN-}" ]; then exit 90; fi
+while IFS= read -r line; do
+ case "$line" in
+  *'"method":"initialize"'*) echo '{"id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.1"}}' ;;
+  *'"method":"thread/start"'*) echo '{"id":2,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"},"sandbox":{"type":"readOnly"},"approvalPolicy":"never"}}' ;;
+  *'"method":"turn/start"'*)
+    echo '{"id":3,"result":{"turn":{"id":"01922222-2222-7222-8222-222222222222","items":[],"status":"inProgress"}}}'
+    echo '{"method":"item/agentMessage/delta","params":{"threadId":"01911111-1111-7111-8111-111111111111","turnId":"01922222-2222-7222-8222-222222222222","itemId":"reply","delta":"hello back"}}'
+    echo '{"method":"turn/completed","params":{"threadId":"01911111-1111-7111-8111-111111111111","turn":{"id":"01922222-2222-7222-8222-222222222222","items":[],"status":"completed"}}}' ;;
+ esac
+done
+`, 0o755)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, store := installFakeAdapter(t, self)
+	if _, err := setup.Apply(p, self); err != nil {
+		t.Fatalf("apply fixture: %v", err)
+	}
+	if err := store.RecordConsumption(context.Background(), launch.PackageID, p.AgentID, p.Name, []string{launch.CapabilityID}); err != nil {
+		t.Fatalf("record fixture consumption: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "delivered")
+	secret := "opaque-adapter-only-value"
+	t.Setenv("HCTL_DISCORD_TOKEN", secret)
+	environment := secureenv.Replace(AdapterEnvironment("HCTL_DISCORD_TOKEN"), map[string]string{"HCTL_FAKE_ADAPTER": "1", "HCTL_FAKE_MARKER": marker})
+	var audit bytes.Buffer
+	runtime, err := New(Config{
+		Project: p, Driver: codex.New(harness), ProfileID: "default", Environment: environment,
+		Launch:      launch,
+		TurnTimeout: 2 * time.Second, IdleTimeout: time.Minute, MaxResident: 2, MaxActive: 1, Executable: self, Audit: &audit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	var earlyErr error
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		select {
+		case earlyErr = <-done:
+			deadline = time.Now()
+		default:
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		cancel()
+		t.Fatalf("conversation did not complete: %v runtime=%v audit=%s", err, earlyErr, audit.String())
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("adapter host did not shut down")
+	}
+	if strings.Contains(audit.String(), secret) {
+		t.Fatal("adapter credential reached retained diagnostics")
+	}
+	if err := filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr == nil && bytes.Contains(data, []byte(secret)) {
+			t.Errorf("credential persisted in %s", path)
+		}
+		return readErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func installFakeAdapter(t *testing.T, executable string) (Launch, *integration.Store) {
+	t.Helper()
+	payload, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	root := t.TempDir()
+	document := map[string]any{
+		"schema_version": 1, "id": "fixture-channel", "version": "1.0.0", "name": "Fixture channel", "description": "Credential-free external host fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://example.invalid/fixture-channel", "revision": "fixture-v1"},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts":     []any{map[string]any{"id": "current", "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary", "source": map[string]any{"kind": "package", "path": "payload/adapter"}, "size": len(payload), "sha256": checksum, "executable": map[string]any{"path": "bin/adapter", "size": len(payload), "sha256": checksum}}},
+		"capabilities":  []any{map[string]any{"type": "channel-adapter", "version": 1, "id": "fixture", "channel_kind": "fixture", "artifacts": []string{"current"}, "executable": "bin/adapter", "runtime": map[string]any{"arguments": []string{"-test.run=^TestFakeAdapterProcess$"}}, "setup": map[string]any{"arguments": []string{"setup"}}, "status": map[string]any{"arguments": []string{"status"}}, "remove": map[string]any{"arguments": []string{"remove"}}, "protocol": map[string]any{"minimum": 1, "before": 2}, "profile_selector": "opaque-id-v1", "features": []string{"typing", "replies"}}},
+	}
+	manifest, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "integration.json"), string(manifest)+"\n", 0o600)
+	if err := os.MkdirAll(filepath.Join(root, "payload"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "payload", "adapter"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := integration.NewStore(t.TempDir(), nil)
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: root, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := store.ResolveChannelAdapter(context.Background(), "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := resolved.LaunchDescriptor(integration.ChannelAdapterRuntime, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return launch, store
+}
+
+func TestFakeAdapterProcess(t *testing.T) {
+	if os.Getenv("HCTL_FAKE_ADAPTER") != "1" {
+		t.Skip("subprocess helper")
+	}
+	if os.Getenv("HCTL_DISCORD_TOKEN") == "" {
+		os.Exit(81)
+	}
+	decoder, encoder := channeladapter.NewDecoder(os.Stdin), channeladapter.NewEncoder(os.Stdout)
+	limits := channeladapter.Limits{MaxFrameBytes: channeladapter.MaxFrameBytes, MaxTextBytes: channeladapter.MaxTextBytes, MaxAttachments: 0, MaxAttachmentBytes: channeladapter.MaxAttachmentBytes, MaxOutstanding: 16}
+	hello := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.hello.1", Payload: channeladapter.Hello{ChannelKind: "fixture", Protocol: channeladapter.ProtocolRange{Minimum: 1, Before: 2}, Features: []channeladapter.Feature{channeladapter.FeatureTyping, channeladapter.FeatureReplies}, Limits: limits}}
+	if err := encoder.Write(hello, channeladapter.FromAdapter); err != nil {
+		os.Exit(82)
+	}
+	initialize, err := decoder.Read(channeladapter.FromHost)
+	if err != nil {
+		os.Exit(83)
+	}
+	ready := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.ready.1", CorrelationID: initialize.ID, Payload: channeladapter.Ready{ChannelKind: "fixture", Features: []channeladapter.Feature{channeladapter.FeatureTyping, channeladapter.FeatureReplies}, Limits: limits}}
+	if err := encoder.Write(ready, channeladapter.FromAdapter); err != nil {
+		os.Exit(84)
+	}
+	_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.connection.1", Payload: channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 0}}, channeladapter.FromAdapter)
+	inbound := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.inbound.1", Payload: channeladapter.InboundMessage{SourceID: "source-1", Route: channeladapter.Route{Handle: "route_1"}, Message: channeladapter.MessageRef{Handle: "message_1"}, Author: channeladapter.Author{Handle: "author_1", Label: "Operator"}, Text: "hello"}}
+	if err := encoder.Write(inbound, channeladapter.FromAdapter); err != nil {
+		os.Exit(85)
+	}
+	replayed := false
+	for {
+		frame, err := decoder.Read(channeladapter.FromHost)
+		if err != nil {
+			return
+		}
+		switch payload := frame.Payload.(type) {
+		case *channeladapter.EventAck:
+			if frame.CorrelationID == inbound.ID && !replayed {
+				replayed = true
+				_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.connection.2", Payload: channeladapter.Connection{State: channeladapter.ConnectionReconnecting, Attempt: 1}}, channeladapter.FromAdapter)
+				_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.connection.3", Payload: channeladapter.Connection{State: channeladapter.ConnectionReady, Attempt: 1}}, channeladapter.FromAdapter)
+				_ = encoder.Write(inbound, channeladapter.FromAdapter)
+			} else if frame.CorrelationID == inbound.ID && payload.Disposition != "duplicate" {
+				os.Exit(86)
+			}
+		case *channeladapter.Activity:
+		case *channeladapter.Delivery:
+			if payload.Text != "hello back" || payload.Route.Handle != "route_1" {
+				os.Exit(87)
+			}
+			result := channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.delivery.1", CorrelationID: frame.ID, Payload: channeladapter.DeliveryResult{Disposition: channeladapter.EffectExact, Message: &channeladapter.MessageRef{Handle: "reply_1"}}}
+			if err := encoder.Write(result, channeladapter.FromAdapter); err != nil {
+				os.Exit(88)
+			}
+			_ = os.WriteFile(os.Getenv("HCTL_FAKE_MARKER"), []byte("delivered\n"), 0o600)
+		case *channeladapter.Shutdown:
+			_ = encoder.Write(channeladapter.Envelope{ProtocolVersion: 1, ID: "adapter.shutdown.1", CorrelationID: frame.ID, Payload: channeladapter.ShutdownComplete{}}, channeladapter.FromAdapter)
+			return
+		default:
+			_, _ = fmt.Fprintln(os.Stderr, "unexpected host frame")
+			os.Exit(89)
+		}
+	}
+}
+
+func TestOperationIsBoundedAndUsesExactEnvironment(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "adapter")
+	writeFile(t, script, `#!/bin/sh
+test "${HCTL_DISCORD_TOKEN-}" = expected || exit 4
+operation="$1"
+status=ready
+test "$operation" = remove && status=removed
+test "$2" = --profile && test "$3" = default || exit 5
+printf '{"schema_version":1,"operation":"%s","profile_id":"default","status":"%s","message":"ok"}\n' "$operation" "$status"
+`, 0o755)
+	t.Setenv("HCTL_DISCORD_TOKEN", "expected")
+	for _, operation := range []string{"setup", "status", "remove"} {
+		result, err := RunOperation(context.Background(), Launch{Command: script, Arguments: []string{operation, "--profile", "default"}, WorkingDirectory: filepath.Dir(script)}, AdapterEnvironment("HCTL_DISCORD_TOKEN"), strings.NewReader(""), io.Discard)
+		if err != nil || result.Operation != operation || result.ProfileID != "default" || operation == "remove" && result.Status != "removed" {
+			t.Fatalf("%s operation = %#v, %v", operation, result, err)
+		}
+	}
+	writeFile(t, script, "#!/bin/sh\nhead -c 20000 /dev/zero | tr '\\000' x\n", 0o755)
+	if _, err := RunOperation(context.Background(), Launch{Command: script, Arguments: []string{"status"}, WorkingDirectory: filepath.Dir(script)}, AdapterEnvironment("HCTL_DISCORD_TOKEN"), strings.NewReader(""), io.Discard); err == nil || !strings.Contains(err.Error(), "invalid non-secret result") {
+		t.Fatalf("oversized operation result error = %v", err)
+	}
+}
+
+func writeFile(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+}

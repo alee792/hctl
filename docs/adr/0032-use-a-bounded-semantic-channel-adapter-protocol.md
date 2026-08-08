@@ -1,6 +1,7 @@
 # ADR 0032: Use a bounded semantic protocol for external channel adapters
 
 - Status: accepted
+- Implementation: external process host wired on 2026-08-08
 - Extends: [ADR 0030](0030-use-process-isolated-integration-packages.md)
 - Specialized by: [ADR 0033](0033-package-discord-as-an-external-channel-adapter.md)
 - Prepares the migration from: [ADR 0028](0028-use-a-conversational-discord-gateway-channel.md)
@@ -22,9 +23,10 @@ dependencies and responsibility. It is not an operating-system sandbox and it
 does not hide a credential from a trusted adapter or another process running as
 the same user.
 
-This record defines the contract used by the later Discord extraction. It does
-not itself replace the current in-process Discord implementation or add the
-generic process host.
+This record defines the contract used by the Discord extraction. The generic
+host now implements it and production channel routing selects the installed
+external adapter. The old in-process implementation remains only as rollback
+code until the separate dependency-removal delivery.
 
 ## Package capability
 
@@ -149,7 +151,7 @@ evidence.
 
 For migration compatibility, a channel-specific ambient value such as
 `HCTL_DISCORD_TOKEN` may already be present in the hctl launcher environment.
-The later process host may pass that opaque value only to the exact selected
+The process host may pass that opaque value only to the exact selected
 adapter and must remove it from every harness, MCP server, authored tool host,
 Git process, schedule, setup for another adapter, and unrelated child. Hctl
 does not parse the value or place it in an argument or frame. The adapter owns
@@ -236,8 +238,8 @@ Gateway or equivalent transport, rendering, callback validation, rate limits,
 mentions, replies, reactions, edits, attachments, and vendor diagnostics.
 
 The dependency-free `hctl/channeladapter` module contains only the wire schema,
-validators, codec, constants, and credential-free fixtures. Hctl's later
-process host depends on that semantic contract through small
+validators, codec, constants, and credential-free fixtures. Hctl's process
+host depends on that semantic contract through small
 responsibility-specific seams for package selection, process construction,
 transport, clock/deadlines, controller handoff, and diagnostics. An external
 Discord module may depend on the same contract but never on hctl's internal
@@ -261,9 +263,9 @@ seam.
 - Discord extraction can preserve the literal
   `channels/discord.md` setup/status/remove/run journey while moving SDK and
   credential ownership out of hctl's root module.
-- The current in-process Discord adapter remains until the separate adapter and
-  process host pass migration evidence; there is no silent fallback after its
-  eventual removal.
+- Production does not fall back to the retained in-process Discord adapter.
+  Its code remains temporarily for rollback and is removed by the separate
+  dependency-cutover delivery.
 - TCP transports, public sockets, dynamic libraries, arbitrary plugins,
   brokered credentials, hosted adapters, remote channel protocols, and a
   universal integration runtime remain out of scope.

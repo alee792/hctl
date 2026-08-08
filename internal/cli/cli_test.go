@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"hctl/internal/channelselection"
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
 	"hctl/internal/integration"
@@ -593,6 +594,60 @@ func TestRunRejectsInvalidSessionCapacity(t *testing.T) {
 	err := Run([]string{"run", ".", "--harness", "codex", "--max-resident-sessions", "1", "--max-active-turns", "2"}, strings.NewReader(""), &output, &stderr, "")
 	if err == nil || !strings.Contains(err.Error(), "capacity limit is invalid") {
 		t.Fatalf("invalid capacity error = %v", err)
+	}
+}
+
+func TestDiscordChannelJourneyRequiresInstalledAdapterWithoutSourceMutation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	source := t.TempDir()
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	var output, stderr bytes.Buffer
+	err := Run([]string{"channel", "setup", "discord", source}, strings.NewReader("fake\n"), &output, &stderr, "")
+	if err == nil || !strings.Contains(err.Error(), "hctl integration install SOURCE --trust operator") || !strings.Contains(err.Error(), "hctl channel setup discord") {
+		t.Fatalf("missing adapter remedy = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(source, "channels", "discord.md")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed adapter setup mutated source: %v", statErr)
+	}
+	output.Reset()
+	if err := Run([]string{"channel", "remove", "discord", source}, strings.NewReader(""), &output, &stderr, ""); err == nil || !strings.Contains(err.Error(), "adapter is unavailable") {
+		t.Fatalf("remove missing adapter remedy = %v", err)
+	}
+}
+
+func TestAdapterProfileSelectionPreservesAgentBindingAndLegacyFallback(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("HCTL_DISCORD_PROFILE", "")
+	legacy := filepath.Join(t.TempDir(), "config.toml")
+	writeCLIFile(t, legacy, "schema_version=1\n[discord]\ndefault_profile='legacy-default'\n[discord.profiles.ignored]\nvendor_field='not-read'\n[agent_profiles]\n'agent@one'='legacy-agent'\n'agent@legacy'='legacy-agent'\n", 0o600)
+
+	if got, err := selectedAdapterProfile("agent@one", "explicit", legacy); err != nil || got != "explicit" {
+		t.Fatalf("explicit selection = %q, %v", got, err)
+	}
+	t.Setenv("HCTL_DISCORD_PROFILE", "ambient")
+	if got, err := selectedAdapterProfile("agent@one", "", legacy); err != nil || got != "ambient" {
+		t.Fatalf("ambient selection = %q, %v", got, err)
+	}
+	t.Setenv("HCTL_DISCORD_PROFILE", "")
+	selections, err := channelselection.DefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := selections.Set("agent@one", "discord", "persisted"); err != nil {
+		t.Fatalf("persist selection: %v", err)
+	}
+	if got, err := selectedAdapterProfile("agent@one", "", legacy); err != nil || got != "persisted" {
+		t.Fatalf("persisted selection = %q, %v", got, err)
+	}
+	if got, err := selectedAdapterProfile("agent@legacy", "", legacy); err != nil || got != "legacy-agent" {
+		t.Fatalf("legacy agent selection = %q, %v", got, err)
+	}
+	if got, err := selectedAdapterProfile("agent@two", "", legacy); err != nil || got != "legacy-default" {
+		t.Fatalf("legacy default selection = %q, %v", got, err)
 	}
 }
 

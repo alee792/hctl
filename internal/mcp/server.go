@@ -16,7 +16,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"hctl/internal/connection/github"
 	"hctl/internal/friction"
 	"hctl/internal/harness"
 	"hctl/internal/harness/claude"
@@ -31,11 +30,11 @@ const maxLineBytes = 64 << 10
 var portableToolName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 func Serve(source, workspace, harnessName string, input io.Reader, output, audit io.Writer) error {
-	return serve(source, workspace, harnessName, input, output, audit, github.NewClient(nil))
+	return serve(source, workspace, harnessName, input, output, audit)
 }
 
-func serve(source, workspace, harnessName string, input io.Reader, output, audit io.Writer, githubClient *github.Client) error {
-	return serveWithRuntime(source, workspace, harnessName, input, output, audit, githubClient, func(ctx context.Context, p *project.Project) (managedRuntime, error) {
+func serve(source, workspace, harnessName string, input io.Reader, output, audit io.Writer) error {
+	return serveWithRuntime(source, workspace, harnessName, input, output, audit, func(ctx context.Context, p *project.Project) (managedRuntime, error) {
 		return tool.Open(ctx, p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools)
 	})
 }
@@ -52,7 +51,7 @@ type frictionRecorder interface {
 	Record(*project.Project, string) bool
 }
 
-func serveWithRuntime(source, workspace, harnessName string, input io.Reader, output, audit io.Writer, githubClient *github.Client, openRuntime runtimeOpener) error {
+func serveWithRuntime(source, workspace, harnessName string, input io.Reader, output, audit io.Writer, openRuntime runtimeOpener) error {
 	p, err := project.Load(source, harnessName, workspace)
 	if err != nil {
 		return err
@@ -66,13 +65,13 @@ func serveWithRuntime(source, workspace, harnessName string, input io.Reader, ou
 			return openErr
 		}
 		defer opened.Close()
-		return serveRequestsWithFriction(p, opened, githubClient, friction.NewDefault(), input, output, audit)
+		return serveRequestsWithFriction(p, opened, friction.NewDefault(), input, output, audit)
 	}
-	return serveRequestsWithFriction(p, nil, githubClient, friction.NewDefault(), input, output, audit)
+	return serveRequestsWithFriction(p, nil, friction.NewDefault(), input, output, audit)
 }
 
-func serveRequestsWithFriction(p *project.Project, runtime managedRuntime, githubClient *github.Client, recorder frictionRecorder, input io.Reader, output, audit io.Writer) error {
-	return serveRequestsWithInputAndFriction(p, runtime, githubClient, nil, recorder, input, output, audit)
+func serveRequestsWithFriction(p *project.Project, runtime managedRuntime, recorder frictionRecorder, input io.Reader, output, audit io.Writer) error {
+	return serveRequestsWithInputAndFriction(p, runtime, nil, recorder, input, output, audit)
 }
 
 // requestInputRuntime is intentionally process-local. Production MCP children
@@ -90,11 +89,11 @@ func requestInputAvailable(requests requestInputRuntime) bool {
 		claude.DeferredBrokerAvailable(os.Getenv(claude.DeferredBrokerEnv))
 }
 
-func serveRequestsWithInput(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, input io.Reader, output, audit io.Writer) error {
-	return serveRequestsWithInputAndFriction(p, runtime, githubClient, requests, friction.NewDefault(), input, output, audit)
+func serveRequestsWithInput(p *project.Project, runtime managedRuntime, requests requestInputRuntime, input io.Reader, output, audit io.Writer) error {
+	return serveRequestsWithInputAndFriction(p, runtime, requests, friction.NewDefault(), input, output, audit)
 }
 
-func serveRequestsWithInputAndFriction(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, recorder frictionRecorder, input io.Reader, output, audit io.Writer) error {
+func serveRequestsWithInputAndFriction(p *project.Project, runtime managedRuntime, requests requestInputRuntime, recorder frictionRecorder, input io.Reader, output, audit io.Writer) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), maxLineBytes)
 	encoder := json.NewEncoder(output)
@@ -136,9 +135,6 @@ func serveRequestsWithInputAndFriction(p *project.Project, runtime managedRuntim
 					"annotations":  map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
 				})
 			}
-			if p.GitHubConnection != nil {
-				tools = append(tools, github.Definitions(p.GitHubConnection.Description)...)
-			}
 			if runtime != nil {
 				for _, definition := range runtime.List() {
 					tools = append(tools, definition)
@@ -149,7 +145,7 @@ func serveRequestsWithInputAndFriction(p *project.Project, runtime managedRuntim
 			}
 			writeResult(encoder, request.ID, map[string]any{"tools": tools})
 		case "tools/call":
-			result, requestID, toolName, err := callManagedWithInputAndFriction(p, runtime, githubClient, requests, recorder, request.ID, request.Params, audit)
+			result, requestID, toolName, err := callManagedWithInputAndFriction(p, runtime, requests, recorder, request.ID, request.Params, audit)
 			if err != nil {
 				if auditErr := writeAudit(audit, p.AgentID, toolName, requestID, "failed"); auditErr != nil {
 					return auditErr
@@ -171,15 +167,15 @@ func serveRequestsWithInputAndFriction(p *project.Project, runtime managedRuntim
 	return nil
 }
 
-func callManaged(p *project.Project, runtime managedRuntime, githubClient *github.Client, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
-	return callManagedWithInputAndFriction(p, runtime, githubClient, nil, friction.NewDefault(), id, params, audit)
+func callManaged(p *project.Project, runtime managedRuntime, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
+	return callManagedWithInputAndFriction(p, runtime, nil, friction.NewDefault(), id, params, audit)
 }
 
-func callManagedWithInput(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
-	return callManagedWithInputAndFriction(p, runtime, githubClient, requests, friction.NewDefault(), id, params, audit)
+func callManagedWithInput(p *project.Project, runtime managedRuntime, requests requestInputRuntime, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
+	return callManagedWithInputAndFriction(p, runtime, requests, friction.NewDefault(), id, params, audit)
 }
 
-func callManagedWithInputAndFriction(p *project.Project, runtime managedRuntime, githubClient *github.Client, requests requestInputRuntime, recorder frictionRecorder, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
+func callManagedWithInputAndFriction(p *project.Project, runtime managedRuntime, requests requestInputRuntime, recorder frictionRecorder, id, params json.RawMessage, audit io.Writer) (map[string]any, string, string, error) {
 	requestID := managedRequestID(id, nil)
 	var call struct {
 		Name      string          `json:"name"`
@@ -189,7 +185,6 @@ func callManagedWithInputAndFriction(p *project.Project, runtime managedRuntime,
 	if err := decodeStrict(params, &call); err != nil {
 		return nil, requestID, "unknown", errors.New("invalid managed tool call")
 	}
-	githubTool := p.GitHubConnection != nil && github.IsTool(call.Name)
 	requestInput := call.Name == requestInputToolName
 	if requestInput {
 		// Semantic request bytes must not influence audit correlation.
@@ -197,7 +192,7 @@ func callManagedWithInputAndFriction(p *project.Project, runtime managedRuntime,
 	} else {
 		requestID = managedRequestID(id, params)
 	}
-	if !portableToolName.MatchString(call.Name) && !githubTool && !requestInput {
+	if !portableToolName.MatchString(call.Name) && !requestInput {
 		return nil, requestID, "unknown", errors.New("invalid managed tool call")
 	}
 	if err := writeAudit(audit, p.AgentID, call.Name, requestID, "requested"); err != nil {
@@ -278,9 +273,7 @@ func callManagedWithInputAndFriction(p *project.Project, runtime managedRuntime,
 		defer cancel()
 		var output []byte
 		var err error
-		if githubTool {
-			output, err = githubClient.Call(ctx, call.Name, call.Arguments)
-		} else if runtime == nil {
+		if runtime == nil {
 			return nil, requestID, call.Name, errors.New("managed authored tools are unavailable in a read-only channel session")
 		} else {
 			output, err = runtime.Call(ctx, call.Name, call.Arguments)

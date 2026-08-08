@@ -18,7 +18,6 @@ import (
 
 	"hctl/internal/channel/discord"
 	"hctl/internal/channelconfig"
-	"hctl/internal/connection/github"
 	"hctl/internal/credential"
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
@@ -516,6 +515,13 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if err := driver.Verify(context.Background()); err != nil {
 		return err
 	}
+	nativeMCP, err := resolveProjectNativeMCP(context.Background(), p)
+	if err != nil {
+		return err
+	}
+	if err := setup.ValidateNativeMCP(p, nativeMCP); err != nil {
+		return err
+	}
 	prepareContext, cancelPrepare := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancelPrepare()
 	if err := tool.Prepare(prepareContext, p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools); err != nil {
@@ -525,7 +531,7 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if err != nil {
 		return err
 	}
-	result, err := setup.Apply(p, self)
+	result, err := setup.ApplyWithNativeMCP(p, self, nativeMCP)
 	if err != nil {
 		return err
 	}
@@ -546,20 +552,26 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if p.FrictionNotes {
 		toolNames = append(toolNames, "record-friction")
 	}
-	if p.GitHubConnection != nil {
-		toolNames = append(toolNames, github.GetRepository, github.ListIssues, github.GetIssue)
-	}
 	for _, source := range p.Tools.Sources {
 		toolNames = append(toolNames, source.Name)
 	}
 	if _, err := fmt.Fprintf(output, "managed tools=%s via MCP; native harness tools allowed and unmanaged\n", strings.Join(toolNames, ",")); err != nil {
 		return err
 	}
+	if p.GitHubConnection != nil {
+		if _, err := fmt.Fprintln(output, "native server=github startup=optional trust=native-project environment=GITHUB_PERSONAL_ACCESS_TOKEN value=not-read; calls and effects unmanaged"); err != nil {
+			return err
+		}
+	}
 	if _, err := fmt.Fprintf(output, "next: cd %s && %s\n", p.WorkspaceRoot, driver.Name()); err != nil {
 		return err
 	}
 	if driver.Name() == "codex" {
-		if _, err := fmt.Fprintln(output, "note: Codex loads project .codex configuration after you trust the project"); err != nil {
+		if _, err := fmt.Fprintln(output, "note: Codex loads project .codex configuration after you trust the project; Codex owns native server and tool approval"); err != nil {
+			return err
+		}
+	} else if p.GitHubConnection != nil {
+		if _, err := fmt.Fprintln(output, "note: Claude owns the one-time project MCP server approval"); err != nil {
 			return err
 		}
 	}
@@ -606,7 +618,14 @@ func runStage(args []string, output, stderr io.Writer, self string) error {
 	if err != nil {
 		return err
 	}
-	result, err := stage.Create(ctx, stage.Request{Project: p, Output: *outputPath, HCTLExecutable: executable, HarnessExecutable: driver.Executable(), HarnessVersion: version})
+	var integrationStore *integration.Store
+	if p.GitHubConnection != nil {
+		integrationStore, err = integration.NewDefaultStore()
+		if err != nil {
+			return err
+		}
+	}
+	result, err := stage.Create(ctx, stage.Request{Project: p, Output: *outputPath, HCTLExecutable: executable, HarnessExecutable: driver.Executable(), HarnessVersion: version, IntegrationStore: integrationStore})
 	if err != nil {
 		return err
 	}
@@ -709,7 +728,14 @@ func runAgent(args []string, input io.Reader, output, stderr io.Writer, self str
 }
 
 func ensureApplied(p *project.Project, self string, stderr io.Writer) error {
-	if err := setup.Verify(p); err == nil {
+	nativeMCP, err := resolveProjectNativeMCP(context.Background(), p)
+	if err != nil {
+		return err
+	}
+	if err := setup.ValidateNativeMCP(p, nativeMCP); err != nil {
+		return err
+	}
+	if err := setup.Verify(p); err == nil && len(nativeMCP) == 0 {
 		return nil
 	}
 	prepareContext, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -721,7 +747,7 @@ func ensureApplied(p *project.Project, self string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	result, err := setup.Apply(p, executable)
+	result, err := setup.ApplyWithNativeMCP(p, executable, nativeMCP)
 	if err != nil {
 		return err
 	}
@@ -730,6 +756,25 @@ func ensureApplied(p *project.Project, self string, stderr io.Writer) error {
 	}
 	_, _ = fmt.Fprintf(stderr, "auto-applied agent=%s harness=%s fingerprint=%s\n", p.Name, p.Harness, p.SourceFingerprint)
 	return nil
+}
+
+func resolveProjectNativeMCP(ctx context.Context, p *project.Project) ([]integration.NativeMCPLaunchDescriptor, error) {
+	if p.GitHubConnection == nil {
+		return nil, nil
+	}
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := store.ResolveNativeMCP(ctx, "github-mcp-server", "github")
+	if err != nil {
+		return nil, err
+	}
+	descriptor, err := resolved.LaunchDescriptor(p.Harness)
+	if err != nil {
+		return nil, err
+	}
+	return []integration.NativeMCPLaunchDescriptor{descriptor}, nil
 }
 
 func setupDiscord(source, requestedProfile, path string, config channelconfig.Config, input io.Reader, output io.Writer) error {

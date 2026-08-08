@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 
+	"hctl/internal/integration"
 	"hctl/internal/project"
 	"hctl/internal/rootfs"
 	"hctl/internal/secureenv"
@@ -44,6 +45,7 @@ type Request struct {
 	HCTLExecutable    string
 	HarnessExecutable string
 	HarnessVersion    string
+	IntegrationStore  *integration.Store
 }
 
 type Result struct {
@@ -130,6 +132,23 @@ func Create(ctx context.Context, request Request) (Result, error) {
 	if request.Project == nil || request.HarnessVersion == "" {
 		return Result{}, errors.New("staging request is incomplete")
 	}
+	var nativeResolution integration.NativeMCPResolution
+	var nativeDescriptor []integration.NativeMCPLaunchDescriptor
+	if request.Project.GitHubConnection != nil {
+		if request.IntegrationStore == nil {
+			return Result{}, errors.New("GitHub connection requires the installed github-mcp-server package")
+		}
+		resolved, resolveErr := request.IntegrationStore.ResolveNativeMCP(ctx, "github-mcp-server", "github")
+		if resolveErr != nil {
+			return Result{}, resolveErr
+		}
+		nativeResolution = resolved
+		descriptor, descriptorErr := nativeResolution.LaunchDescriptor(request.Project.Harness)
+		if descriptorErr != nil {
+			return Result{}, descriptorErr
+		}
+		nativeDescriptor = []integration.NativeMCPLaunchDescriptor{descriptor}
+	}
 	output, err := safeOutput(request.Output, request.Project)
 	if err != nil {
 		return Result{}, err
@@ -163,6 +182,26 @@ func Create(ctx context.Context, request Request) (Result, error) {
 	if err := copyProjectSources(request.Project, temporary, strings.TrimPrefix(finalAgent, "/")); err != nil {
 		return Result{}, err
 	}
+	if len(nativeDescriptor) == 1 {
+		staged, stageErr := request.IntegrationStore.StageArtifacts(ctx, "github-mcp-server", nativeResolution.Selection.Capability.Artifacts, temporary)
+		if stageErr != nil {
+			return Result{}, stageErr
+		}
+		selected, found := stagedArtifact(staged, nativeResolution.Selection.Artifact.ID)
+		if !found {
+			return Result{}, errors.New("staged GitHub native MCP closure is incomplete")
+		}
+		canonicalResolutionRoot, canonicalErr := rootfs.CanonicalDir(nativeResolution.Root)
+		if canonicalErr != nil {
+			return Result{}, errors.New("GitHub native MCP artifact root cannot be staged safely")
+		}
+		relativeWorkingDirectory, relativeErr := filepath.Rel(canonicalResolutionRoot, nativeDescriptor[0].WorkingDirectory)
+		if relativeErr != nil || relativeWorkingDirectory == ".." || strings.HasPrefix(relativeWorkingDirectory, ".."+string(filepath.Separator)) {
+			return Result{}, errors.New("GitHub native MCP working directory cannot be staged safely")
+		}
+		nativeDescriptor[0].Command = selected.Executable
+		nativeDescriptor[0].WorkingDirectory = filepath.Clean(filepath.Join(selected.Root, relativeWorkingDirectory))
+	}
 	prepared, err := project.LoadRelocated(physicalAgent, request.Project.Harness, physicalWorkspace, request.Project)
 	if err != nil {
 		return Result{}, fmt.Errorf("cannot validate staged source: %w", err)
@@ -191,7 +230,7 @@ func Create(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	applyResult, err := setup.ApplyAt(logical, finalHCTL, physicalWorkspace)
+	applyResult, err := setup.ApplyAtWithNativeMCP(logical, finalHCTL, physicalWorkspace, nativeDescriptor)
 	if err != nil {
 		return Result{}, err
 	}
@@ -234,6 +273,15 @@ func Create(ctx context.Context, request Request) (Result, error) {
 		return Result{}, errors.New("cannot publish staged filesystem")
 	}
 	return Result{Output: output, Manifest: manifest, Diagnostics: applyResult.Diagnostics}, nil
+}
+
+func stagedArtifact(artifacts []integration.StagedArtifact, id string) (integration.StagedArtifact, bool) {
+	for _, artifact := range artifacts {
+		if artifact.Artifact.ID == id {
+			return artifact, true
+		}
+	}
+	return integration.StagedArtifact{}, false
 }
 
 func safeOutput(requested string, p *project.Project) (string, error) {

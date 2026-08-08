@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"hctl/internal/dispatch"
+	"hctl/internal/integration"
 	"hctl/internal/schedule"
 	"hctl/internal/version"
 )
@@ -113,6 +114,84 @@ func TestIntegrationPackageCLIJourneyIsExplicitAndContentFree(t *testing.T) {
 	}
 	if err := runIntegration([]string{"remove", "cli-fixture"}, io.Discard, &stderr); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestApplySelectsInstalledGitHubNativeMCPWithoutReadingPAT(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	const fakeValue = "conspicuous-cli-fake-pat"
+	t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", fakeValue)
+	packageRoot := t.TempDir()
+	payload := []byte("#!/bin/sh\nexit 0\n")
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "github-mcp-server", "version": "1.8.0", "name": "GitHub fixture", "description": "Credential-free GitHub fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://github.com/github/github-mcp-server", "revision": "v1.8.0"},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary",
+			"source": map[string]any{"kind": "package", "path": "payload/github-mcp-server"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "github-mcp-server", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "native-mcp", "version": 1, "id": "github", "server_name": "github", "collision": "reject", "artifacts": []string{artifactID}, "executable": "github-mcp-server",
+			"arguments": []string{"stdio"}, "working_directory": ".", "environment": map[string]string{},
+			"required_environment": []any{map[string]any{"name": "GITHUB_PERSONAL_ACCESS_TOKEN", "description": "Ambient authentication required at runtime."}},
+			"harnesses": []any{
+				map[string]any{"name": "claude", "startup": "optional", "trust": "native-project"},
+				map[string]any{"name": "codex", "startup": "optional", "trust": "native-project"},
+			},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(packageRoot, "integration.json"), string(manifest)+"\n", 0o600)
+	writeCLIFile(t, filepath.Join(packageRoot, "payload", "github-mcp-server"), string(payload), 0o600)
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+
+	source := filepath.Join(t.TempDir(), "github-agent")
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Inspect GitHub through discovered tools.\n", 0o644)
+	harness := filepath.Join(t.TempDir(), "codex")
+	writeCLIFile(t, harness, "#!/bin/sh\necho 'codex-cli 0.144.1'\n", 0o755)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"apply", source, "--harness", "codex", "--command", harness}, strings.NewReader(""), &output, &stderr, self); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "native server=github startup=optional trust=native-project") || !strings.Contains(got, "value=not-read") || !strings.Contains(got, "managed tools=echo") || strings.Contains(got, "github__") || strings.Contains(got, fakeValue) {
+		t.Fatalf("apply output = %q", got)
+	}
+	config := readCLIFile(t, filepath.Join(source, ".codex", "config.toml"))
+	if !strings.Contains(config, `[mcp_servers."github"]`) || !strings.Contains(config, `env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]`) || strings.Contains(config, fakeValue) {
+		t.Fatalf("generated native config = %q", config)
+	}
+
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", false); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	err = Run([]string{"apply", source, "--workspace", workspace, "--harness", "codex", "--command", harness}, strings.NewReader(""), io.Discard, io.Discard, self)
+	if err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("disabled package apply error = %v", err)
+	}
+	if entries, readErr := os.ReadDir(workspace); readErr != nil || len(entries) != 0 {
+		t.Fatalf("failed offline selection mutated workspace: %v, %v", entries, readErr)
 	}
 }
 
@@ -639,4 +718,13 @@ func writeCLIFile(t *testing.T, path, content string, mode os.FileMode) {
 	if err := os.WriteFile(path, []byte(content), mode); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func readCLIFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

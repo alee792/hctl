@@ -370,9 +370,20 @@ hctl's store keeps its no-redirect policy and gains no vendor code. The direct
 Codex image prepares and verifies the Linux package before publication, while
 credential-free tests prove exact installed-path resolution, offline reuse,
 concurrency, interruption, corruption, unsupported-platform rejection,
-descriptor drift, and selective staging or omission. Source-to-Claude/Codex
-generation and native runtime proof remain #67. The currently shipped
-anonymous managed GitHub code has not yet been removed.
+descriptor drift, and selective staging or omission. Authored
+`connections/github.md` now selects that exact installed capability during
+offline apply. Claude receives the verified server through its native
+`/usr/bin/env -C` project entry; Codex receives the verified executable, root,
+optional startup, prompt approval, and ambient variable name through its
+native project table. Exact plugin-name collisions fail before mutation, and
+staging copies only the selected package artifact to canonical final paths.
+Credential-free generation and staging tests use a conspicuous fake value to
+prove that only the environment-variable name enters native configuration or
+retained evidence. Agents without the connection neither resolve nor stage the
+package. The superseded anonymous managed GitHub client and tool definitions
+have been removed; the managed server, authored tools, channel input, and
+plugin-native MCP behavior remain unchanged. Full local/headless maintainer
+journey evidence remains #71 and the documented operator journey remains #72.
 
 ADR 0032 and the dependency-free `hctl/channeladapter` module now define the
 second closed capability and its version-1 process protocol. Package metadata

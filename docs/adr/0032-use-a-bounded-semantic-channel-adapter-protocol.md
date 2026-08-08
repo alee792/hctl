@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Extends: [ADR 0030](0030-use-process-isolated-integration-packages.md)
+- Specialized by: [ADR 0033](0033-package-discord-as-an-external-channel-adapter.md)
 - Prepares the migration from: [ADR 0028](0028-use-a-conversational-discord-gateway-channel.md)
 - Preserves: [ADR 0014](0014-manage-channel-session-lifecycles.md),
   [ADR 0015](0015-enforce-read-only-channel-sessions.md),

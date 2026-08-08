@@ -902,9 +902,20 @@ dependencies and responsibility separate, but is not an OS sandbox or a
 defense against a malicious adapter or same-user peer process. See
 [ADR 0032](adr/0032-use-a-bounded-semantic-channel-adapter-protocol.md).
 
-This contract does not yet route the current Discord runtime out of process.
-The separate official adapter, generic process host, and final dependency
-removal remain the migration deliveries that follow this foundation.
+The official `hctl-discord` integration package now implements this contract
+as a separately locked and built Go module. Its executable owns DiscordGo,
+Gateway/REST payloads, rendering, callbacks, application locks, credentials,
+and adapter profiles. It retains the `hctl.discord` keyring service and can
+atomically migrate the selected non-secret profile from the former owner-only
+hctl configuration. Its reproducible builder emits exact Darwin/Linux,
+amd64/arm64 package metadata that installs and selectively stages through the
+shared package store. Credential-free fakes prove its four modes and runtime
+protocol. See [ADR 0033](adr/0033-package-discord-as-an-external-channel-adapter.md).
+
+The current production `hctl run` path is not routed to that executable yet.
+The generic process host and final dependency cutover remain separate
+deliveries; until then the old in-process runtime remains the shipped path and
+the root module temporarily retains its existing Discord dependencies.
 
 Core depends only on validated package data and narrow capability consumers.
 Vendor packages depend inward on those contracts and run as separate

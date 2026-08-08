@@ -291,6 +291,7 @@ func TestDelayedChannelOpenAndReopenUseCurrentGitHubPackage(t *testing.T) {
 	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: first, Trust: integration.TrustOperator}); err != nil {
 		t.Fatal(err)
 	}
+	installCLIChannelAdapter(t, store)
 	source := filepath.Join(t.TempDir(), "channel-github-agent")
 	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Channel GitHub agent.\n---\n\nBe concise.\n", 0o644)
 	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
@@ -362,6 +363,7 @@ func TestGuardedWritableChannelOpenPreservesWritableSetup(t *testing.T) {
 	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
 		t.Fatal(err)
 	}
+	installCLIChannelAdapter(t, store)
 	root := filepath.Join(t.TempDir(), "writable-channel-agent")
 	writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Writable channel agent.\n---\n\nBe concise.\n", 0o644)
 	writeCLIFile(t, filepath.Join(root, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
@@ -1419,6 +1421,38 @@ func writeCLIGitHubPackage(t *testing.T, packageVersion string, payload []byte) 
 	writeCLIFile(t, filepath.Join(root, "integration.json"), string(manifest)+"\n", 0o600)
 	writeCLIFile(t, filepath.Join(root, "payload", "github-mcp-server"), string(payload), 0o600)
 	return root
+}
+
+func installCLIChannelAdapter(t *testing.T, store *integration.Store) {
+	t.Helper()
+	payload := []byte("#!/bin/sh\nexit 0\n")
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	artifactID := runtime.GOOS + "-" + runtime.GOARCH
+	document := map[string]any{
+		"schema_version": 1, "id": "hctl-discord", "version": "1.0.0", "name": "Discord adapter fixture", "description": "Credential-free channel guard fixture.", "license": "MIT",
+		"provenance":    map[string]any{"source": "https://example.invalid/hctl-discord", "revision": "fixture-v1"},
+		"compatibility": map[string]any{"minimum": "0.1.0-dev", "before": "9.0.0"},
+		"artifacts": []any{map[string]any{
+			"id": artifactID, "os": runtime.GOOS, "architecture": runtime.GOARCH, "format": "binary", "source": map[string]any{"kind": "package", "path": "payload/hctl-discord"}, "size": len(payload), "sha256": checksum,
+			"executable": map[string]any{"path": "bin/hctl-discord", "size": len(payload), "sha256": checksum},
+		}},
+		"capabilities": []any{map[string]any{
+			"type": "channel-adapter", "version": 1, "id": "discord", "channel_kind": "discord", "artifacts": []string{artifactID}, "executable": "bin/hctl-discord",
+			"runtime": map[string]any{"arguments": []string{"runtime", "--stdio"}}, "setup": map[string]any{"arguments": []string{"setup"}}, "status": map[string]any{"arguments": []string{"status"}}, "remove": map[string]any{"arguments": []string{"remove"}},
+			"protocol": map[string]any{"minimum": 1, "before": 2}, "profile_selector": "opaque-id-v1", "features": []string{"typing", "replies", "text-fallback"},
+		}},
+	}
+	manifest, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	writeCLIFile(t, filepath.Join(root, "integration.json"), string(manifest)+"\n", 0o600)
+	writeCLIFile(t, filepath.Join(root, "payload", "hctl-discord"), string(payload), 0o600)
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: root, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type countingOpenDriver struct{ opens int }

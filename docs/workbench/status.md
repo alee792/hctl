@@ -32,8 +32,8 @@ The repository contains a small Go CLI that:
   independently selected workspace as native Claude Code and Codex files
   without overwriting hand-authored files;
 - validates bounded metadata-first integration package manifests, immutable
-  manifest/artifact/executable identities, and the closed `native-mcp` v1
-  capability without loading or executing package code;
+  manifest/artifact/executable identities, and the closed `native-mcp` v1 and
+  `channel-adapter` v1 capabilities without loading or executing package code;
 - keeps one apply record, migrates legacy projection records, and removes the
   obsolete duplicated runtime manifest;
 - discovers, prepares, validates, and exposes TypeScript, Python, and Go tool
@@ -342,9 +342,8 @@ capability. Exact manifest bytes, platform artifacts, and post-preparation
 executables have immutable identities; capability artifact references form the
 selective runtime/staging closure. A credentialless fixture and official
 `github-mcp-server` metadata use the same vendor-neutral validation and
-selection path, while a future `channel-adapter` tag is rejected without
-artifact access or execution. ADR 0031 now specializes that contract for the
-GitHub connection: native server name `github`, exact installed executable plus
+ selection path. ADR 0031 now specializes that contract for the
+ GitHub connection: native server name `github`, exact installed executable plus
 `stdio`, prepared package working directory, optional startup, native project
 trust, ambient `GITHUB_PERSONAL_ACCESS_TOKEN`, rejection on generated-name
 collision, and native ownership of missing-auth diagnostics and every GitHub
@@ -354,8 +353,23 @@ operator-owned, and keeps ADR 0009 unchanged for future secret-bearing managed
 operations. The credentialless native fixture is the configuration-generation
 evidence path; no live PAT or broker is required. Installer/cache/CLI behavior
 remains #76, official artifact packaging remains #66, and native generation and
-runtime proof remain #67. The currently shipped anonymous managed GitHub code
-has not yet been removed.
+ runtime proof remain #67. The currently shipped anonymous managed GitHub code
+ has not yet been removed.
+
+ ADR 0032 and the dependency-free `hctl/channeladapter` module now define the
+second closed capability and its version-1 process protocol. Package metadata
+pins one exact executable, fixed runtime/setup/status/remove modes, protocol
+range, non-secret profile selector, feature declaration, and selective
+artifact closure without execution. The strict bounded JSONL schema carries
+only normalized channel semantics, opaque handles, dispositions, lifecycle,
+status/reset delegation, attachment chunks, classified diagnostics, and
+shutdown. Deterministic and independent no-op fixtures prove the capability
+seam without a vendor SDK or credential. Replay, ambiguous-delivery no-retry,
+backpressure, deadlines,
+process cleanup, credential ownership, same-user limitations, and dependency
+direction are explicit. The production Discord code has not moved and no
+generic process host exists yet; #83 and #84 consume this contract before #85
+ removes the in-process implementation and Discord-only root dependencies.
 
 The channel runtime now owns explicit independent managed session lifecycles
 for its configured Discord guild and DM surfaces. Idle lifecycles release their

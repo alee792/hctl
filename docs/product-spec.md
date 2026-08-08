@@ -346,6 +346,20 @@ does not configure in this delivery. Invalid, expired, or insufficient
 authorization remains an official-server, GitHub, and native-harness runtime
 failure; hctl does not intercept or reclassify it.
 
+Every local or headless harness process receives the ambient variable from its
+own operator-controlled launch environment. A resumed process, a replacement
+after hibernation, a restart, and each concurrent conversation therefore see
+the environment present when that native process starts; hctl neither snapshots
+the value during apply nor propagates an in-process credential update. A
+missing PAT, Claude project-server approval, or Codex server/tool approval
+leaves the optional GitHub server unavailable while the already-trusted native
+session and unrelated managed tools remain usable. Codex project trust is
+different: it is a prerequisite for launching the native project, so its
+absence fails the session rather than only disabling GitHub. A missing,
+disabled, untrusted, incompatible, or corrupt installed package likewise fails
+offline setup verification before hctl starts a headless process, rather than
+launching against stale executable configuration.
+
 The PAT is the only supported hctl authentication input for this first native
 delivery. The official server's OAuth and GitHub App modes remain separate
 follow-up work. Native Git and `gh` authentication are separately operator-owned

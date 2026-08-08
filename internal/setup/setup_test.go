@@ -256,13 +256,39 @@ func TestGeneratedGitHubNativeMCPLaunchesCredentialFreeFixture(t *testing.T) {
 			if err != nil || stderr != "" {
 				t.Fatalf("native fixture launch = stdout %q, stderr %q, error %v", stdout, stderr, err)
 			}
-			for _, fragment := range []string{`"name":"fixture_read"`, `"ok":true`} {
+			for _, fragment := range []string{`"name":"fixture_issue_inspect"`, `"name":"fixture_issue_claim"`, `"ok":true`} {
 				if !strings.Contains(stdout, fragment) {
 					t.Fatalf("native discovery/call omitted %q: %s", fragment, stdout)
 				}
 			}
 			if strings.Contains(stdout, fakeValue) {
 				t.Fatal("native protocol output exposed the ambient value")
+			}
+			restarted, restartStderr, err := run(fakeValue, approved)
+			if err != nil || restartStderr != "" || restarted != stdout {
+				t.Fatalf("restarted native fixture = stdout %q, stderr %q, error %v", restarted, restartStderr, err)
+			}
+			readOnly, readOnlyStderr, err := run(fakeValue, approved, "HCTL_EXECUTION_POLICY=read-only")
+			if err != nil || readOnlyStderr != "" || !strings.Contains(readOnly, `"unmanaged_effect":true`) || !strings.Contains(readOnly, `"execution_policy":"read-only"`) {
+				t.Fatalf("read-only native effect boundary = stdout %q, stderr %q, error %v", readOnly, readOnlyStderr, err)
+			}
+			type concurrentResult struct {
+				stdout string
+				stderr string
+				err    error
+			}
+			results := make(chan concurrentResult, 3)
+			for range 3 {
+				go func() {
+					out, diagnostic, runErr := run(fakeValue, approved)
+					results <- concurrentResult{stdout: out, stderr: diagnostic, err: runErr}
+				}()
+			}
+			for range 3 {
+				result := <-results
+				if result.err != nil || result.stderr != "" || result.stdout != stdout {
+					t.Fatalf("concurrent native fixture = stdout %q, stderr %q, error %v", result.stdout, result.stderr, result.err)
+				}
 			}
 
 			for _, value := range []string{"", "explicitly-invalid-fake-value"} {
@@ -322,11 +348,15 @@ fi
 IFS= read -r initialize
 IFS= read -r list
 IFS= read -r call
+case "$call" in
+  *'"name":"fixture_issue_claim"'*) ;;
+  *) echo 'unexpected fixture tool outcome' >&2; exit 22 ;;
+esac
 protocol_version=${FAKE_MCP_PROTOCOL_VERSION-2025-06-18}
 server_version=${FAKE_MCP_SERVER_VERSION-1.8.0-fixture}
 printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"$protocol_version\",\"serverInfo\":{\"name\":\"github-mcp-server\",\"version\":\"$server_version\"}}}"
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fixture_read"}]}}'
-printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"structuredContent":{"ok":true}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fixture_issue_inspect"},{"name":"fixture_issue_claim"}]}}'
+printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"structuredContent\":{\"ok\":true,\"unmanaged_effect\":true,\"execution_policy\":\"${HCTL_EXECUTION_POLICY-unset}\"}}}"
 `)
 	digest := sha256.Sum256(payload)
 	checksum := hex.EncodeToString(digest[:])
@@ -408,7 +438,7 @@ grep -F 'args = ["stdio"]' "$config" >/dev/null
 	run := `failure=$(mktemp)
 trap 'rm -f "$failure"' EXIT
 set +e
-output=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fixture_read","arguments":{}}}' | /usr/bin/env -C "$cwd" -- "$server" stdio 2>"$failure")
+output=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fixture_issue_claim","arguments":{}}}' | /usr/bin/env -C "$cwd" -- "$server" stdio 2>"$failure")
 status=$?
 set -e
 if [ "$status" -ne 0 ]; then
@@ -1284,6 +1314,68 @@ func TestMaintainerCodeReviewSkillProjectsWithProvenance(t *testing.T) {
 			}
 			if got := read(t, filepath.Join(workspace, filepath.FromSlash(prefix), "code-review", "UPSTREAM.md")); got != provenance {
 				t.Fatalf("generated %s provenance changed during apply", harness)
+			}
+		})
+	}
+}
+
+func TestMaintainerGitHubGuidanceKeepsClaimFirstAndNativeEffectsUnmanaged(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate repository source")
+	}
+	repositoryRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	agentRoot := filepath.Join(repositoryRoot, "agents", "maintainer")
+	fixtureBytes, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "testdata", "maintainer-github-tracker.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Issue struct {
+			State        string   `json:"state"`
+			Assigned     bool     `json:"assigned"`
+			Labels       []string `json:"labels"`
+			OpenBlockers int      `json:"open_blockers"`
+		} `json:"issue"`
+		ExpectedFirstWrite string `json:"expected_first_tracker_write"`
+	}
+	if err := json.Unmarshal(fixtureBytes, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.Issue.State != "open" || fixture.Issue.Assigned || !reflect.DeepEqual(fixture.Issue.Labels, []string{"ready-for-agent"}) || fixture.Issue.OpenBlockers != 0 || fixture.ExpectedFirstWrite != "assign_to_self" {
+		t.Fatalf("tracker fixture no longer represents one eligible claim-first issue: %+v", fixture)
+	}
+
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			workspace := t.TempDir()
+			p, err := project.Load(agentRoot, harness, workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ApplyWithNativeMCP(p, "/opt/hctl/bin/hctl", []integration.NativeMCPLaunchDescriptor{testNativeMCPDescriptor(t, harness)}); err != nil {
+				t.Fatal(err)
+			}
+			instructionsPath := filepath.Join(workspace, "AGENTS.md")
+			if harness == "claude" {
+				instructionsPath = filepath.Join(workspace, "CLAUDE.md")
+			}
+			instructions := read(t, instructionsPath)
+			for _, fragment := range []string{
+				"discovered catalog", "first tracker write", "before a branch, edit, status comment",
+				"not hctl authorization", "workspace-write promotion only", "read-only workspace does not", "make GitHub read-only",
+				"instructions are not enforcement", "MCP PAT authenticates either", "branch exists remotely",
+				"fine-grained, repository-scoped", "untrusted channel input", "live catalog and schemas are authoritative",
+				"does not filter, confirm, broker, or audit", "must establish it deliberately before unattended launch",
+			} {
+				if !strings.Contains(instructions, fragment) {
+					t.Fatalf("generated %s maintainer guidance omits %q: %s", harness, fragment, instructions)
+				}
+			}
+			claim := strings.Index(instructions, "assigning the eligible issue to\nyourself must be the first tracker write")
+			branch := strings.Index(instructions, "before a branch, edit, status comment")
+			if claim < 0 || branch < 0 || claim > branch {
+				t.Fatalf("generated %s guidance lost claim-first ordering", harness)
 			}
 		})
 	}

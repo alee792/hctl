@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -611,6 +612,209 @@ func TestRunJSONLAutoAppliesAndScrubsDiscordToken(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "AGENTS.md")); err != nil {
 		t.Fatal("run did not auto-apply")
+	}
+}
+
+func TestRunGitHubNativeMCPEnvironmentAndOptionalFailureForClaudeAndCodex(t *testing.T) {
+	const fakeValue = "conspicuous-headless-fake-pat"
+	commands := map[string]string{
+		"claude": `#!/bin/sh
+if [ "${1-}" = "--version" ]; then echo "2.1.221 (Claude Code)"; exit 0; fi
+if [ "${1-}" = "--permission-mode" ]; then echo "--permission-mode plan acceptEdits"; exit 0; fi
+probe_output=$("$FAKE_NATIVE_PROBE" claude) || exit $?
+IFS= read -r line || exit 1
+session_id="11111111-1111-4111-8111-111111111111"
+printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session_id"
+printf '%s\n' "$probe_output" | while IFS= read -r diagnostic; do
+  printf '{"type":"stream_event","session_id":"%s","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$session_id" "$diagnostic"
+done
+printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"github optional; managed session available"}\n' "$session_id"
+`,
+		"codex": `#!/bin/sh
+if [ "${1-}" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+probe_output=$("$FAKE_NATIVE_PROBE" codex) || exit $?
+while IFS= read -r line; do
+ case "$line" in
+  *'"method":"initialize"'*) echo '{"id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.1"}}' ;;
+  *'"method":"thread/start"'*|*'"method":"thread/resume"'*) echo '{"id":2,"result":{"thread":{"id":"01911111-1111-7111-8111-111111111111"}}}' ;;
+  *'"method":"turn/start"'*)
+    echo '{"id":3,"result":{"turn":{"id":"01922222-2222-7222-8222-222222222222","items":[],"status":"inProgress"}}}'
+    printf '%s\n' "$probe_output" | while IFS= read -r diagnostic; do
+      printf '{"method":"item/agentMessage/delta","params":{"threadId":"01911111-1111-7111-8111-111111111111","turnId":"01922222-2222-7222-8222-222222222222","itemId":"fixture-diagnostic","delta":"%s"}}\n' "$diagnostic"
+    done
+    echo '{"method":"turn/completed","params":{"threadId":"01911111-1111-7111-8111-111111111111","turn":{"id":"01922222-2222-7222-8222-222222222222","items":[],"status":"completed"}}}'
+    ;;
+ esac
+done
+`,
+	}
+	for harnessName, script := range commands {
+		t.Run(harnessName, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			managedServer := filepath.Join(t.TempDir(), "fake-hctl")
+			writeCLIFile(t, managedServer, `#!/bin/sh
+IFS= read -r initialize || exit 1
+IFS= read -r list || exit 1
+IFS= read -r call || exit 1
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"managed-fixture","version":"1.0.0"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo"}]}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"structuredContent":{"managed_echo":"ok"}}}'
+`, 0o755)
+			store, err := integration.NewDefaultStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			packageRoot := writeCLIGitHubPackage(t, "1.8.0", []byte(`#!/bin/sh
+if [ -z "${GITHUB_PERSONAL_ACCESS_TOKEN-}" ]; then
+  echo 'authentication required' >&2
+  exit 20
+fi
+IFS= read -r initialize || exit 1
+IFS= read -r list || exit 1
+IFS= read -r call || call=
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"github-mcp-server","version":"1.8.0-fixture"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fixture_issue_inspect"}]}}'
+[ -z "$call" ] || printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"structuredContent":{"github_read":"ok"}}}'
+`))
+			if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+				t.Fatal(err)
+			}
+			source := filepath.Join(t.TempDir(), "maintainer")
+			writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Headless GitHub fixture.\n---\n\nUse discovered GitHub outcomes.\n", 0o644)
+			writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+			command := filepath.Join(t.TempDir(), harnessName)
+			writeCLIFile(t, command, script, 0o755)
+			probe := filepath.Join(t.TempDir(), "native-probe")
+			// The probe stands in for native harness MCP startup and approval. It
+			// consumes raw server stderr and emits only fixed categories through the
+			// harness's normal bounded output; hctl transports but does not classify it.
+			writeCLIFile(t, probe, `#!/bin/sh
+set -u
+harness=$1
+if [ "$harness" = codex ] && [ "${FAKE_CODEX_PROJECT_TRUST-}" != approved ]; then
+  echo 'Codex project trust required' >&2
+  exit 41
+fi
+if [ "$harness" = claude ]; then
+  config=.mcp.json
+  grep -F '"github": {' "$config" >/dev/null || exit 42
+  github_cwd=$(awk '/"github": \{/{github=1} github && /"args": \[/{args=1; next} args {line=$0; gsub(/^[[:space:]]*"|",?[[:space:]]*$/, "", line); n++; if(n==2){print line; exit}}' "$config")
+  github_server=$(awk '/"github": \{/{github=1} github && /"args": \[/{args=1; next} args {line=$0; gsub(/^[[:space:]]*"|",?[[:space:]]*$/, "", line); n++; if(n==4){print line; exit}}' "$config")
+  managed_server=$(awk '/"managed": \{/{managed=1; next} managed && /"command":/{line=$0; sub(/^[[:space:]]*"command": "/, "", line); sub(/",?$/, "", line); print line; exit}' "$config")
+  server_approved=${FAKE_CLAUDE_PROJECT_SERVER_APPROVAL-}
+  tool_approved=approved
+else
+  config=.codex/config.toml
+  grep -F '[mcp_servers."github"]' "$config" >/dev/null || exit 42
+  github_cwd=$(awk '/^\[mcp_servers\."github"\]$/{github=1; next} github && /^cwd = /{line=$0; sub(/^cwd = "/, "", line); sub(/"$/, "", line); print line; exit}' "$config")
+  github_server=$(awk '/^\[mcp_servers\."github"\]$/{github=1; next} github && /^command = /{line=$0; sub(/^command = "/, "", line); sub(/"$/, "", line); print line; exit}' "$config")
+  managed_server=$(awk '/^\[mcp_servers\.managed\]$/{managed=1; next} managed && /^command = /{line=$0; sub(/^command = "/, "", line); sub(/"$/, "", line); print line; exit}' "$config")
+  server_approved=${FAKE_CODEX_SERVER_APPROVAL-}
+  tool_approved=${FAKE_CODEX_TOOL_APPROVAL-}
+fi
+
+failure=$(mktemp)
+trap 'rm -f "$failure"' EXIT
+github_diagnostic='github-unavailable reason=server-approval-required'
+if [ "$server_approved" = approved ]; then
+  set +e
+  if [ "$tool_approved" = approved ]; then
+    github_output=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fixture_issue_inspect","arguments":{}}}' | /usr/bin/env -C "$github_cwd" -- "$github_server" stdio 2>"$failure")
+  else
+    github_output=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | /usr/bin/env -C "$github_cwd" -- "$github_server" stdio 2>"$failure")
+  fi
+  github_status=$?
+  set -e
+  if [ "$github_status" -ne 0 ]; then
+    github_diagnostic='github-unavailable reason=missing-credential'
+  elif [ "$tool_approved" != approved ]; then
+    github_diagnostic='github-unavailable reason=tool-approval-required'
+  elif printf '%s\n' "$github_output" | grep -F '"github_read":"ok"' >/dev/null; then
+    github_diagnostic='github-available'
+  else
+    github_diagnostic='github-unavailable reason=native-startup-failed'
+  fi
+fi
+managed_output=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"ok"}}}' | "$managed_server" mcp serve fixture --harness "$harness")
+printf '%s\n' "$managed_output" | grep -F '"managed_echo":"ok"' >/dev/null || exit 43
+printf '%s\n' "$github_diagnostic" 'managed-echo=ok'
+`, 0o755)
+			t.Setenv("FAKE_NATIVE_PROBE", probe)
+			t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", fakeValue)
+			t.Setenv("FAKE_CLAUDE_PROJECT_SERVER_APPROVAL", "approved")
+			t.Setenv("FAKE_CODEX_PROJECT_TRUST", "approved")
+			t.Setenv("FAKE_CODEX_SERVER_APPROVAL", "approved")
+			t.Setenv("FAKE_CODEX_TOOL_APPROVAL", "approved")
+			run := func(workspace, conversation, inputID string) (string, string, error) {
+				var output, stderr bytes.Buffer
+				input := `{"input_id":"` + inputID + `","text":"inspect GitHub"}` + "\n"
+				err := Run([]string{"run", source, "--workspace", workspace, "--harness", harnessName, "--command", command, "--input", "jsonl", "--conversation", conversation}, strings.NewReader(input), &output, &stderr, managedServer)
+				return output.String(), stderr.String(), err
+			}
+
+			workspace := t.TempDir()
+			for _, inputID := range []string{"first", "after-restart"} {
+				output, stderr, err := run(workspace, "maintainer", inputID)
+				if err != nil || !strings.Contains(output, `"delta":"github-available"`) || !strings.Contains(output, `"delta":"managed-echo=ok"`) || !strings.Contains(output, `"type":"turn.completed"`) || strings.Contains(output, fakeValue) || strings.Contains(stderr, fakeValue) {
+					t.Fatalf("headless %s run %s = output %q, stderr %q, error %v", harnessName, inputID, output, stderr, err)
+				}
+			}
+			t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "")
+			output, stderr, err := run(workspace, "maintainer", "github-unavailable")
+			if err != nil || !strings.Contains(output, `"delta":"github-unavailable reason=missing-credential"`) || !strings.Contains(output, `"delta":"managed-echo=ok"`) || !strings.Contains(output, `"type":"turn.completed"`) || strings.Contains(output, "authentication required") || strings.Contains(stderr, fakeValue) {
+				t.Fatalf("optional GitHub failure broke %s session = output %q, stderr %q, error %v", harnessName, output, stderr, err)
+			}
+			t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", fakeValue)
+			if harnessName == "claude" {
+				t.Setenv("FAKE_CLAUDE_PROJECT_SERVER_APPROVAL", "")
+			} else {
+				t.Setenv("FAKE_CODEX_SERVER_APPROVAL", "")
+			}
+			output, stderr, err = run(workspace, "maintainer", "server-approval-unavailable")
+			if err != nil || !strings.Contains(output, `"delta":"github-unavailable reason=server-approval-required"`) || !strings.Contains(output, `"delta":"managed-echo=ok"`) || !strings.Contains(output, `"type":"turn.completed"`) {
+				t.Fatalf("optional %s server approval broke managed session = output %q, stderr %q, error %v", harnessName, output, stderr, err)
+			}
+			if harnessName == "claude" {
+				t.Setenv("FAKE_CLAUDE_PROJECT_SERVER_APPROVAL", "approved")
+			} else {
+				t.Setenv("FAKE_CODEX_SERVER_APPROVAL", "approved")
+				t.Setenv("FAKE_CODEX_TOOL_APPROVAL", "")
+				output, stderr, err = run(workspace, "maintainer", "tool-approval-unavailable")
+				if err != nil || !strings.Contains(output, `"delta":"github-unavailable reason=tool-approval-required"`) || !strings.Contains(output, `"delta":"managed-echo=ok"`) || !strings.Contains(output, `"type":"turn.completed"`) {
+					t.Fatalf("optional Codex tool approval broke managed session = output %q, stderr %q, error %v", output, stderr, err)
+				}
+				t.Setenv("FAKE_CODEX_TOOL_APPROVAL", "approved")
+				t.Setenv("FAKE_CODEX_PROJECT_TRUST", "")
+				output, stderr, err = run(t.TempDir(), "untrusted-project", "project-trust-required")
+				if err == nil || !strings.Contains(err.Error(), "codex initialize handshake failed") || !strings.Contains(output, `"type":"driver.process_failed"`) || !strings.Contains(output, `"status":"startup_failure"`) || strings.Contains(output, `"type":"turn.completed"`) {
+					t.Fatalf("missing Codex project trust = output %q, stderr %q, error %v", output, stderr, err)
+				}
+				t.Setenv("FAKE_CODEX_PROJECT_TRUST", "approved")
+			}
+			type result struct {
+				output string
+				stderr string
+				err    error
+			}
+			results := make(chan result, 2)
+			for index := range 2 {
+				workspace := t.TempDir()
+				conversation := "concurrent-" + strconv.Itoa(index)
+				inputID := "input-" + strconv.Itoa(index)
+				go func() {
+					out, diagnostic, runErr := run(workspace, conversation, inputID)
+					results <- result{output: out, stderr: diagnostic, err: runErr}
+				}()
+			}
+			for range 2 {
+				result := <-results
+				if result.err != nil || !strings.Contains(result.output, `"delta":"github-available"`) || !strings.Contains(result.output, `"delta":"managed-echo=ok"`) || !strings.Contains(result.output, `"type":"turn.completed"`) || strings.Contains(result.stderr, fakeValue) {
+					t.Fatalf("concurrent %s headless session = output %q, stderr %q, error %v", harnessName, result.output, result.stderr, result.err)
+				}
+			}
+		})
 	}
 }
 

@@ -1,0 +1,10 @@
+{
+  "issue": {
+    "number": 71,
+    "state": "open",
+    "assigned": false,
+    "labels": ["ready-for-agent"],
+    "open_blockers": 0
+  },
+  "expected_first_tracker_write": "assign_to_self"
+}

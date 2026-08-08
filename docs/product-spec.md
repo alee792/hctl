@@ -274,32 +274,71 @@ source remains safe to apply to common case-insensitive workspaces.
 
 The optional `connections/github.md` file contains a 1-1024 character UTF-8
 Markdown description. Its conventional path registers a connection named
-`github`; there is no connection manifest or name field. It exposes exactly
-`github__get-repository`, `github__list-issues`, and `github__get-issue` through
-the existing managed MCP server for both harnesses. The description is included
-in each tool's model-visible description. Any other entry under `connections/`
-fails before workspace mutation.
+`github`; there is no connection manifest or name field. It requests capability
+id `github` from the operator-installed `github-mcp-server` integration package.
+It contains no credential value or reference, installed version, executable
+path, repository grant, tool allowlist, or approval decision. Any other entry
+under `connections/` fails before workspace mutation. The description remains
+model-facing guidance in generated instructions; it does not replace or freeze
+the official server's discovered tool descriptions or schemas.
 
-This first connection is anonymous, public, read-only GitHub REST access.
-Repository inputs are bounded `owner` and `repo` strings. Issue listing accepts
-optional `state` (`open`, `closed`, or `all`) and `limit` from 1-20, defaulting
-to `open` and 10; GitHub's issues endpoint may include pull requests. Single
-issue lookup requires a positive issue number. Hctl sends fixed GET requests
-to `https://api.github.com` with GitHub's JSON accept and current
-`2026-03-10` API-version headers,
-no authorization header, a five-second client timeout, no redirects, no retry,
-and a one-MiB response limit. Returned repository and issue fields are selected
-and bounded rather than forwarding raw upstream bodies; a `truncated` field
-reports when returned text or labels were shortened. Errors are stable
-categories for invalid input, missing resources, rate limits, authorization,
-service availability, timeouts, oversized or invalid responses, and other
-request failures; they do not include upstream bodies or arbitrary diagnostics.
-Apply performs no network request.
+GitHub uses the official external `github/github-mcp-server` executable through
+the `native-mcp` v1 capability. Hctl reuses the package installation,
+verification, cache, offline apply, and selective-closure journey; it does not
+import a GitHub SDK or implement an API client. The stable native server name is
+`github`, its collision policy is rejection, and its command is the exact
+verified installed executable with the sole argument `stdio`. Its working
+directory is the exact prepared package root. The target is enabled but
+startup-optional, so GitHub unavailability does not disable unrelated managed
+tools or the rest of the native session.
 
-Private repository access, credentials, writes, a generic OpenAPI engine,
-dynamic MCP proxying, approval UX, and credential-broker code are deferred. Any
-secret-bearing extension must first satisfy
-[ADR 0009](adr/0009-use-a-local-secretless-operation-broker.md).
+Claude receives a project `.mcp.json` stdio entry using `/usr/bin/env -C` to
+enter that package root and exec the exact installed server. Codex receives a
+project `[mcp_servers.github]` entry with the exact command, `args = ["stdio"]`,
+the package root as `cwd`, `enabled = true`, `required = false`, and prompt-mode
+native tool approval. Codex forwards the ambient variable by name through
+`env_vars`; Claude's server inherits the launch environment. Neither generated
+entry contains the resolved value. Exact `github` collisions with authored or
+plugin native MCP servers reject apply before mutation; hctl does not rename,
+override, or silently skip the installed server. Harness-owned user,
+administrator, and enterprise configuration remains subject to native
+precedence and diagnostics.
+
+Authentication is deliberately unmanaged. Local shells and headless service,
+container, or secret-manager configuration inject the same
+`GITHUB_PERSONAL_ACCESS_TOKEN` into the Claude or Codex launch environment. The
+official server reads it directly. Apply remains offline and neither requires
+nor resolves the value. Hctl never writes it into source, package state,
+generated files, apply records, caches, images, staged filesystems, logs,
+diagnostics, or retained evidence.
+
+**The harness, model-accessible shell or execution tools, plugins, and other
+processes inheriting that environment may read or transmit the PAT. Hctl does
+not claim otherwise.** Hctl does not proxy, supervise, filter, authorize,
+confirm, retry, observe, normalize, or audit native GitHub calls. It does not
+enforce repository/tool allowlists or effect classes. Fine-grained repository
+scope, minimal permissions, short expiration, runtime isolation, native-harness
+trust, and operator judgment are this delivery's security boundary. A
+read-only workspace does not constrain GitHub effects allowed by the PAT and
+official server.
+
+Claude owns its one-time project MCP approval. Codex requires its normal
+project-trust decision and owns server/tool approval. Hctl does not silently
+grant either. An unattended operator must deliberately establish equivalent
+native project, server, and tool trust through supported harness or deployment
+configuration before launch. A missing or empty PAT produces the supported
+official server's bounded `authentication required` initialization failure;
+the upstream message may also name OAuth or GitHub App alternatives that hctl
+does not configure in this delivery. Invalid, expired, or insufficient
+authorization remains an official-server, GitHub, and native-harness runtime
+failure; hctl does not intercept or reclassify it.
+
+The PAT is the only supported hctl authentication input for this first native
+delivery. The official server's OAuth and GitHub App modes remain separate
+follow-up work. Native Git and `gh` authentication are separately operator-owned
+and unmanaged: the MCP PAT does not promise either, and the MCP surface does not
+promise exact branch publication with local Git history. See
+[ADR 0031](adr/0031-use-the-official-github-server-as-native-unmanaged-mcp.md).
 
 The optional `channels/discord.md` file contains strict `mode: ambient`
 frontmatter and a 1-1024 character UTF-8 Markdown participation policy. Its
@@ -528,8 +567,10 @@ codec.
 New and resumed channel-managed sessions run read-only in the shared workspace:
 Claude uses native plan permission mode, Codex uses a read-only sandbox with
 approvals disabled, and the managed MCP boundary does not start or expose
-authored tool hosts under that policy. Safe built-in and anonymous GitHub read
-operations remain available. Generated channel instructions define the exact
+authored tool hosts under that policy. Safe built-ins remain available. Native
+MCP servers remain outside this managed boundary: a configured GitHub server
+may still perform every upstream effect allowed by its PAT despite the
+read-only workspace. Generated channel instructions define the exact
 `HCTL_REQUEST_WRITE_ACCESS` result for requests that genuinely require a
 workspace change. Like `HCTL_NO_REPLY`, it is interpreted only after the whole
 trimmed response exactly matches and is never delivered as ordinary output.
@@ -821,9 +862,8 @@ management remain outside the MVP.
 ## Managed tool boundary
 
 The MVP exposes one bounded, read-only `echo` tool, the optional local
-`record-friction` built-in, the optional anonymous GitHub connection's three
-read-only tools, and conventionally authored TypeScript, Python, and Go tools
-through one stdio MCP server in both harnesses. Inputs and outputs are
+`record-friction` built-in, and conventionally authored TypeScript, Python, and
+Go tools through one stdio MCP server in both harnesses. Inputs and outputs are
 schema-validated. Audit output contains a safe request identifier, tool name,
 and lifecycle outcome, never tool arguments or output.
 
@@ -1017,8 +1057,9 @@ mutation, and review UX remain outside the MVP and are not scaffolded. See
 - Process failure is distinct from a completed or failed model turn.
 - An uncertain external effect is never described as exactly-once or retried
   without a target idempotency contract.
-- Diagnostics do not expose credentials, private prompts, or raw process
-  output.
+- Hctl-owned diagnostics do not expose credentials, private prompts, or raw
+  process output. Native harness and external-server diagnostics remain outside
+  that managed claim.
 - A future secretless broker validates a reference, managed operation, target,
   and authorization on every call; uses private local IPC, a sensitive
   session-scoped authorization capability for one managed MCP server instance,
@@ -1093,6 +1134,11 @@ The MVP is complete when credential-free tests prove:
 21. A foreground UTC schedule clock admits only current, non-overlapping
     occurrences through one bounded durable task runtime, drains admitted work
     on shutdown, and never backfills missed minutes or emits model output.
+22. A credentialless fake native-MCP package generates and launches the exact
+    Claude and Codex project mappings without a vendor-specific code path; a
+    conspicuous fake environment value reaches only the fixture process and is
+    absent from generated files, apply/package state, staging, diagnostics, and
+    retained evidence.
 
 ## Explicit non-goals
 
@@ -1106,4 +1152,7 @@ The MVP is complete when credential-free tests prove:
   orchestration, or hosted image operation
 - Governance claims over native harness tools
 - Hosted secret managers and model-visible secret-bearing managed operations
+- GitHub OAuth or GitHub App enrollment, a managed MCP proxy, credential
+  brokering, per-call hctl authorization or confirmation, and exact Git branch
+  publication through MCP
 - Automatic or unreviewed promotion of agent-authored improvements

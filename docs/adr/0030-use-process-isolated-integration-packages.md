@@ -4,6 +4,7 @@
 - Extends: [ADR 0001](0001-use-native-harnesses.md),
   [ADR 0020](0020-map-plugin-mcp-through-native-harness-configuration.md), and
   [ADR 0027](0027-stage-agent-filesystems-for-downstream-oci-builds.md)
+- Specialized by: [ADR 0031](0031-use-the-official-github-server-as-native-unmanaged-mcp.md)
 
 ## Plain-English summary
 

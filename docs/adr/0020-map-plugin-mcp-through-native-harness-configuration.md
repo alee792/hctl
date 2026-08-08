@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Extended by: [ADR 0029](0029-bound-authored-projects-with-aggregate-budgets.md)
+- Reused by: [ADR 0031](0031-use-the-official-github-server-as-native-unmanaged-mcp.md)
 
 ## Plain-English summary
 

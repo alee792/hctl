@@ -1,9 +1,11 @@
 // Package project loads and validates portable hctl agent projects.
 //
-// Loading is side-effect free. The package reads bounded project sources,
-// rejects paths that escape the source tree, imports supported Agent Plugin
-// skills and MCP declarations, and computes the fingerprint used to bind
-// generated state to an exact source revision. Invalid optional plugin MCP
+// Loading reads bounded project sources, rejects paths that escape the source
+// tree, imports supported Agent Plugin skills and MCP declarations, and
+// computes the fingerprint used to bind generated state to an exact source
+// revision. A load also serializes with acquired-dependency operations and may
+// complete an interrupted hctl-owned publication before reading source; normal
+// loading does not change authored files. Invalid optional plugin MCP
 // declarations are reported as diagnostics so the rest of a valid plugin can
 // remain available.
 //
@@ -15,6 +17,7 @@ package project
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +34,7 @@ import (
 	cronlib "github.com/robfig/cron/v3"
 	"go.yaml.in/yaml/v3"
 
+	"hctl/internal/acquisition"
 	"hctl/internal/integration"
 	"hctl/internal/rootfs"
 	"hctl/internal/tool"
@@ -211,6 +215,8 @@ type Project struct {
 	Schedules         []Schedule
 	Tools             tool.Inventory
 	Sources           []SourceRecord
+	SourceDirectories []string
+	SourceContents    map[string][]byte
 	SourceFingerprint string
 	MaxToolInput      int
 	FrictionNotes     bool
@@ -281,7 +287,23 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 			return nil, fmt.Errorf("workspace: %w", err)
 		}
 	}
+	var result *Project
+	err = acquisition.WithSnapshot(context.Background(), sourceRoot, func(snapshot acquisition.Snapshot) error {
+		var loadErr error
+		result, loadErr = loadCaptured(sourceRoot, workspaceRoot, harness, logicalName, snapshot)
+		return loadErr
+	})
+	return result, err
+}
 
+func loadCaptured(sourceRoot, workspaceRoot, harness, logicalName string, snapshot acquisition.Snapshot) (*Project, error) {
+	return loadCapturedExcluding(sourceRoot, workspaceRoot, harness, logicalName, snapshot, "")
+}
+
+func loadCapturedExcluding(sourceRoot, workspaceRoot, harness, logicalName string, snapshot acquisition.Snapshot, excluded string) (*Project, error) {
+	if err := validateAcquiredComponentIdentities(snapshot); err != nil {
+		return nil, err
+	}
 	name := logicalName
 	if name == "" {
 		name = nameFromRoot(sourceRoot)
@@ -299,11 +321,11 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 	}
 
 	skillBudget := &skillSetBudget{maxFiles: maxSkillSetFiles, maxBytes: maxSkillSetBytes}
-	skills, err := loadSkills(sourceRoot, skillBudget)
+	skills, err := loadSkillsExcluding(sourceRoot, skillBudget, excluded)
 	if err != nil {
 		return nil, err
 	}
-	skills, pluginMCPServers, pluginSources, diagnostics, err := loadPlugins(sourceRoot, workspaceRoot, harness, agentID, skills, skillBudget)
+	skills, pluginMCPServers, pluginSources, diagnostics, err := loadPluginsExcluding(sourceRoot, workspaceRoot, harness, agentID, skills, skillBudget, excluded)
 	if err != nil {
 		return nil, err
 	}
@@ -381,11 +403,42 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 	for _, file := range tools.Files {
 		sources = append(sources, SourceRecord{Path: file.Path, SHA256: file.SHA256})
 	}
+	sourceByPath := make(map[string]SourceRecord, len(sources)+len(snapshot.Files))
+	for _, source := range sources {
+		if previous, exists := sourceByPath[source.Path]; exists && previous != source {
+			return nil, fmt.Errorf("agent source path %s has conflicting identities", source.Path)
+		}
+		sourceByPath[source.Path] = source
+	}
+	for _, acquired := range snapshot.Files {
+		record := SourceRecord{Path: acquired.Path, SHA256: acquired.SHA256, Executable: acquired.Executable}
+		if previous, exists := sourceByPath[record.Path]; exists {
+			if previous != record {
+				return nil, fmt.Errorf("acquired source path %s changed during project loading", record.Path)
+			}
+			continue
+		}
+		sources = append(sources, record)
+		sourceByPath[record.Path] = record
+	}
+	sourceContents := make(map[string][]byte, len(snapshot.Files))
+	for _, acquired := range snapshot.Files {
+		sourceContents[acquired.Path] = acquired.Content
+	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].Path < sources[j].Path })
-	canonicalSources, _ := json.Marshal(struct {
-		Agent   string         `json:"agent"`
-		Sources []SourceRecord `json:"sources"`
-	}{Agent: name, Sources: sources})
+	var canonicalSources []byte
+	if len(snapshot.Directories) == 0 {
+		canonicalSources, _ = json.Marshal(struct {
+			Agent   string         `json:"agent"`
+			Sources []SourceRecord `json:"sources"`
+		}{Agent: name, Sources: sources})
+	} else {
+		canonicalSources, _ = json.Marshal(struct {
+			Agent       string         `json:"agent"`
+			Sources     []SourceRecord `json:"sources"`
+			Directories []string       `json:"directories"`
+		}{Agent: name, Sources: sources, Directories: snapshot.Directories})
+	}
 	fingerprint := rootfs.SHA256(canonicalSources)
 	reference, err := filepath.Rel(workspaceRoot, sourceRoot)
 	if err != nil {
@@ -411,10 +464,40 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 		Schedules:         schedules,
 		Tools:             tools,
 		Sources:           sources,
+		SourceDirectories: snapshot.Directories,
+		SourceContents:    sourceContents,
 		SourceFingerprint: fingerprint,
 		MaxToolInput:      echoMaxInputBytes,
 		FrictionNotes:     frictionNotes,
 	}, nil
+}
+
+func validateAcquiredComponentIdentities(snapshot acquisition.Snapshot) error {
+	files := make(map[string][]byte, len(snapshot.Files))
+	for _, file := range snapshot.Files {
+		files[file.Path] = file.Content
+	}
+	for _, verified := range snapshot.Dependencies {
+		dependency := verified.Dependency
+		if dependency.Kind != acquisition.Plugin {
+			continue
+		}
+		path := dependency.Destination + "/plugin.json"
+		content, exists := files[path]
+		if !exists {
+			return fmt.Errorf("acquired Plugin %s is missing its captured manifest", dependency.Destination)
+		}
+		if _, err := validatePluginManifest(path, content); err != nil {
+			return fmt.Errorf("acquired Plugin %s has an invalid manifest: %w", dependency.Destination, err)
+		}
+		var manifest struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(content, &manifest) != nil || manifest.Name != dependency.Name {
+			return fmt.Errorf("acquired Plugin %s does not match lock name %q", dependency.Destination, dependency.Name)
+		}
+	}
+	return nil
 }
 
 func loadSchedules(root string) ([]Schedule, error) {
@@ -1226,7 +1309,7 @@ func parseEffort(raw string) (string, error) {
 	return effort, nil
 }
 
-func loadSkills(root string, budget *skillSetBudget) ([]Skill, error) {
+func loadSkillsExcluding(root string, budget *skillSetBudget, excluded string) ([]Skill, error) {
 	directory := filepath.Join(root, "skills")
 	info, err := os.Lstat(directory)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1244,6 +1327,10 @@ func loadSkills(root string, budget *skillSetBudget) ([]Skill, error) {
 		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
+		sourcePath := "skills/" + entry.Name()
+		if sourcePath == excluded {
+			continue
+		}
 		if strings.HasSuffix(entry.Name(), ".md") {
 			name := strings.TrimSuffix(entry.Name(), ".md")
 			return nil, fmt.Errorf("skill %q uses the removed flat layout; move it to %q", "skills/"+entry.Name(), "skills/"+name+"/SKILL.md")
@@ -1259,7 +1346,7 @@ func loadSkills(root string, budget *skillSetBudget) ([]Skill, error) {
 		if !validSkillName(name) {
 			return nil, fmt.Errorf("skill directory %q must be 1-64 lowercase ASCII letters, numbers, and single hyphens", name)
 		}
-		skill, err := loadSkill(root, "skills/"+name, name, budget)
+		skill, err := loadSkill(root, sourcePath, name, budget)
 		if err != nil {
 			return nil, fmt.Errorf("skill %q: %w", name, err)
 		}
@@ -1374,6 +1461,10 @@ func loadSkillFiles(root, sourcePath string, budget *skillSetBudget) ([]File, er
 }
 
 func loadPlugins(root, workspace, harness, agentID string, skills []Skill, budget *skillSetBudget) ([]Skill, []PluginMCPServer, []SourceRecord, []Diagnostic, error) {
+	return loadPluginsExcluding(root, workspace, harness, agentID, skills, budget, "")
+}
+
+func loadPluginsExcluding(root, workspace, harness, agentID string, skills []Skill, budget *skillSetBudget, excluded string) ([]Skill, []PluginMCPServer, []SourceRecord, []Diagnostic, error) {
 	directory := filepath.Join(root, "plugins")
 	info, err := os.Lstat(directory)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1398,11 +1489,14 @@ func loadPlugins(root, workspace, harness, agentID string, skills []Skill, budge
 		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
+		pluginPath := "plugins/" + entry.Name()
+		if pluginPath == excluded {
+			continue
+		}
 		entryInfo, err := entry.Info()
 		if err != nil || !entryInfo.IsDir() || entryInfo.Mode()&os.ModeSymlink != 0 {
 			return nil, nil, nil, nil, fmt.Errorf("plugins may contain real plugin directories only; found %q", entry.Name())
 		}
-		pluginPath := "plugins/" + entry.Name()
 		manifestPath := pluginPath + "/plugin.json"
 		manifest, err := rootfs.ReadSource(root, manifestPath, maxSourceBytes)
 		if err != nil {
@@ -1492,7 +1586,7 @@ func loadPlugins(root, workspace, harness, agentID string, skills []Skill, budge
 }
 
 func loadPluginMCP(root, pluginPath string) ([]PluginMCPServer, []Diagnostic, *SourceRecord) {
-	path := pluginPath + "/mcp.json"
+	path := pluginRelativePath(pluginPath, "mcp.json")
 	abs := filepath.Join(root, filepath.FromSlash(path))
 	info, err := os.Lstat(abs)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1614,7 +1708,7 @@ func validatePluginMCPServer(root, pluginPath, sourcePath, name string, raw json
 			if err != nil {
 				return PluginMCPServer{}, nil, errors.New("field \"command\" must remain inside the plugin directory")
 			}
-			commandPath := pluginPath + "/" + relative
+			commandPath := pluginRelativePath(pluginPath, relative)
 			content, err := rootfs.ReadSource(root, commandPath, maxPluginCommandBytes)
 			if err != nil {
 				return PluginMCPServer{}, nil, fmt.Errorf("field \"command\": %w", err)
@@ -1677,6 +1771,13 @@ func validatePluginMCPServer(root, pluginPath, sourcePath, name string, raw json
 	default:
 		return PluginMCPServer{}, nil, fmt.Errorf("unsupported transport %q", transport)
 	}
+}
+
+func pluginRelativePath(pluginPath, relative string) string {
+	if pluginPath == "" {
+		return relative
+	}
+	return pluginPath + "/" + relative
 }
 
 func decodePluginHeaders(raw json.RawMessage) (map[string]string, error) {

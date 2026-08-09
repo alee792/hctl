@@ -17,18 +17,14 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### [GitHub #99](https://github.com/alee792/hctl/issues/99) — Implement shared directory acquisition and provenance
+### [GitHub #100](https://github.com/alee792/hctl/issues/100) — Add the Agent Plugin consumer workflow
 
-Implement ADR 0035's bounded, component-neutral foundation for exact local
-directories, resolved HTTPS Git commits, and digest-pinned HTTPS archives. It
-must materialize complete Plugin or Skill candidates, retain deterministic
-tree identity in `hctl-dependencies.json`, enforce trust and drift, and publish
-source plus provenance atomically without changing either component format.
-
-Keep this slice below the public Plugin and Skill command families owned by
-#100 and #101. Expose narrow validators/hooks and prove local/remote source,
-pinning, path safety, bounds, concurrency, recovery, and offline verification
-without acquiring credentials or executing dependency code.
+Bind the landed shared acquisition engine to the exact `hctl plugin add`,
+`status`, `update`, and `remove` syntax accepted by ADR 0035. Preserve the
+publisher's complete Plugin directory and existing manifest, Skill, MCP,
+collision, native-generation, staging, trust, and manual-Plugin behavior. Keep
+the command adapter free of provider branches, credentials, dependency
+execution, marketplaces, and Skill-command behavior owned by #101.
 
 ## Ready for human
 
@@ -43,6 +39,32 @@ with a temporary least-privilege bot credential and retain only bounded
 redacted evidence.
 
 ## Completed
+
+### [GitHub #99](https://github.com/alee792/hctl/issues/99) — Implement shared directory acquisition and provenance
+
+**Outcome:** Added one component-neutral non-CLI engine for exact local
+directories, resolved HTTPS Git commits without checkout behavior, and direct
+digest-pinned HTTPS ZIP or TAR.GZ archives. Complete bounded trees receive the
+exact `hctl-dependency-tree-v1` identity and closed deterministic
+`hctl-dependencies.json` provenance. Add, status, update, and removal primitives
+serialize with all project readers, retain a bounded recovery journal, preflight
+existing component collisions through narrow Plugin and Skill hooks, expose a
+bounded trust summary, and never fetch or execute during load or status.
+
+**Evidence:** Golden lock and tree fixtures cover exact bytes, empty
+directories, executable modes, binary resources, duplicate/unknown fields,
+hard links, and Unicode 15 canonical-caseless collisions. Credential-free local,
+loopback-TLS Git, ZIP, and TAR.GZ fixtures cover pinning, redirect and digest
+rejection, Plugin and Skill source equivalence, moving refs, helper-output
+suppression, committed-blob materialization despite export attributes, unsafe
+archive classes, and checkout exclusion. Project tests cover
+offline fresh-source loading, full captured source snapshots and fingerprints,
+prospective full-project validation, drift and missing status, manual coexistence,
+opaque `skills-lock.json`, update no-ops and rollback, collision preflight, trust
+cancellation, destructive removal, concurrent readers, interrupted-publication
+recovery, manifest/lock identity, aggregate status bounds, and fresh Claude and
+Codex apply of an executable Plugin MCP server and Plugin/Skill resources without
+the original source.
 
 ### [GitHub #98](https://github.com/alee792/hctl/issues/98) — Specify acquired Agent Plugin and Agent Skill dependency semantics
 

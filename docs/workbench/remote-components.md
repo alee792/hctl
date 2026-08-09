@@ -2,8 +2,8 @@
 
 - Status: the outcome-level direction is accepted in `docs/vision.md`; the
   standalone MCP source and command contract is implemented through ADR 0034
-  and #97, while the Plugin and Skill acquisition contract is accepted in ADR
-  0035 and awaits #99–#101 implementation
+  and #97, and ADR 0035's shared Plugin and Skill acquisition foundation is
+  implemented through #99 while #100 and #101 still own public commands
 - Started: 2026-08-08
 - Purpose: retain the product-model questions and proposed journeys behind
   the filed GitHub issues until their contracts are accepted in the product
@@ -41,7 +41,9 @@ runtime, credential, and ownership questions, so this note keeps them separate.
   removed. The external channel-adapter host now provides a second capability
   on the generic installed-package envelope without a vendor switch in hctl
   core.
-- Hctl does not currently acquire or update Agent Plugins or Agent Skills.
+- Hctl now contains shared non-CLI acquisition, provenance, update, removal,
+  status, and project-load verification primitives. It does not yet expose the
+  public Agent Plugin or Agent Skill command families.
 
 ## Filesystem model
 
@@ -122,9 +124,10 @@ Therefore:
   `plugin.json` merely to consume the plugin.
 - `plugins/` vendoring is hctl's current dependency decision, not a requirement
   of the Agent Plugins specification.
-- Manual replacement is the only currently implemented hctl update path. ADR
-  0035 defines the client-owned automated replacement contract; that remains a
-  product gap until #99–#101 land, not behavior prescribed by the specification.
+- Manual replacement is the only currently exposed hctl update path. ADR 0035
+  defines the client-owned automated replacement contract; its shared engine
+  is implemented, while the public #100 and #101 journeys remain a product gap,
+  not behavior prescribed by the specification.
 
 Issue #96 updates the README, product specification, and glossary to show the
 publisher and consumer roles explicitly. Those canonical documents now state
@@ -181,14 +184,14 @@ their existing behavior.
   contract.
 - #98 accepted the shared acquired-dependency contract for Agent Plugins and
   Skills in ADR 0035.
-- #99 owns acquisition, provenance, drift, and replacement mechanics and is the
-  next implementation slice.
-- #100 owns the Agent Plugin consumer commands and is blocked on #99.
-- #101 owns the Agent Skill consumer commands and is blocked on #99.
+- #99 completed acquisition, provenance, drift, and replacement mechanics.
+- #100 owns the Agent Plugin consumer commands and is the next implementation
+  slice.
+- #101 owns the Agent Skill consumer commands and follows the same landed
+  foundation.
 
-Issue #99 may become `ready-for-agent` from ADR 0035's accepted contract.
-Issues #100 and #101 remain dependency-blocked until the shared foundation
-lands and their exact public command implementation surfaces are reconciled.
+Issues #100 and #101 can now leave dependency-blocked triage after their exact
+public command surfaces are reconciled with the landed shared interfaces.
 
 ## Questions settled by ADR 0035
 
@@ -208,10 +211,10 @@ lands and their exact public command implementation surfaces are reconciled.
 
 ## Implementation-ticket gate
 
-ADR 0034 satisfied this gate for completed #97. ADR 0035 now satisfies it for
-the shared #99 foundation. #100 and #101 remain blocked on #99 so their public
-component-specific command implementation can be checked against the landed
-shared interfaces rather than guessed in parallel.
+ADR 0034 satisfied this gate for completed #97. ADR 0035 and #99 now satisfy it
+for the shared dependency foundation. #100 and #101 can bind their public
+component-specific commands to the landed interfaces without duplicating
+source, trust, provenance, locking, drift, or recovery mechanics.
 
 ### Accepted first delivery boundary
 

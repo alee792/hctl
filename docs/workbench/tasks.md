@@ -17,7 +17,16 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-No agent-ready work remains in the process-isolated integration initiative.
+### [GitHub #96](https://github.com/alee792/hctl/issues/96) — Clarify Agent Plugin publisher and consumer journeys
+
+Clarify in the README, product specification, and glossary that a publisher
+authors the complete Agent Plugin directory and its `plugin.json`, while a
+consumer acquires that directory without reconstructing its manifest. State
+that the Agent Plugins specification does not define installation, vendoring,
+or updates, and document hctl's current manual local-copy behavior without
+changing it. Read the [remote components design notes](remote-components.md)
+first. This documentation-only correction must not implement the unsettled
+acquisition and update contracts in #98 through #101.
 
 ## Ready for human
 

@@ -293,7 +293,8 @@ are also intentionally unresolved.
 
 Generic MCP connections and remote Agent Plugin and Agent Skill acquisition,
 provenance, trust, and update questions are tracked in the
-[remote components design notes](remote-components.md).
+[remote components design notes](remote-components.md) and
+[GitHub epic #95](https://github.com/alee792/hctl/issues/95).
 
 ## Current design frontier
 

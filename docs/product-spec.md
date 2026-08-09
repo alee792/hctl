@@ -136,24 +136,44 @@ isolated with authored-path diagnostics. See
 
 The `skills/` directory is optional. Each visible immediate directory is one
 skill and contains a required `SKILL.md`; its frontmatter `name` must match the
-directory name. A skill follows the open Agent Skills format and may include
-regular-file resources such as `scripts/`, `references/`, `assets/`, and other
-nested directories. Adding or removing a skill directory updates the compiled
-project without separate registration. Root and imported skills share the
-aggregate ceilings above.
+directory name. A skill follows the open
+[Agent Skills specification](https://agentskills.io/specification) and may
+include regular-file resources such as `scripts/`, `references/`, `assets/`,
+and other nested directories. Adding or removing a skill directory updates the
+compiled project without separate registration. Root and imported skills share
+the aggregate ceilings above.
 
-The optional `plugins/` directory vendors Agent Plugins v1 dependencies. Each
-visible immediate real directory is one plugin with a required bounded
-`plugin.json` targeting the exact canonical v1.0.0 schema identifier. The
-directory may contain at most 128 entries, and each plugin `skills/` location at
-most 1,024 entries before the merged 256-skill limit applies. Hctl
-validates that schema locally without fetching it. Manifest violations reject
-only that plugin; unsupported top-level fields, non-object `extensions` values,
-and every unsupported extension namespace are ignored with warnings. Namespace
-values are not validated. Hctl imports Agent Skills only from immediate real
-directories beneath the plugin's fixed `skills/` location. A missing `plugins/`
-directory, a missing plugin `skills/` directory, and empty component locations
-are normal.
+An [Agent Plugin v1](https://agent-plugins.org/specification) is one complete
+publisher-authored directory package. Its publisher supplies `plugin.json` and
+any conventional components; a consumer does not reconstruct that manifest or
+manufacture a wrapper Plugin merely to use an existing package. The
+specification defines the package layout and conformant client behavior. It
+does not prescribe a universal distribution source, install command,
+marketplace, registry, vendoring rule, or update workflow.
+
+Hctl's current consumer contract is manual local source placement. After
+obtaining and reviewing a complete Plugin directory, the consumer copies it
+intact beneath `plugins/<storage-name>/` and reapplies the agent. The storage
+directory name is only hctl source organization; `plugin.json` supplies Plugin
+identity and need not use the same name. Hctl has no Plugin acquisition, add,
+update, or remove command. Updating currently means the consumer manually
+replaces the complete local directory and reapplies. Automated consumer
+operations are planned under
+[GitHub epic #95](https://github.com/alee792/hctl/issues/95), but their source,
+pinning, provenance, drift, and replacement contracts are not yet part of this
+specification.
+
+Each visible immediate real directory beneath `plugins/` is one plugin with a
+required bounded `plugin.json` targeting the exact canonical v1.0.0 schema
+identifier. The directory may contain at most 128 entries, and each plugin
+`skills/` location at most 1,024 entries before the merged 256-skill limit
+applies. Hctl validates that schema locally without fetching it. Manifest
+violations reject only that plugin; unsupported top-level fields, non-object
+`extensions` values, and every unsupported extension namespace are ignored
+with warnings. Namespace values are not validated. Hctl imports Agent Skills
+only from immediate real directories beneath the plugin's fixed `skills/`
+location. A missing `plugins/` directory, a missing plugin `skills/` directory,
+and empty component locations are normal.
 
 Root `skills/` load first. Plugin and component directories load in lexical
 order. The first skill name wins; later collisions are skipped with a warning
@@ -174,7 +194,10 @@ component; an invalid server disables only itself. Hctl supports `stdio` and
 `streamable-http`; valid SSE declarations warn and are skipped. Plugin
 directories and server names are processed lexically. The first exact server
 name wins, `managed` is reserved for hctl, and collisions are skipped without
-renaming.
+renaming. This Plugin-bundled MCP declaration remains inside the complete
+publisher-authored package. It is distinct from a standalone connection under
+`connections/`; hctl neither synthesizes a connection file from `mcp.json` nor
+requires a consumer to wrap a standalone connection in `plugin.json`.
 
 A stdio command is one bare executable name or a plugin-relative `./` path.
 Plugin-relative commands and plugin-root working directories must remain within

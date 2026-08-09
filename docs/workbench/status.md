@@ -199,9 +199,12 @@ a generated custom subagent, and session resume in a fresh external workspace.
   protocol ceilings; generated MCP configuration is bounded consistently with
   later verification. [ADR 0029](../adr/0029-bound-authored-projects-with-aggregate-budgets.md)
   records the decision.
-- Agent Plugins v1 directories may be vendored beneath `plugins/`. Hctl validates
-  each local manifest without a schema fetch, imports its fixed Agent Skills
-  component, and maps supported optional MCP declarations into native harness
+- Complete publisher-authored Agent Plugins v1 directories may be copied intact
+  beneath `plugins/`. This local vendoring and manual replacement are hctl's
+  current consumer behavior, not distribution rules from the specification;
+  hctl has no Plugin acquisition or update commands. Hctl validates each local
+  manifest without a schema fetch, imports its fixed Agent Skills component,
+  and maps supported optional MCP declarations into native harness
   configuration. Root skills and earlier plugin/server sources win deterministic
   name collisions; invalid components warn without suppressing independent
   valid components. Plugin MCP remains native and unmanaged by hctl.

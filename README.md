@@ -23,7 +23,7 @@ my-agent/
     research/
       SKILL.md
   plugins/
-    review-pack/
+    review-pack/              # complete publisher-authored package
       plugin.json
       mcp.json
       bin/
@@ -65,19 +65,36 @@ Read the project guidance before changing behavior.
 ```
 
 The directory name becomes the agent name, normalized to lowercase words with
-hyphens. Each skill follows the open Agent Skills layout: a named directory
-containing `SKILL.md` and optional scripts, references, assets, or other
-resources. Adding a skill directory makes it available on the next apply;
-there is no registration file to update. Standards-shaped dependencies can be
-vendored as Agent Plugins v1 directories under `plugins/`; hctl validates each
-local `plugin.json`, imports skills from its fixed `skills/` location, and maps
-valid `stdio` or `streamable-http` declarations from optional `mcp.json` into
-native project MCP configuration. Root skills and earlier server declarations
-win name collisions. Invalid plugin components warn and remain isolated. Hctl
-does not operate plugin servers or install or update packages, contact a
-marketplace, carry credentials, or interpret client extensions. TypeScript,
-Python, and Go tool functions under `tools/` are exposed through the same
-managed MCP server.
+hyphens. Each skill follows the open
+[Agent Skills specification](https://agentskills.io/specification): a named
+directory containing `SKILL.md` and optional scripts, references, assets, or
+other resources. Adding a skill directory makes it available on the next
+apply; there is no registration file to update.
+
+An [Agent Plugin v1](https://agent-plugins.org/specification) is a complete
+directory package authored by its publisher, including its `plugin.json` and
+any conventional components. To consume an existing Plugin with hctl today,
+review and copy that complete directory intact beneath
+`plugins/<storage-name>/`; do not recreate its manifest or manufacture a
+wrapper Plugin. The storage directory name is local organization only; the
+publisher's manifest supplies Plugin identity. The specification standardizes
+the package and client contract, but does not prescribe a universal source,
+install command, marketplace, registry, vendoring rule, or update workflow.
+Hctl does not yet acquire, add, update, or remove Plugin source: the consumer
+manually places and replaces the complete local directory and reapplies the
+agent. Those automated consumer operations are planned under
+[GitHub epic #95](https://github.com/alee792/hctl/issues/95).
+
+Hctl validates each local `plugin.json`, imports skills from its fixed
+`skills/` location, and maps valid `stdio` or `streamable-http` declarations
+from optional `mcp.json` into native project MCP configuration. Root skills and
+earlier server declarations win name collisions. Invalid plugin components
+warn and remain isolated. Plugin-bundled MCP remains part of the complete
+publisher-authored package; a standalone connection is authored separately and
+does not require a wrapper `plugin.json`. Hctl does not operate plugin servers,
+contact a marketplace, carry credentials, or interpret client extensions.
+TypeScript, Python, and Go tool functions under `tools/` are exposed through
+the same managed MCP server.
 Immediate subagents inherit their parent's generated skills and tools through
 the native harness. A subagent may optionally request portable reasoning effort
 in its `instructions.md` frontmatter:

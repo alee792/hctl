@@ -339,8 +339,8 @@ func (s *Store) locked(ctx context.Context, operation func() error) error {
 }
 
 func (s *Store) loadInstalled(id string) (Installed, bool, error) {
-	if !packageIDPattern.MatchString(id) || len(id) > 128 {
-		return Installed{}, false, errors.New("integration package id is invalid")
+	if err := ValidatePackageID(id); err != nil {
+		return Installed{}, false, err
 	}
 	data, mode, found, err := rootfs.ReadOptional(s.root, "installed/"+id+".json", maxManifestBytes)
 	if err != nil || !found {

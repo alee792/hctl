@@ -41,6 +41,7 @@ my-agent/
       instructions.md
   connections/
     github.md
+    public-catalog.md
   channels/
     discord.md
   schedules/
@@ -117,13 +118,48 @@ that are intentionally not portable can be mirrored under
 harness receives them. Hctl copies those files literally and owns their
 workspace copies, but does not merge, validate, or promise that the harness
 honors their contents. Generated skills, subagents, and MCP configuration stay
-reserved for hctl. Do not put credentials in authored harness files. A bounded
-Markdown description at `connections/github.md` requests an operator-installed
-copy of GitHub's official MCP server through native Claude Code or Codex project
-configuration. The harness discovers the live tool catalog and the server reads
-an ambient `GITHUB_PERSONAL_ACCESS_TOKEN`; hctl does not read or persist the
-value and does not filter, confirm, authorize, or audit native GitHub effects.
-Native Git and `gh` authentication remain separately operator-owned. See the
+reserved for hctl. Do not put credentials in authored harness files.
+
+A standalone native MCP connection is one bounded
+`connections/<name>.md` file. Frontmatter selects either an exact
+operator-installed `native-mcp` package capability or one credential-free
+HTTPS Streamable HTTP endpoint; optional Markdown gives the agent additional
+usage context. For example:
+
+```md
+---
+type: mcp
+package: github-mcp-server
+capability: github
+---
+
+Use the discovered GitHub tools for repository and pull-request work.
+```
+
+Non-developers can author the same source without editing YAML or native
+harness configuration:
+
+```sh
+hctl connection add ./my-agent github \
+  --package github-mcp-server --capability github \
+  --context "Use the discovered GitHub tools for repository work."
+hctl connection add ./my-agent public-catalog \
+  --url https://example.com/mcp
+hctl connection status ./my-agent
+```
+
+These commands do not install packages, contact remote endpoints, choose a
+harness, or implicitly apply a workspace. Apply the agent explicitly, and use
+`hctl connection remove ./my-agent NAME` before reapplying to remove a native
+entry. Remote v1 has no header, credential, or OAuth fields. Claude Code or
+Codex owns native startup, trust, approval, authentication, discovery, calls,
+and effects.
+
+The GitHub example selects the operator-installed official server through this
+generic path. Its ambient `GITHUB_PERSONAL_ACCESS_TOKEN` remains native and
+unmanaged: hctl does not read or persist the value and does not filter,
+confirm, authorize, or audit native GitHub effects. Native Git and `gh`
+authentication remain separately operator-owned. See the
 [complete native GitHub MCP journey](docs/github-native-mcp.md),
 [minimal example](examples/minimal), [plugin example](examples/plugins),
 [public GitHub example](examples/github),

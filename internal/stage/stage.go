@@ -133,24 +133,34 @@ func Create(ctx context.Context, request Request) (Result, error) {
 	if request.Project == nil || request.HarnessVersion == "" {
 		return Result{}, errors.New("staging request is incomplete")
 	}
-	var nativeResolution integration.NativeMCPResolution
+	type nativeSelection struct {
+		connection project.Connection
+		resolution integration.NativeMCPResolution
+	}
+	var nativeSelections []nativeSelection
 	var nativeDescriptor []integration.NativeMCPLaunchDescriptor
 	var channelResolution integration.ChannelAdapterResolution
 	var channelArtifact integration.StagedArtifact
-	if request.Project.GitHubConnection != nil {
+	for _, connection := range request.Project.Connections {
+		if !connection.Installed() {
+			continue
+		}
 		if request.IntegrationStore == nil {
-			return Result{}, errors.New("GitHub connection requires the installed github-mcp-server package")
+			return Result{}, fmt.Errorf("%s: installed MCP connection requires an integration package store", connection.Path)
 		}
-		resolved, resolveErr := request.IntegrationStore.ResolveNativeMCP(ctx, "github-mcp-server", "github")
+		resolved, resolveErr := request.IntegrationStore.ResolveNativeMCP(ctx, connection.Package, connection.Capability)
 		if resolveErr != nil {
-			return Result{}, resolveErr
+			return Result{}, fmt.Errorf("%s: %w", connection.Path, resolveErr)
 		}
-		nativeResolution = resolved
-		descriptor, descriptorErr := nativeResolution.LaunchDescriptor(request.Project.Harness)
+		descriptor, descriptorErr := resolved.LaunchDescriptor(request.Project.Harness)
 		if descriptorErr != nil {
-			return Result{}, descriptorErr
+			return Result{}, fmt.Errorf("%s: %w", connection.Path, descriptorErr)
 		}
-		nativeDescriptor = []integration.NativeMCPLaunchDescriptor{descriptor}
+		if descriptor.ServerName != connection.Name {
+			return Result{}, fmt.Errorf("%s: installed native-mcp server name %q must equal connection name %q", connection.Path, descriptor.ServerName, connection.Name)
+		}
+		nativeSelections = append(nativeSelections, nativeSelection{connection: connection, resolution: resolved})
+		nativeDescriptor = append(nativeDescriptor, descriptor)
 	}
 	if request.Project.DiscordChannel != nil {
 		if request.IntegrationStore == nil {
@@ -195,25 +205,53 @@ func Create(ctx context.Context, request Request) (Result, error) {
 	if err := copyProjectSources(request.Project, temporary, strings.TrimPrefix(finalAgent, "/")); err != nil {
 		return Result{}, err
 	}
-	if len(nativeDescriptor) == 1 {
-		staged, stageErr := request.IntegrationStore.StageArtifacts(ctx, "github-mcp-server", []string{nativeResolution.Selection.Artifact.ID}, temporary)
-		if stageErr != nil {
-			return Result{}, stageErr
+	if len(nativeSelections) > 0 {
+		artifactIDs := map[string]map[string]bool{}
+		for _, selection := range nativeSelections {
+			packageID := selection.resolution.Selection.PackageID
+			if artifactIDs[packageID] == nil {
+				artifactIDs[packageID] = map[string]bool{}
+			}
+			artifactIDs[packageID][selection.resolution.Selection.Artifact.ID] = true
 		}
-		selected, found := stagedArtifact(staged, nativeResolution.Selection.Artifact.ID)
-		if !found {
-			return Result{}, errors.New("staged GitHub native MCP closure is incomplete")
+		packages := make([]string, 0, len(artifactIDs))
+		for packageID := range artifactIDs {
+			packages = append(packages, packageID)
 		}
-		canonicalResolutionRoot, canonicalErr := rootfs.CanonicalDir(nativeResolution.Root)
-		if canonicalErr != nil {
-			return Result{}, errors.New("GitHub native MCP artifact root cannot be staged safely")
+		sort.Strings(packages)
+		stagedArtifacts := map[string]integration.StagedArtifact{}
+		for _, packageID := range packages {
+			ids := make([]string, 0, len(artifactIDs[packageID]))
+			for id := range artifactIDs[packageID] {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			staged, stageErr := request.IntegrationStore.StageArtifacts(ctx, packageID, ids, temporary)
+			if stageErr != nil {
+				return Result{}, stageErr
+			}
+			for _, artifact := range staged {
+				stagedArtifacts[packageID+"\x00"+artifact.Artifact.ID] = artifact
+			}
 		}
-		relativeWorkingDirectory, relativeErr := filepath.Rel(canonicalResolutionRoot, nativeDescriptor[0].WorkingDirectory)
-		if relativeErr != nil || relativeWorkingDirectory == ".." || strings.HasPrefix(relativeWorkingDirectory, ".."+string(filepath.Separator)) {
-			return Result{}, errors.New("GitHub native MCP working directory cannot be staged safely")
+		for index, selection := range nativeSelections {
+			packageID := selection.resolution.Selection.PackageID
+			artifactID := selection.resolution.Selection.Artifact.ID
+			selected, found := stagedArtifacts[packageID+"\x00"+artifactID]
+			if !found {
+				return Result{}, fmt.Errorf("%s: staged native MCP closure is incomplete", selection.connection.Path)
+			}
+			canonicalResolutionRoot, canonicalErr := rootfs.CanonicalDir(selection.resolution.Root)
+			if canonicalErr != nil {
+				return Result{}, fmt.Errorf("%s: native MCP artifact root cannot be staged safely", selection.connection.Path)
+			}
+			relativeWorkingDirectory, relativeErr := filepath.Rel(canonicalResolutionRoot, nativeDescriptor[index].WorkingDirectory)
+			if relativeErr != nil || relativeWorkingDirectory == ".." || strings.HasPrefix(relativeWorkingDirectory, ".."+string(filepath.Separator)) {
+				return Result{}, fmt.Errorf("%s: native MCP working directory cannot be staged safely", selection.connection.Path)
+			}
+			nativeDescriptor[index].Command = selected.Executable
+			nativeDescriptor[index].WorkingDirectory = filepath.Clean(filepath.Join(selected.Root, relativeWorkingDirectory))
 		}
-		nativeDescriptor[0].Command = selected.Executable
-		nativeDescriptor[0].WorkingDirectory = filepath.Clean(filepath.Join(selected.Root, relativeWorkingDirectory))
 	}
 	if channelResolution.Selection.Capability.ID != "" {
 		staged, stageErr := request.IntegrationStore.StageArtifacts(ctx, channelResolution.Selection.PackageID, []string{channelResolution.Selection.Artifact.ID}, temporary)

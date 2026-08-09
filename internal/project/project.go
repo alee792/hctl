@@ -31,6 +31,7 @@ import (
 	cronlib "github.com/robfig/cron/v3"
 	"go.yaml.in/yaml/v3"
 
+	"hctl/internal/integration"
 	"hctl/internal/rootfs"
 	"hctl/internal/tool"
 	"hctl/internal/version"
@@ -51,6 +52,7 @@ const (
 	maxHarnessFiles       = 1024
 	maxHarnessFileBytes   = 1 << 20
 	maxHarnessBytes       = 8 << 20
+	maxConnections        = 128
 	maxConnectionBytes    = 8 << 10
 	maxChannelBytes       = 8 << 10
 	maxSchedules          = 256
@@ -64,9 +66,10 @@ const (
 var GeneratorVersion = "hctl/" + version.Value
 
 var (
-	portableName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-	skillName    = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
-	pluginName   = regexp.MustCompile(`^(?:[a-z0-9]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9]))$`)
+	portableName   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	skillName      = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	pluginName     = regexp.MustCompile(`^(?:[a-z0-9]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9]))$`)
+	connectionName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 )
 
 const pluginSchema = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
@@ -139,11 +142,19 @@ type Subagent struct {
 	Source       []byte
 }
 
-type GitHubConnection struct {
-	Description string
-	Path        string
-	Source      []byte
+type Connection struct {
+	Name       string
+	Package    string
+	Capability string
+	Transport  string
+	URL        string
+	Context    string
+	Path       string
+	Source     []byte
 }
+
+func (connection Connection) Installed() bool { return connection.Package != "" }
+func (connection Connection) Remote() bool    { return connection.URL != "" }
 
 type DiscordChannel struct {
 	Mode   string
@@ -195,7 +206,7 @@ type Project struct {
 	Diagnostics       []Diagnostic
 	Subagents         []Subagent
 	HarnessFiles      []File
-	GitHubConnection  *GitHubConnection
+	Connections       []Connection
 	DiscordChannel    *DiscordChannel
 	Schedules         []Schedule
 	Tools             tool.Inventory
@@ -308,9 +319,16 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 	if err != nil {
 		return nil, err
 	}
-	githubConnection, err := loadGitHubConnection(sourceRoot)
+	connections, err := loadConnections(sourceRoot)
 	if err != nil {
 		return nil, err
+	}
+	for _, connection := range connections {
+		for _, server := range pluginMCPServers {
+			if connection.Name == server.Name {
+				return nil, fmt.Errorf("%s: standalone MCP connection name %q collides with an authored plugin server", connection.Path, connection.Name)
+			}
+		}
 	}
 	discordChannel, err := loadDiscordChannel(sourceRoot)
 	if err != nil {
@@ -351,8 +369,8 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 			Executable: file.Executable,
 		})
 	}
-	if githubConnection != nil {
-		sources = append(sources, SourceRecord{Path: githubConnection.Path, SHA256: rootfs.SHA256(githubConnection.Source)})
+	for _, connection := range connections {
+		sources = append(sources, SourceRecord{Path: connection.Path, SHA256: rootfs.SHA256(connection.Source)})
 	}
 	if discordChannel != nil {
 		sources = append(sources, SourceRecord{Path: discordChannel.Path, SHA256: rootfs.SHA256(discordChannel.Source)})
@@ -388,7 +406,7 @@ func load(source, harness, logicalName string, workspace ...string) (*Project, e
 		Diagnostics:       diagnostics,
 		Subagents:         subagents,
 		HarnessFiles:      harnessFiles,
-		GitHubConnection:  githubConnection,
+		Connections:       connections,
 		DiscordChannel:    discordChannel,
 		Schedules:         schedules,
 		Tools:             tools,
@@ -611,40 +629,285 @@ func parseDiscordChannel(source []byte) (string, []byte, error) {
 	return mode, []byte(policy + "\n"), nil
 }
 
-func loadGitHubConnection(root string) (*GitHubConnection, error) {
+func loadConnections(root string) ([]Connection, error) {
 	directory := filepath.Join(root, "connections")
 	info, err := os.Lstat(directory)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return []Connection{}, nil
 	}
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("connections must be a real directory")
 	}
-	entries, err := os.ReadDir(directory)
+	entries, err := readDirectory(directory, maxConnections)
 	if err != nil {
-		return nil, errors.New("cannot read connections directory")
+		return nil, fmt.Errorf("connections: %w", err)
 	}
+	connections := make([]Connection, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Name() != "github.md" {
-			return nil, fmt.Errorf("connections supports github.md only; found %q", entry.Name())
+		entryInfo, err := entry.Info()
+		if err != nil || !entryInfo.Mode().IsRegular() || entryInfo.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("connections/%s must be a real regular file without symlinks", entry.Name())
+		}
+		if filepath.Ext(entry.Name()) != ".md" {
+			return nil, fmt.Errorf("connections supports Markdown files only; found %q", entry.Name())
+		}
+		name := strings.TrimSuffix(entry.Name(), ".md")
+		if !ValidConnectionName(name) {
+			return nil, fmt.Errorf("connections/%s: connection name must match ^[a-z][a-z0-9_-]{0,63}$ and must not be reserved", entry.Name())
+		}
+		path := "connections/" + entry.Name()
+		source, err := rootfs.ReadSource(root, path, maxConnectionBytes)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		connection, err := parseConnection(name, path, source)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		connections = append(connections, connection)
+	}
+	return connections, nil
+}
+
+// LoadConnections validates an exact agent root and returns its standalone MCP
+// inventory without selecting a harness or workspace.
+func LoadConnections(root string) (string, []Connection, error) {
+	canonical, err := AgentRoot(root)
+	if err != nil {
+		return "", nil, err
+	}
+	connections, err := loadConnections(canonical)
+	if err != nil {
+		return "", nil, err
+	}
+	return canonical, connections, nil
+}
+
+// AgentRoot proves that root is the exact selected agent directory. It never
+// searches ancestors, infers an agents directory, or selects a harness.
+func AgentRoot(root string) (string, error) {
+	canonical, err := rootfs.CanonicalDir(root)
+	if err != nil {
+		return "", err
+	}
+	instructions, err := rootfs.ReadSource(canonical, "instructions.md", maxSourceBytes)
+	if err != nil {
+		return "", fmt.Errorf("instructions: %w", err)
+	}
+	if _, _, _, err := parseInstructions(instructions); err != nil {
+		return "", fmt.Errorf("instructions: %w", err)
+	}
+	return canonical, nil
+}
+
+// LoadConnection reads one exact authored source without requiring other
+// connection files to be healthy.
+func LoadConnection(root, name string) (string, Connection, error) {
+	canonical, err := AgentRoot(root)
+	if err != nil {
+		return "", Connection{}, err
+	}
+	if !ValidConnectionName(name) {
+		return "", Connection{}, errors.New("connection name must match ^[a-z][a-z0-9_-]{0,63}$ and must not be reserved")
+	}
+	path := "connections/" + name + ".md"
+	source, err := rootfs.ReadSource(canonical, path, maxConnectionBytes)
+	if err != nil {
+		return "", Connection{}, fmt.Errorf("%s: %w", path, err)
+	}
+	connection, err := parseConnection(name, path, source)
+	if err != nil {
+		return "", Connection{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return canonical, connection, nil
+}
+
+func NewInstalledConnection(name, packageID, capabilityID, context string) (Connection, error) {
+	if !ValidConnectionName(name) {
+		return Connection{}, errors.New("connection name must match ^[a-z][a-z0-9_-]{0,63}$ and must not be reserved")
+	}
+	source := "---\ntype: mcp\npackage: " + packageID + "\ncapability: " + capabilityID + "\n---\n"
+	if context = strings.TrimSpace(context); context != "" {
+		source += "\n" + context + "\n"
+	}
+	return parseConnection(name, "connections/"+name+".md", []byte(source))
+}
+
+func NewRemoteConnection(name, endpoint, context string) (Connection, error) {
+	if !ValidConnectionName(name) {
+		return Connection{}, errors.New("connection name must match ^[a-z][a-z0-9_-]{0,63}$ and must not be reserved")
+	}
+	source := "---\ntype: mcp\ntransport: streamable-http\nurl: " + endpoint + "\n---\n"
+	if context = strings.TrimSpace(context); context != "" {
+		source += "\n" + context + "\n"
+	}
+	return parseConnection(name, "connections/"+name+".md", []byte(source))
+}
+
+// ValidateConnectionNameAvailable rejects collisions with existing standalone
+// sources and accepted Plugin MCP declarations without selecting a harness.
+func ValidateConnectionNameAvailable(root, name string) error {
+	if !ValidConnectionName(name) {
+		return errors.New("connection name must match ^[a-z][a-z0-9_-]{0,63}$ and must not be reserved")
+	}
+	connections, err := loadConnections(root)
+	if err != nil {
+		return err
+	}
+	for _, connection := range connections {
+		if connection.Name == name {
+			return fmt.Errorf("%s already exists", connection.Path)
 		}
 	}
-	if len(entries) == 0 {
-		return nil, nil
-	}
-	path := "connections/github.md"
-	source, err := rootfs.ReadSource(root, path, maxConnectionBytes)
+	names, err := acceptedPluginMCPNames(root)
 	if err != nil {
-		return nil, fmt.Errorf("GitHub connection: %w", err)
+		return err
+	}
+	if names[name] {
+		return fmt.Errorf("connection name %q collides with an authored plugin server", name)
+	}
+	return nil
+}
+
+func acceptedPluginMCPNames(root string) (map[string]bool, error) {
+	result := map[string]bool{"managed": true}
+	directory := filepath.Join(root, "plugins")
+	info, err := os.Lstat(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return result, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("plugins must be a real directory")
+	}
+	entries, err := readDirectory(directory, maxPlugins)
+	if err != nil {
+		return nil, fmt.Errorf("plugins: %w", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		entryInfo, err := entry.Info()
+		if err != nil || !entryInfo.IsDir() || entryInfo.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("plugins may contain real plugin directories only; found %q", entry.Name())
+		}
+		pluginPath := "plugins/" + entry.Name()
+		manifest, err := rootfs.ReadSource(root, pluginPath+"/plugin.json", maxSourceBytes)
+		if err != nil {
+			continue
+		}
+		if _, err := validatePluginManifest(pluginPath+"/plugin.json", manifest); err != nil {
+			continue
+		}
+		servers, _, _ := loadPluginMCP(root, pluginPath)
+		for _, server := range servers {
+			if !result[server.Name] {
+				result[server.Name] = true
+			}
+		}
+	}
+	return result, nil
+}
+
+func ValidConnectionName(name string) bool {
+	return name != "managed" && connectionName.MatchString(name)
+}
+
+func parseConnection(name, path string, source []byte) (Connection, error) {
+	if len(source) > maxConnectionBytes {
+		return Connection{}, fmt.Errorf("connection file must contain at most %d bytes", maxConnectionBytes)
 	}
 	if !utf8.Valid(source) {
-		return nil, errors.New("GitHub connection description must be valid UTF-8")
+		return Connection{}, errors.New("connection file must be valid UTF-8")
 	}
-	description := strings.TrimSpace(string(source))
-	if description == "" || len([]rune(description)) > 1024 {
-		return nil, errors.New("GitHub connection description must contain 1-1024 characters")
+	lines := bytes.Split(source, []byte("\n"))
+	if len(lines) == 0 || string(bytes.TrimSuffix(lines[0], []byte("\r"))) != "---" {
+		return Connection{}, errors.New("connection must start with YAML frontmatter declaring \"type: mcp\" and one supported target; body-only connection files are no longer supported")
 	}
-	return &GitHubConnection{Description: description, Path: path, Source: source}, nil
+	closing := -1
+	for index := 1; index < len(lines); index++ {
+		line := string(bytes.TrimSuffix(lines[index], []byte("\r")))
+		if line == "..." {
+			return Connection{}, errors.New("connection frontmatter must contain one YAML document")
+		}
+		if line == "---" {
+			closing = index
+			break
+		}
+	}
+	if closing < 0 {
+		return Connection{}, errors.New("connection frontmatter is not closed")
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(bytes.Join(lines[1:closing], []byte("\n"))))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return Connection{}, errors.New("connection frontmatter must be valid YAML")
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return Connection{}, errors.New("connection frontmatter must contain one YAML document")
+	}
+	if err := validateYAMLTree(&document); err != nil {
+		return Connection{}, fmt.Errorf("connection frontmatter: %w", err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode || document.Content[0].Tag != "!!map" {
+		return Connection{}, errors.New("connection frontmatter must be a plain YAML mapping")
+	}
+	fields := map[string]string{}
+	root := document.Content[0]
+	for index := 0; index < len(root.Content); index += 2 {
+		key := root.Content[index].Value
+		value, err := yamlString(root.Content[index+1], key)
+		if err != nil {
+			return Connection{}, err
+		}
+		fields[key] = value
+	}
+	if fields["type"] != "mcp" {
+		return Connection{}, errors.New("connection frontmatter field \"type\" must equal \"mcp\"")
+	}
+	connection := Connection{Name: name, Path: path, Source: source}
+	switch {
+	case len(fields) == 3 && fields["package"] != "" && fields["capability"] != "":
+		if integration.ValidatePackageID(fields["package"]) != nil {
+			return Connection{}, errors.New("connection frontmatter field \"package\" is invalid")
+		}
+		if integration.ValidateCapabilityID(fields["capability"]) != nil {
+			return Connection{}, errors.New("connection frontmatter field \"capability\" is invalid")
+		}
+		for key := range fields {
+			if key != "type" && key != "package" && key != "capability" {
+				return Connection{}, fmt.Errorf("connection frontmatter field %q is not supported", key)
+			}
+		}
+		connection.Package, connection.Capability = fields["package"], fields["capability"]
+	case len(fields) == 3 && fields["transport"] == "streamable-http" && fields["url"] != "":
+		for key := range fields {
+			if key != "type" && key != "transport" && key != "url" {
+				return Connection{}, fmt.Errorf("connection frontmatter field %q is not supported", key)
+			}
+		}
+		if err := validateConnectionURL(fields["url"]); err != nil {
+			return Connection{}, err
+		}
+		connection.Transport, connection.URL = fields["transport"], fields["url"]
+	default:
+		return Connection{}, errors.New("connection frontmatter must contain exactly type plus package/capability or transport/url")
+	}
+	body := strings.TrimSpace(string(bytes.Join(lines[closing+1:], []byte("\n"))))
+	if len([]rune(body)) > 1024 {
+		return Connection{}, errors.New("connection Markdown context must contain at most 1024 characters")
+	}
+	connection.Context = body
+	return connection, nil
+}
+
+func validateConnectionURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || !parsed.IsAbs() || parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return errors.New("connection frontmatter field \"url\" must be an absolute HTTPS URL with a host and no user information, query, or fragment")
+	}
+	return nil
 }
 
 func loadHarnessFiles(root, harness string) ([]File, error) {

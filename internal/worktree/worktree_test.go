@@ -55,7 +55,7 @@ func TestGitHubDiscordWritablePromotionKeepsCurrentNativeMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeInstructions(t, repo)
-	writeWorktreeFile(t, filepath.Join(repo, "connections", "github.md"), "Use discovered GitHub tools.\n")
+	writeWorktreeFile(t, filepath.Join(repo, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nUse discovered GitHub tools.\n")
 	writeWorktreeFile(t, filepath.Join(repo, "channels", "discord.md"), "---\nmode: ambient\n---\n\nParticipate when useful.\n")
 	git(t, repo, "init", "--quiet")
 	git(t, repo, "config", "user.email", "hctl@example.invalid")
@@ -105,7 +105,7 @@ func TestGitHubDiscordWritablePromotionKeepsCurrentNativeMCP(t *testing.T) {
 	if secondConfig == firstConfig || !strings.Contains(secondConfig, storeExecutable(t, store)) {
 		t.Fatalf("reused writable worktree did not select current exact executable:\n%s", secondConfig)
 	}
-	if resolved.WorkspaceRoot != assignment.Root || resolved.DiscordChannel == nil || resolved.GitHubConnection == nil {
+	if resolved.WorkspaceRoot != assignment.Root || resolved.DiscordChannel == nil || len(resolved.Connections) != 1 {
 		t.Fatalf("combined relocated project = %#v", resolved)
 	}
 }

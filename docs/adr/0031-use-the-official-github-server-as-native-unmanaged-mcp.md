@@ -24,15 +24,15 @@ trust, and operator judgment are the security boundary for this delivery.
 
 ## Decision
 
-The conventional `connections/github.md` source requests capability id
-`github` from the stable integration package id `github-mcp-server`. The file
-continues to contain only its bounded model-facing Markdown description. It
-contains no credential value or reference, installed version, executable
-path, repository grant, tool allowlist, or approval decision. Its description
-remains model-facing connection guidance in generated instructions; it does not
-rewrite or freeze the official server's tool catalog or schemas. Installation,
-enablement, exact version selection, and operator trust are machine state owned
-by the package journey implemented by #76.
+As amended by ADR 0034, `connections/github.md` explicitly selects capability
+id `github` from stable integration package id `github-mcp-server` in closed
+frontmatter. Its optional bounded Markdown body remains model-facing connection
+guidance in generated instructions. The file contains no credential value or
+reference, installed version, executable path, repository grant, tool
+allowlist, or approval decision, and its body does not rewrite or freeze the
+official server's tool catalog or schemas. Installation, enablement, exact
+version selection, and operator trust are machine state owned by the package
+journey implemented by #76.
 
 The initial curated distribution selects official release `v1.8.0` for
 `darwin-arm64` and `linux-amd64`. Its checked manifest pins archive and
@@ -52,10 +52,11 @@ failures. The first hctl delivery selects only its PAT path: the server reads
 GitHub App modes are outside this delivery and remain follow-up #73.
 
 Hctl owns package preparation and verification, immutable selection evidence,
-selective runtime and staging closure, offline apply validation, deterministic
-collision checks, and native project configuration generation. Claude Code or
-Codex owns process startup and lifecycle, project trust, tool approval and
-discovery, calls and effects, cancellation, results, and runtime diagnostics.
+selective runtime and staging closure, offline package resolution during
+apply, deterministic collision checks, and native project configuration
+generation. Claude Code or Codex owns process startup and lifecycle, project
+trust, tool approval and discovery, calls and effects, cancellation, results,
+and runtime diagnostics.
 Hctl does not route this server through its managed MCP server and does not
 proxy, supervise, filter, authorize, confirm, retry, observe, normalize, or
 audit its calls.
@@ -122,8 +123,9 @@ harness's documented precedence and diagnostics govern collisions there.
 Apply fails with bounded, credential-free diagnostics when the requested
 package is absent, disabled, untrusted, incompatible, invalid for the target
 platform, missing its selected verified executable, or collides in the
-generated closure. Apply remains offline and does not require or resolve the
-ambient PAT. When the variable is missing or empty, the supported official
+generated closure. Connection discovery and package resolution during apply
+remain offline and do not require or resolve the ambient PAT. When the variable
+is missing or empty, the supported official
 server fails initialization with its bounded `authentication required`
 category, which may also name upstream OAuth or GitHub App alternatives that
 hctl does not configure in this delivery. Claude or Codex reports the native
@@ -199,8 +201,8 @@ does not satisfy, invoke, weaken, or replace the secretless broker decision.
 
 - The anonymous managed GitHub tools are superseded and will be removed when
   the native delivery is wired; they are not retained as an automatic fallback.
-- Agents without `connections/github.md` generate and stage no GitHub package
-  entry or runtime artifact.
+- Agents without an installed `github-mcp-server`/`github` connection generate
+  and stage no GitHub package entry or runtime artifact.
 - Package installation and preparation reuse #76; this specialization adds no
   GitHub-specific installer, cache, or downloader to hctl core and no credential
   store, broker, proxy, Git client, or GitHub API client anywhere.

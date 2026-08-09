@@ -78,6 +78,8 @@ type ChannelAdapterLaunchDescriptor struct {
 // literal manifest values; RequiredEnvironment contains names and descriptions
 // but never reads or resolves ambient values.
 type NativeMCPLaunchDescriptor struct {
+	PackageID           string
+	CapabilityID        string
 	ServerName          string
 	Command             string
 	Arguments           []string
@@ -386,6 +388,8 @@ func (resolved NativeMCPResolution) LaunchDescriptor(harness string) (NativeMCPL
 		environment[name] = value
 	}
 	return NativeMCPLaunchDescriptor{
+		PackageID:           resolved.Selection.PackageID,
+		CapabilityID:        resolved.Selection.Capability.ID,
 		ServerName:          resolved.Selection.Capability.ServerName,
 		Command:             resolved.Executable,
 		Arguments:           append([]string(nil), resolved.Selection.Capability.Arguments...),

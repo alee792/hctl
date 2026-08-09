@@ -143,7 +143,7 @@ func TestGitHubConnectionGeneratesExactNativeUnmanagedConfiguration(t *testing.T
 	for _, harness := range []string{"claude", "codex"} {
 		t.Run(harness, func(t *testing.T) {
 			root := testAgent(t)
-			write(t, filepath.Join(root, "connections", "github.md"), "Inspect GitHub issues through discovered native tools.\n")
+			write(t, filepath.Join(root, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nInspect GitHub issues through discovered native tools.\n")
 			p, err := project.Load(root, harness)
 			if err != nil {
 				t.Fatal(err)
@@ -160,7 +160,7 @@ func TestGitHubConnectionGeneratesExactNativeUnmanagedConfiguration(t *testing.T
 				configPath = filepath.Join(root, ".mcp.json")
 			}
 			instructions := read(t, instructionsPath)
-			for _, fragment := range []string{"Inspect GitHub issues", "discovered tools", "native and unmanaged", "does not filter, confirm, broker, or audit"} {
+			for _, fragment := range []string{"## Native MCP connections", "### github", "Inspect GitHub issues", "discovered native tools", "native harness owns MCP startup", "not sent to the upstream server"} {
 				if !strings.Contains(instructions, fragment) {
 					t.Fatalf("generated instructions omit %q: %s", fragment, instructions)
 				}
@@ -194,18 +194,89 @@ func TestGitHubConnectionGeneratesExactNativeUnmanagedConfiguration(t *testing.T
 	}
 }
 
-func TestGitHubNativeMCPRejectsCollisionsBeforeMutation(t *testing.T) {
+func TestGenericInstalledAndRemoteConnectionsRenderForBothHarnesses(t *testing.T) {
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			root := testAgent(t)
+			write(t, filepath.Join(root, "connections", "catalog.md"), "---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n\nUse the public catalog.\n")
+			write(t, filepath.Join(root, "connections", "fixture.md"), "---\ntype: mcp\npackage: fixture-package\ncapability: fixture\n---\n\nUse the local fixture.\n")
+			p, err := project.Load(root, harness)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifact := t.TempDir()
+			executable := filepath.Join(artifact, "server")
+			write(t, executable, "#!/bin/sh\nexit 0\n")
+			if err := os.Chmod(executable, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			descriptor := integration.NativeMCPLaunchDescriptor{
+				PackageID: "fixture-package", CapabilityID: "fixture", ServerName: "fixture",
+				Command: executable, Arguments: []string{"serve"}, WorkingDirectory: artifact,
+				Target: integration.NativeHarnessTarget{Name: harness, Startup: integration.StartupRequired, Trust: integration.TrustNativeProject},
+			}
+			if _, err := ApplyWithNativeMCP(p, "/opt/hctl/bin/hctl", []integration.NativeMCPLaunchDescriptor{descriptor}); err != nil {
+				t.Fatal(err)
+			}
+			instructionsPath := filepath.Join(root, "AGENTS.md")
+			configPath := filepath.Join(root, ".codex", "config.toml")
+			if harness == "claude" {
+				instructionsPath = filepath.Join(root, "CLAUDE.md")
+				configPath = filepath.Join(root, ".mcp.json")
+			}
+			instructions := read(t, instructionsPath)
+			for _, fragment := range []string{"## Native MCP connections", "### catalog", "Use the public catalog.", "### fixture", "Use the local fixture.", "native harness owns MCP startup"} {
+				if strings.Count(instructions, fragment) != 1 {
+					t.Fatalf("generated instructions count for %q = %d:\n%s", fragment, strings.Count(instructions, fragment), instructions)
+				}
+			}
+			config := read(t, configPath)
+			if harness == "claude" {
+				for _, fragment := range []string{`"catalog": {`, `"type": "http"`, `"url": "https://example.com/mcp"`, `"fixture": {`, `"type": "stdio"`, executable} {
+					if !strings.Contains(config, fragment) {
+						t.Fatalf("Claude config omitted %q: %s", fragment, config)
+					}
+				}
+				if strings.Contains(config, "headers") || strings.Contains(config, "auth") {
+					t.Fatalf("Claude remote config gained auth fields: %s", config)
+				}
+			} else {
+				for _, fragment := range []string{`[mcp_servers."catalog"]`, `url = "https://example.com/mcp"`, `required = false`, `[mcp_servers."fixture"]`, `command = "` + executable + `"`, `required = true`} {
+					if !strings.Contains(config, fragment) {
+						t.Fatalf("Codex config omitted %q: %s", fragment, config)
+					}
+				}
+				if strings.Contains(config, "http_headers") || strings.Contains(config, "bearer_token") {
+					t.Fatalf("Codex remote config gained auth fields: %s", config)
+				}
+			}
+		})
+	}
+}
+
+func TestClaudeRejectsReservedStandaloneConnectionBeforeMutation(t *testing.T) {
 	root := testAgent(t)
-	write(t, filepath.Join(root, "connections", "github.md"), "Use GitHub.\n")
-	pluginRoot := filepath.Join(root, "plugins", "collision")
-	write(t, filepath.Join(pluginRoot, "plugin.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"collision"}`)
-	write(t, filepath.Join(pluginRoot, "mcp.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"github":{"type":"stdio","command":"server"}}}`)
-	p, err := project.Load(root, "codex")
+	write(t, filepath.Join(root, "connections", "workspace.md"), "---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n")
+	p, err := project.Load(root, "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = ApplyWithNativeMCP(p, "/opt/hctl/bin/hctl", []integration.NativeMCPLaunchDescriptor{testNativeMCPDescriptor(t, "codex")})
-	if err == nil || !strings.Contains(err.Error(), `server "github" collides`) {
+	if _, err := ApplyWithNativeMCP(p, "/opt/hctl/bin/hctl", nil); err == nil || !strings.Contains(err.Error(), `name "workspace" is reserved by Claude`) {
+		t.Fatalf("reserved-name error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("reserved connection mutated Claude config: %v", err)
+	}
+}
+
+func TestGitHubNativeMCPRejectsCollisionsBeforeMutation(t *testing.T) {
+	root := testAgent(t)
+	write(t, filepath.Join(root, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nUse GitHub.\n")
+	pluginRoot := filepath.Join(root, "plugins", "collision")
+	write(t, filepath.Join(pluginRoot, "plugin.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"collision"}`)
+	write(t, filepath.Join(pluginRoot, "mcp.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"github":{"type":"stdio","command":"server"}}}`)
+	_, err := project.Load(root, "codex")
+	if err == nil || !strings.Contains(err.Error(), `connection name "github" collides`) {
 		t.Fatalf("collision error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".codex", "config.toml")); !os.IsNotExist(err) {
@@ -218,7 +289,7 @@ func TestGeneratedGitHubNativeMCPLaunchesCredentialFreeFixture(t *testing.T) {
 	for _, harness := range []string{"claude", "codex"} {
 		t.Run(harness, func(t *testing.T) {
 			root := testAgent(t)
-			write(t, filepath.Join(root, "connections", "github.md"), "Use discovered GitHub tools.\n")
+			write(t, filepath.Join(root, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nUse discovered GitHub tools.\n")
 			p, err := project.Load(root, harness)
 			if err != nil {
 				t.Fatal(err)
@@ -884,6 +955,8 @@ func testNativeMCPDescriptor(t *testing.T, harness string) integration.NativeMCP
 		t.Fatal(err)
 	}
 	return integration.NativeMCPLaunchDescriptor{
+		PackageID:        "github-mcp-server",
+		CapabilityID:     "github",
 		ServerName:       "github",
 		Command:          executable,
 		Arguments:        []string{"stdio"},
@@ -1379,8 +1452,8 @@ func TestMaintainerGitHubGuidanceKeepsClaimFirstAndNativeEffectsUnmanaged(t *tes
 				"discovered catalog", "first tracker write", "before a branch, edit, status comment",
 				"not hctl authorization", "workspace-write promotion only", "read-only workspace does not", "make GitHub read-only",
 				"instructions are not enforcement", "MCP PAT authenticates either", "branch exists remotely",
-				"fine-grained, repository-scoped", "untrusted channel input", "live catalog and schemas are authoritative",
-				"does not filter, confirm, broker, or audit", "must establish it deliberately before unattended launch",
+				"fine-grained, repository-scoped", "untrusted channel input", "live tool descriptions, schemas",
+				"native harness owns MCP startup", "not sent to the upstream server",
 			} {
 				if !strings.Contains(instructions, fragment) {
 					t.Fatalf("generated %s maintainer guidance omits %q: %s", harness, fragment, instructions)

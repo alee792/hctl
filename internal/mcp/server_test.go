@@ -173,7 +173,7 @@ func TestGitHubConnectionIsAbsentFromManagedSurfaceForBothHarnesses(t *testing.T
 			if err := os.MkdirAll(filepath.Join(root, "connections"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(root, "connections", "github.md"), []byte("Search public GitHub project context.\n"), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "connections", "github.md"), []byte("---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nSearch public GitHub project context.\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			p, err := project.Load(root, harness)

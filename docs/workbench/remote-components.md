@@ -103,10 +103,11 @@ when hctl deliberately owns a managed runtime contract, such as a channel
 transport. That is a different product boundary from consuming a native MCP
 server.
 
-The GitHub connection should become a fixture or consumer of the generic path,
-not the template for another provider switch. Completed issues #67, #71, and
-#72 provide the regression baseline; issue #97 owns generalizing the remaining
-authored source selection and staging without weakening those journeys.
+The GitHub connection is a fixture and consumer of the generic path, not the
+template for another provider switch. Completed issues #67, #71, and #72
+provide the regression baseline; completed issue #97 generalizes authored
+source selection, native generation, commands, current-state checks, and
+staging without weakening those journeys.
 
 ## Agent Plugin publisher and consumer distinction
 
@@ -346,7 +347,7 @@ Adding one standalone MCP endpoint or installed server creates a connection.
 
 ### Acceptance journeys
 
-Define credential-free evidence before implementation:
+The generic implementation retains these credential-free evidence journeys:
 
 1. Add a Skill from a temporary remote Git repository and apply it from a
    separate workspace.

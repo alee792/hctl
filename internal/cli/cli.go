@@ -40,6 +40,7 @@ Commands:
   apply AGENT --harness <claude|codex>    Prepare tools and native files
   stage AGENT --harness <claude|codex>    Prepare a runnable filesystem tree
   integration <command>                   Manage external integration packages
+  connection <add|status|remove>          Manage authored native MCP connections
   run AGENT --harness <claude|codex>      Run configured conversational channels
   channel <setup|status|remove> discord AGENT
                                           Manage the installed Discord adapter
@@ -65,6 +66,8 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 		return runStage(args[1:], output, stderr, self)
 	case "integration":
 		return runIntegration(args[1:], output, stderr)
+	case "connection":
+		return runConnection(args[1:], output, stderr)
 	case "run":
 		return runAgent(args[1:], input, output, stderr, self)
 	case "channel":
@@ -76,8 +79,197 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 	case "hook":
 		return runHook(args[1:], input, output)
 	default:
-		return fmt.Errorf("unknown command %q; expected version, apply, stage, integration, run, channel, or schedule", args[0])
+		return fmt.Errorf("unknown command %q; expected version, apply, stage, integration, connection, run, channel, or schedule", args[0])
 	}
+}
+
+func runConnection(args []string, output, stderr io.Writer) error {
+	const usage = `Usage:
+  hctl connection add AGENT NAME --package PACKAGE --capability CAPABILITY [--context TEXT]
+  hctl connection add AGENT NAME --url HTTPS_URL [--context TEXT]
+  hctl connection status AGENT [NAME]
+  hctl connection remove AGENT NAME
+`
+	if len(args) == 0 || len(args) == 1 && isHelp(args[0]) {
+		_, err := io.WriteString(output, usage)
+		return err
+	}
+	switch args[0] {
+	case "add":
+		if len(args) < 3 {
+			return errors.New("usage: hctl connection add AGENT NAME (--package PACKAGE --capability CAPABILITY | --url HTTPS_URL) [--context TEXT]")
+		}
+		fs := flag.NewFlagSet("connection add", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		packageID := fs.String("package", "", "installed integration package id")
+		capabilityID := fs.String("capability", "", "installed native-mcp capability id")
+		endpoint := fs.String("url", "", "credential-free HTTPS Streamable HTTP endpoint")
+		contextText := fs.String("context", "", "optional model-facing Markdown context")
+		if err := fs.Parse(args[3:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("unexpected connection add arguments")
+		}
+		installed := *packageID != "" || *capabilityID != ""
+		if installed == (*endpoint != "") || installed && (*packageID == "" || *capabilityID == "") {
+			return errors.New("connection add requires exactly package plus capability or one URL")
+		}
+		root, existing, err := project.LoadConnections(args[1])
+		if err != nil {
+			return err
+		}
+		if len(existing) == 128 {
+			return errors.New("connections may contain at most 128 entries")
+		}
+		if err := project.ValidateConnectionNameAvailable(root, args[2]); err != nil {
+			return err
+		}
+		var connection project.Connection
+		if installed {
+			connection, err = project.NewInstalledConnection(args[2], *packageID, *capabilityID, *contextText)
+			if err == nil {
+				store, storeErr := integration.NewDefaultStore()
+				if storeErr != nil {
+					return storeErr
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				resolved, resolveErr := store.ResolveNativeMCP(ctx, connection.Package, connection.Capability)
+				if resolveErr != nil {
+					return fmt.Errorf("%s: %w", connection.Path, resolveErr)
+				}
+				if resolved.Selection.Capability.ServerName != connection.Name {
+					return fmt.Errorf("%s: installed native-mcp server name %q must equal connection name %q", connection.Path, resolved.Selection.Capability.ServerName, connection.Name)
+				}
+			}
+		} else {
+			connection, err = project.NewRemoteConnection(args[2], *endpoint, *contextText)
+		}
+		if err != nil {
+			return err
+		}
+		if err := rootfs.WriteAtomicExclusive(root, connection.Path, connection.Source, 0o644); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "added connection=%s source=%s\n", connection.Name, connection.Path); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "next: hctl apply %s --harness claude\n", args[1]); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(output, "next: hctl apply %s --harness codex\n", args[1])
+		return err
+	case "status":
+		if len(args) != 2 && len(args) != 3 {
+			return errors.New("usage: hctl connection status AGENT [NAME]")
+		}
+		var connections []project.Connection
+		if len(args) == 3 {
+			_, connection, err := project.LoadConnection(args[1], args[2])
+			if err != nil {
+				return err
+			}
+			connections = []project.Connection{connection}
+		} else {
+			_, loaded, err := project.LoadConnections(args[1])
+			if err != nil {
+				return err
+			}
+			connections = loaded
+		}
+		if len(connections) == 0 {
+			_, err := fmt.Fprintln(output, "no connections configured")
+			return err
+		}
+		return printConnectionStatus(connections, output)
+	case "remove":
+		if len(args) != 3 {
+			return errors.New("usage: hctl connection remove AGENT NAME")
+		}
+		root, err := project.AgentRoot(args[1])
+		if err != nil {
+			return err
+		}
+		if !project.ValidConnectionName(args[2]) {
+			return errors.New("connection name must match ^[a-z][a-z0-9_-]{0,63}$ and must not be reserved")
+		}
+		path := "connections/" + args[2] + ".md"
+		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(path)))
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%s does not exist", path)
+		}
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s must be a real regular file without symlinks", path)
+		}
+		if err := rootfs.RemoveRegular(root, path); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "removed connection=%s source=%s\n", args[2], path); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "next: hctl apply %s --harness claude\n", args[1]); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(output, "next: hctl apply %s --harness codex\n", args[1])
+		return err
+	default:
+		return fmt.Errorf("unknown connection command %q; expected add, status, or remove", args[0])
+	}
+}
+
+func printConnectionStatus(connections []project.Connection, output io.Writer) error {
+	var store *integration.Store
+	var firstError error
+	for _, connection := range connections {
+		contextState := "absent"
+		if connection.Context != "" {
+			contextState = "present"
+		}
+		if connection.Remote() {
+			if _, err := fmt.Fprintf(output, "connection=%s target=remote transport=streamable-http url=%s status=configured runtime=unchecked context=%s\n", connection.Name, connection.URL, contextState); err != nil {
+				return err
+			}
+			continue
+		}
+		if store == nil {
+			var err error
+			store, err = integration.NewDefaultStore()
+			if err != nil {
+				return err
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		resolved, err := store.ResolveNativeMCP(ctx, connection.Package, connection.Capability)
+		cancel()
+		if err != nil {
+			if _, writeErr := fmt.Fprintf(output, "connection=%s target=installed package=%s capability=%s status=unhealthy context=%s\n", connection.Name, connection.Package, connection.Capability, contextState); writeErr != nil {
+				return writeErr
+			}
+			if firstError == nil {
+				firstError = fmt.Errorf("%s: %w", connection.Path, err)
+			}
+			continue
+		}
+		if resolved.Selection.Capability.ServerName != connection.Name {
+			if _, writeErr := fmt.Fprintf(output, "connection=%s target=installed package=%s capability=%s status=unhealthy context=%s\n", connection.Name, connection.Package, connection.Capability, contextState); writeErr != nil {
+				return writeErr
+			}
+			if firstError == nil {
+				firstError = fmt.Errorf("%s: installed native-mcp server name %q must equal connection name %q", connection.Path, resolved.Selection.Capability.ServerName, connection.Name)
+			}
+			continue
+		}
+		harnesses := make([]string, len(resolved.Selection.Capability.Harnesses))
+		for index, target := range resolved.Selection.Capability.Harnesses {
+			harnesses[index] = target.Name
+		}
+		slices.Sort(harnesses)
+		if _, err := fmt.Fprintf(output, "connection=%s target=installed package=%s capability=%s status=ready harnesses=%s context=%s\n", connection.Name, connection.Package, connection.Capability, strings.Join(harnesses, ","), contextState); err != nil {
+			return err
+		}
+	}
+	return firstError
 }
 
 func runIntegration(args []string, output, stderr io.Writer) error {
@@ -821,8 +1013,25 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 	if _, err := fmt.Fprintf(output, "managed tools=%s via MCP; native harness tools allowed and unmanaged\n", strings.Join(toolNames, ",")); err != nil {
 		return err
 	}
-	if p.GitHubConnection != nil {
-		if _, err := fmt.Fprintln(output, "native server=github startup=optional trust=native-project environment=GITHUB_PERSONAL_ACCESS_TOKEN value=not-read; calls and effects unmanaged"); err != nil {
+	installedDescriptors := make(map[string]integration.NativeMCPLaunchDescriptor, len(nativeMCP))
+	for _, descriptor := range nativeMCP {
+		installedDescriptors[descriptor.ServerName] = descriptor
+	}
+	for _, connection := range p.Connections {
+		target := "transport=streamable-http url=" + connection.URL + " startup=optional trust=native-project runtime=unchecked"
+		if connection.Installed() {
+			descriptor := installedDescriptors[connection.Name]
+			names := make([]string, len(descriptor.RequiredEnvironment))
+			for index, requirement := range descriptor.RequiredEnvironment {
+				names[index] = requirement.Name
+			}
+			slices.Sort(names)
+			target = "package=" + connection.Package + " capability=" + connection.Capability + " startup=" + string(descriptor.Target.Startup) + " trust=" + string(descriptor.Target.Trust)
+			if len(names) > 0 {
+				target += " required_environment=" + strings.Join(names, ",") + " value=not-read"
+			}
+		}
+		if _, err := fmt.Fprintf(output, "native server=%s %s; startup, trust, approval, authentication, calls, and effects owned by %s\n", connection.Name, target, driver.Name()); err != nil {
 			return err
 		}
 	}
@@ -833,8 +1042,8 @@ func runApply(args []string, output, stderr io.Writer, self string) error {
 		if _, err := fmt.Fprintln(output, "note: Codex loads project .codex configuration after you trust the project; Codex owns native server and tool approval"); err != nil {
 			return err
 		}
-	} else if p.GitHubConnection != nil {
-		if _, err := fmt.Fprintln(output, "note: Claude owns the one-time project MCP server approval"); err != nil {
+	} else if len(p.Connections) > 0 {
+		if _, err := fmt.Fprintln(output, "note: Claude owns project MCP server approval and runtime state"); err != nil {
 			return err
 		}
 	}
@@ -882,7 +1091,7 @@ func runStage(args []string, output, stderr io.Writer, self string) error {
 		return err
 	}
 	var integrationStore *integration.Store
-	if p.GitHubConnection != nil || p.DiscordChannel != nil {
+	if hasInstalledConnection(p) || p.DiscordChannel != nil {
 		integrationStore, err = integration.NewDefaultStore()
 		if err != nil {
 			return err
@@ -1049,22 +1258,41 @@ func ensureAppliedForPolicyContext(ctx context.Context, p *project.Project, self
 }
 
 func resolveProjectNativeMCP(ctx context.Context, p *project.Project) ([]integration.NativeMCPLaunchDescriptor, error) {
-	if p.GitHubConnection == nil {
+	if !hasInstalledConnection(p) {
 		return nil, nil
 	}
 	store, err := integration.NewDefaultStore()
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := store.ResolveNativeMCP(ctx, "github-mcp-server", "github")
-	if err != nil {
-		return nil, err
+	result := make([]integration.NativeMCPLaunchDescriptor, 0, len(p.Connections))
+	for _, connection := range p.Connections {
+		if !connection.Installed() {
+			continue
+		}
+		resolved, err := store.ResolveNativeMCP(ctx, connection.Package, connection.Capability)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", connection.Path, err)
+		}
+		descriptor, err := resolved.LaunchDescriptor(p.Harness)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", connection.Path, err)
+		}
+		if descriptor.ServerName != connection.Name {
+			return nil, fmt.Errorf("%s: installed native-mcp server name %q must equal connection name %q", connection.Path, descriptor.ServerName, connection.Name)
+		}
+		result = append(result, descriptor)
 	}
-	descriptor, err := resolved.LaunchDescriptor(p.Harness)
-	if err != nil {
-		return nil, err
+	return result, nil
+}
+
+func hasInstalledConnection(p *project.Project) bool {
+	for _, connection := range p.Connections {
+		if connection.Installed() {
+			return true
+		}
 	}
-	return []integration.NativeMCPLaunchDescriptor{descriptor}, nil
+	return false
 }
 func newDriver(name, override string) (harness.Driver, error) {
 	if name != "claude" && name != "codex" {

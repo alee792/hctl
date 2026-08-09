@@ -131,7 +131,7 @@ func TestCreateSelectivelyStagesGitHubNativeMCPClosure(t *testing.T) {
 	t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", fakeValue)
 	source := filepath.Join(t.TempDir(), "github-agent")
 	writeTestFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: GitHub staged test agent.\n---\n\nBe concise.\n", 0o644)
-	writeTestFile(t, filepath.Join(source, "connections", "github.md"), "Inspect GitHub using discovered native tools.\n", 0o644)
+	writeTestFile(t, filepath.Join(source, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nInspect GitHub using discovered native tools.\n", 0o644)
 	p, err := project.Load(source, "codex")
 	if err != nil {
 		t.Fatal(err)
@@ -193,6 +193,41 @@ func TestCreateSelectivelyStagesGitHubNativeMCPClosure(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(withoutOutput, "opt", "hctl", "integrations")); !os.IsNotExist(err) {
 		t.Fatalf("GitHub-free counterpart staged integration artifacts: %v", err)
+	}
+}
+
+func TestCreateStagesRemoteConnectionWithoutIntegrationClosure(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "remote-agent")
+	writeTestFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Remote staged test agent.\n---\n\nBe concise.\n", 0o644)
+	writeTestFile(t, filepath.Join(source, "connections", "catalog.md"), "---\ntype: mcp\ntransport: streamable-http\nurl: https://127.0.0.1:1/mcp\n---\n\nUse the public catalog.\n", 0o644)
+	p, err := project.Load(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	hctl := filepath.Join(bin, "hctl")
+	harness := filepath.Join(bin, "codex")
+	writeTestFile(t, hctl, "#!/bin/sh\nexit 0\n", 0o755)
+	writeTestFile(t, harness, "#!/bin/sh\necho 'codex-cli 1.2.3'\n", 0o755)
+	output := filepath.Join(t.TempDir(), "staged")
+	if _, err := Create(context.Background(), Request{Project: p, Output: output, HCTLExecutable: hctl, HarnessExecutable: harness, HarnessVersion: "1.2.3"}); err != nil {
+		t.Fatal(err)
+	}
+	config := readTestFile(t, filepath.Join(output, "workspace", ".codex", "config.toml"))
+	for _, fragment := range []string{`[mcp_servers."catalog"]`, `url = "https://127.0.0.1:1/mcp"`, `enabled = true`, `required = false`, `default_tools_approval_mode = "prompt"`} {
+		if !bytes.Contains(config, []byte(fragment)) {
+			t.Fatalf("staged remote config omitted %q: %s", fragment, config)
+		}
+	}
+	if bytes.Contains(config, []byte("http_headers")) || bytes.Contains(config, []byte("auth")) {
+		t.Fatalf("staged remote config gained auth fields: %s", config)
+	}
+	if _, err := os.Stat(filepath.Join(output, "opt", "hctl", "integrations")); !os.IsNotExist(err) {
+		t.Fatalf("remote connection staged integration artifacts: %v", err)
+	}
+	stagedSource := readTestFile(t, filepath.Join(output, "opt", "hctl", "agents", "remote-agent", "connections", "catalog.md"))
+	if !bytes.Equal(stagedSource, readTestFile(t, filepath.Join(source, "connections", "catalog.md"))) {
+		t.Fatal("remote authored source changed during staging")
 	}
 }
 

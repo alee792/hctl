@@ -44,7 +44,8 @@ make GitHub read-only. Avoid merge, release, and destructive operations by
 instruction and least-privilege PAT scope; instructions are not enforcement.
 Use a fine-grained, repository-scoped, minimally permitted, expiring PAT,
 especially when untrusted channel input can reach the maintainer.
-Follow `docs/github-native-mcp.md` for package trust, offline apply, native
+Follow `docs/github-native-mcp.md` for package trust, offline connection
+resolution during apply, native
 approval, runtime injection, troubleshooting, and cleanup. Never improvise a
 live GitHub acceptance pass: it requires explicit authorization for the
 temporary PAT, allowlisted repository, permitted effects, and revocation.

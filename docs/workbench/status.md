@@ -43,10 +43,10 @@ The repository contains a small Go CLI that:
   functions beside the bounded built-in `echo` tool through stdio MCP, plus an
   optional default-off `record-friction` built-in that retains private,
   bounded, agent-namespaced local notes without reading them back;
-- discovers a bounded `connections/github.md` description, resolves the exact
-  installed official GitHub MCP package offline, and exposes its discovered
-  catalog through native Claude or Codex configuration without adding GitHub
-  code or credentials to hctl's managed server;
+- discovers a bounded generic `connections/<name>.md` inventory, resolves exact
+  installed `native-mcp` capabilities offline or validates credential-free
+  HTTPS Streamable HTTP endpoints without contact, and emits native Claude or
+  Codex configuration without provider adapters or credentials in hctl;
 - discovers a bounded `channels/discord.md` participation policy, resolves one
   exact installed external adapter, and bridges its semantic protocol to the
   durable turn dispatcher with independent managed session lifecycles for the
@@ -213,14 +213,15 @@ a generated custom subagent, and session resume in a fresh external workspace.
   `harnesses/claude/.claude/` or `harnesses/codex/.codex/` tree. Only the
   selected tree is copied, its files share the existing source-fingerprint and
   apply-ownership protections, and hctl neither merges nor interprets them.
-- ADR 0034 accepts a provider-neutral standalone MCP source and author-command
-  contract. A bounded `connections/<name>.md` selects either one exact installed
+- The ADR 0034 provider-neutral standalone MCP contract is implemented. A
+  bounded `connections/<name>.md` selects either one exact installed
   `native-mcp` capability or one credential-free HTTPS Streamable HTTP URL;
-  optional Markdown appears once in generated instructions. Connection commands
-  require an explicit positional agent root. Remote v1 excludes headers and
-  authentication, and body-only GitHub source receives a clean migration break.
-  Native Claude or Codex continues to own runtime trust, authentication, calls,
-  and effects.
+  optional Markdown appears once in one generated instruction section. Exact
+  positional-root `connection add`, `status`, and `remove` commands author and
+  inspect the same source without choosing a harness or implicitly applying.
+  Remote v1 excludes headers and authentication, body-only GitHub source fails
+  with the accepted migration diagnostic, and native Claude or Codex continues
+  to own runtime trust, authentication, calls, and effects.
 - The GitHub connection follows Eve's `connections/`, path-derived name, and
   model-facing description conventions, but requests the installed official
   `github-mcp-server` through native Claude or Codex MCP configuration. Its
@@ -384,11 +385,11 @@ Codex image prepares and verifies the Linux package before publication, while
 credential-free tests prove exact installed-path resolution, offline reuse,
 concurrency, interruption, corruption, unsupported-platform rejection,
 descriptor drift, and selective staging or omission. Authored
-`connections/github.md` now selects that exact installed capability during
-offline apply. Claude receives the verified server through its native
+The generic `connections/github.md` frontmatter selects that exact installed
+capability during offline connection resolution. Claude receives the verified server through its native
 `/usr/bin/env -C` project entry; Codex receives the verified executable, root,
 optional startup, prompt approval, and ambient variable name through its
-native project table. Exact plugin-name collisions fail before mutation, and
+native project table. Standalone, managed, and plugin-name collisions fail before mutation, and
 staging copies only the selected package artifact to canonical final paths.
 Credential-free generation and staging tests use a conspicuous fake value to
 prove that only the environment-variable name enters native configuration or
@@ -408,7 +409,7 @@ being misclassified as optional GitHub unavailability. A deterministic eligible
 tracker fixture verifies the maintainer's claim-first guidance without claiming
 hctl authorization. The #72 operator journey is now recorded in
 [`docs/github-native-mcp.md`](../github-native-mcp.md): one explicit curated
-install/trust step, offline apply, runtime-only PAT injection, native
+install/trust step, offline connection resolution during apply, runtime-only PAT injection, native
 Claude/Codex trust, discovered-tool use, service/container injection, package
 lifecycle, cache reuse, selective omission, and bounded troubleshooting. Its
 prominent warning states that the harness/model can access the PAT and that
@@ -428,16 +429,16 @@ allowlisted test repository, read/write scope, or native-approval exercise was
 explicitly authorized; the record supplies the exact opt-in and redaction
 contract instead.
 
-ADR 0034 and #97 now define the accepted next implementation step without
-weakening that evidence: replace the `github.md`-only loader, resolver wiring,
-validation, staging, summaries, and generated prose with a bounded generic
-connection inventory. Its installed form authors package and capability ids;
-its remote form authors a credential-free HTTPS Streamable HTTP URL. Exact
-commands, name and collision rules, optional-body rendering, remote non-contact,
-selective staging, and the clean body-only migration diagnostic are settled.
-The implementation has not landed yet: current runnable examples and operator
-documentation therefore remain body-only and GitHub-specific until the #97
-implementation updates the loader and those fixtures together.
+Issue #97 replaces the `github.md`-only loader, resolver wiring, validation,
+staging, summaries, and generated prose with the bounded generic connection
+inventory accepted in ADR 0034. Installed sources author package and capability
+ids; remote sources author a credential-free HTTPS Streamable HTTP URL. Tests
+cover exact schema and bounds, names and collisions, prose-once rendering,
+remote non-contact, installed selective staging, remote closure omission,
+current-state guards, atomic author commands, and the clean body-only migration
+diagnostic. Maintained GitHub sources, runnable examples, and operator guidance
+now use the explicit generic installed form while preserving the #67/#71/#72
+credential-free regression journey.
 
 Every hctl-owned scheduled or channel session open, channel reopen, and native
 continuation process start re-resolves and verifies current offline package

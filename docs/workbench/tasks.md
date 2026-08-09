@@ -17,30 +17,7 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### [GitHub #97](https://github.com/alee792/hctl/issues/97) — Generalize authored native MCP connections
-
-**Outcome:** Replace the body-only `connections/github.md` special case with
-the accepted bounded `connections/<name>.md` inventory from ADR 0034. Support
-one exact installed `native-mcp` package capability or one credential-free
-HTTPS Streamable HTTP URL, generate native Claude and Codex configuration and
-one prose-once instruction section, and provide the explicit positional-agent
-`connection add`, `status`, and `remove` journey.
-
-**Boundaries:** Reuse the existing generic integration resolver, stdio launch
-descriptor, safe Plugin HTTP renderer, native setup, current-state guard, and
-selective staging. Do not add provider switches, headers, credentials, OAuth,
-managed MCP, package installation, implicit apply, or Plugin mutation. Apply
-and status never contact a remote endpoint. Make the accepted clean break for
-body-only GitHub source with the exact generic migration diagnostic. Keep the
-active README, GitHub operator runbook, and authored fixtures on current
-behavior until the implementation changes the loader in the same PR.
-
-**Evidence:** Credential-free installed and remote fixtures cover both
-harnesses, exact schema/bounds/fingerprints, generic diagnostics and collisions,
-prose-once generation, remote non-contact, installed selective staging, remote
-closure omission, headless current-state behavior, atomic command mutations,
-and the GitHub #67/#71/#72 regressions. Run the complete repository checks and
-the required Standards and Spec review.
+No autonomous task is currently queued.
 
 ## Ready for human
 
@@ -55,6 +32,24 @@ with a temporary least-privilege bot credential and retain only bounded
 redacted evidence.
 
 ## Completed
+
+### [GitHub #97](https://github.com/alee792/hctl/issues/97) — Generalize authored native MCP connections
+
+**Outcome:** Replaced the body-only `connections/github.md` special case with
+the bounded provider-neutral `connections/<name>.md` inventory from ADR 0034.
+Installed sources select one exact `native-mcp` package capability; remote
+sources select one credential-free HTTPS Streamable HTTP URL. Claude and Codex
+receive native configuration and one prose-once instruction section, while
+exact-root `connection add`, `status`, and `remove` commands provide the
+non-developer author journey without provider adapters or implicit apply.
+
+**Evidence:** Project, setup, CLI, staging, worktree, managed-MCP, and headless
+regressions cover exact schema/bounds/fingerprints, migration diagnostics,
+generic names and collisions, installed offline resolution and current-state
+guards, remote non-contact and header omission, prose-once generation,
+installed selective closure, remote closure omission, atomic command mutation,
+unsafe removal rejection, and the existing GitHub #67/#71/#72 journey for both
+harnesses.
 
 ### [GitHub #96](https://github.com/alee792/hctl/issues/96) — Clarify Agent Plugin publisher and consumer journeys
 

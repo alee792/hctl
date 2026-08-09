@@ -17,7 +17,18 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-No autonomous task is currently queued.
+### [GitHub #99](https://github.com/alee792/hctl/issues/99) — Implement shared directory acquisition and provenance
+
+Implement ADR 0035's bounded, component-neutral foundation for exact local
+directories, resolved HTTPS Git commits, and digest-pinned HTTPS archives. It
+must materialize complete Plugin or Skill candidates, retain deterministic
+tree identity in `hctl-dependencies.json`, enforce trust and drift, and publish
+source plus provenance atomically without changing either component format.
+
+Keep this slice below the public Plugin and Skill command families owned by
+#100 and #101. Expose narrow validators/hooks and prove local/remote source,
+pinning, path safety, bounds, concurrency, recovery, and offline verification
+without acquiring credentials or executing dependency code.
 
 ## Ready for human
 
@@ -32,6 +43,21 @@ with a temporary least-privilege bot credential and retain only bounded
 redacted evidence.
 
 ## Completed
+
+### [GitHub #98](https://github.com/alee792/hctl/issues/98) — Specify acquired Agent Plugin and Agent Skill dependency semantics
+
+**Outcome:** ADR 0035 selects source vendoring rather than fetch-on-apply,
+exact local/HTTPS Git/digest-pinned archive selectors, deterministic
+manifest-derived destinations, one closed `hctl-dependencies.json` provenance
+lock, immutable tracked trees, offline drift enforcement, deliberate atomic
+update/removal, and explicit interactive or `--yes` trust.
+
+**Evidence:** The product specification and glossary distinguish current
+manual consumption from the accepted client-owned workflow, preserve complete
+publisher Plugin and Skill directories, keep the external `skills-lock.json`
+opaque, allow operator-owned noninteractive HTTPS Git authentication without
+retaining credentials, and define exact bounds, recovery, and credential-free
+implementation journeys for #99–#101.
 
 ### [GitHub #97](https://github.com/alee792/hctl/issues/97) — Generalize authored native MCP connections
 

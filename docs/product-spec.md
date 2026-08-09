@@ -67,6 +67,7 @@ The authoring API is convention-driven. An MVP project is:
 ```text
 my-agent/
   instructions.md
+  hctl-dependencies.json       # optional acquired-source provenance
   skills/
     research/
       SKILL.md
@@ -127,6 +128,7 @@ byte budgets bound the work performed by load and apply:
 | Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration is at most 8 MiB |
 | Selected harness-specific files | 1,024 | 1 MiB each and 8 MiB aggregate |
 | Standalone MCP connections | 128 | 8 KiB per source; optional Markdown context contains at most 1,024 characters |
+| Hctl-acquired dependencies | 384 lock entries | 8,192 entries and 256 MiB per selected tree; 16,384 entries and 512 MiB across acquired trees; remote archives 128 MiB compressed |
 | Channels | One implemented file | `discord.md` is an 8 KiB file whose authored policy contains 1-1,024 characters |
 
 These ceilings are not configurable authoring API. Exceeding a root-project
@@ -160,9 +162,77 @@ identity and need not use the same name. Hctl has no Plugin acquisition, add,
 update, or remove command. Updating currently means the consumer manually
 replaces the complete local directory and reapplies. Automated consumer
 operations are planned under
-[GitHub epic #95](https://github.com/alee792/hctl/issues/95), but their source,
-pinning, provenance, drift, and replacement contracts are not yet part of this
-specification.
+[GitHub epic #95](https://github.com/alee792/hctl/issues/95).
+
+ADR 0035 accepts the acquisition contract that those commands will implement;
+it does not claim that the commands are already present. The same client-owned
+workflow applies to complete root Agent Skill directories. Acquisition copies
+reviewed bytes into conventional portable source rather than recording a
+fetch-on-apply dependency. Add and update are the only operations that may
+resolve a source or use the network. Ordinary apply, stage, and status use only
+the committed local tree and never advance a moving reference.
+
+The accepted source selectors are one exact local directory, one HTTPS Git
+repository plus bounded ref and optional exact component subdirectory, or one
+direct HTTPS ZIP/TAR.GZ archive plus lowercase SHA-256 and optional exact
+component subdirectory. Hctl never recursively guesses a component root. Git
+refs resolve during explicit add/update to one exact commit and materialize
+without checkout hooks, filters, submodules, or Git LFS. Redirects are rejected.
+Git may use an operator's existing noninteractive HTTPS credential helper, but
+hctl accepts and retains no credential input or raw helper/remote output.
+
+The validated Plugin manifest name deterministically publishes to
+`plugins/<name>/`; the validated Skill name publishes to `skills/<name>/` and
+must already match its selected root basename. Add never overwrites. It fails
+when the prospective supported Plugin or Skill names collide with existing
+project components. This stricter acquisition preflight does not change the
+warning and precedence behavior of manually copied Plugins during ordinary
+project loading.
+
+Every acquired tree is a complete bounded directory containing only safe
+directories and regular files. Symlinks, links, special files, Git metadata,
+unsafe or case-folding-colliding paths, and over-budget trees fail before
+publication. Exact bytes and normalized executable intent produce one
+deterministic tree SHA-256. Marker and component validators retain all existing
+narrower limits. Acquisition treats local and remote trees as trusted project
+code: an interactive add/update shows sanitized source, resolved identity,
+destination, tree identity, counts, and executable-capable contents before an
+affirmative confirmation; `--yes` is the explicit noninteractive equivalent.
+
+The optional root `hctl-dependencies.json` is a closed version-1 committed
+provenance lock containing at most 384 lexical Plugin/Skill entries. An entry
+records kind, validated name, conventional destination, the closed source
+identity, exact marker-file SHA-256, tree SHA-256, and file/byte counts. Local
+entries retain their source as a normalized slash path relative to the exact
+agent root plus an optional subdirectory. Another machine does not need that
+path to apply committed source and may explicitly replace an unavailable local
+selector during update. The lock records source provenance for paths that
+already exist by convention; it is not a component registry. Manual Plugin and
+Skill directories remain valid without entries.
+
+The repository's externally produced `skills-lock.json` remains opaque to hctl
+and may coexist. Hctl never reads, adopts, merges, rewrites, or deletes it. An
+already present Skill path is still a destination collision. If another tool
+later changes an hctl-acquired path, ordinary hctl drift handling applies.
+
+Status is offline and non-executing. It reports acquired `clean`, `drifted`,
+or `missing` state and manual `untracked` state. When the hctl lock exists,
+apply and stage validate every tracked tree and fail before workspace mutation
+on malformed provenance, missing source, unsafe paths, or drift; they never
+repair or fetch it. Update requires a clean current tree, validates and confirms
+one complete replacement, preserves kind/name/destination, and publishes
+source plus lock atomically. Remove requires confirmation, deletes only the
+exact acquired tree and entry, and refuses drift unless `--force --yes` makes
+that destructive intent explicit. It never removes Plugin data, external
+sources, integration packages, or conventional parent directories.
+
+Add, update, and remove share an agent-root operation lock, same-filesystem
+staging, prospective full-project validation, atomic replacement, and bounded
+recovery journal. An error or interruption is recovered to one complete old or
+new tree/lock state before another dependency command or apply interprets the
+project. None of these commands selects a harness, edits native configuration,
+or implicitly applies a workspace. See
+[ADR 0035](adr/0035-acquire-agent-plugin-and-skill-directories.md).
 
 Each visible immediate real directory beneath `plugins/` is one plugin with a
 required bounded `plugin.json` targeting the exact canonical v1.0.0 schema

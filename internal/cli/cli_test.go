@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"hctl/internal/acquisition"
 	"hctl/internal/channelselection"
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
@@ -41,6 +42,73 @@ func TestVersionCommandsPrintBuildVersion(t *testing.T) {
 		if stderr.Len() != 0 {
 			t.Fatalf("Run(%q) stderr = %q", args, stderr.String())
 		}
+	}
+}
+
+func TestFreshCopiedAcquiredSkillAppliesWithoutOriginalSource(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	source := filepath.Join(t.TempDir(), "agent")
+	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	externalParent := t.TempDir()
+	external := filepath.Join(externalParent, "review")
+	writeCLIFile(t, filepath.Join(external, "SKILL.md"), "---\nname: review\ndescription: Review carefully.\n---\n\nReview.\n", 0o644)
+	writeCLIFile(t, filepath.Join(external, "references", "binary"), string([]byte{0, 1, 2, 255}), 0o644)
+	manager := project.AcquisitionManager(source)
+	if _, err := manager.Add(context.Background(), acquisition.Skill, acquisition.Selector{Type: "local", Path: external}); err != nil {
+		t.Fatal(err)
+	}
+	plugin := filepath.Join(externalParent, "review-pack")
+	writeCLIFile(t, filepath.Join(plugin, "plugin.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"review-pack"}`, 0o644)
+	writeCLIFile(t, filepath.Join(plugin, "mcp.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"review-server":{"type":"stdio","command":"./server.sh"}}}`, 0o644)
+	writeCLIFile(t, filepath.Join(plugin, "server.sh"), "#!/bin/sh\n", 0o755)
+	writeCLIFile(t, filepath.Join(plugin, "skills", "plugin-review", "SKILL.md"), "---\nname: plugin-review\ndescription: Review from the Plugin.\n---\n", 0o644)
+	if _, err := manager.Add(context.Background(), acquisition.Plugin, acquisition.Selector{Type: "local", Path: plugin}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(t.TempDir(), "fresh-agent")
+	copyCLITree(t, source, fresh)
+	if err := os.RemoveAll(externalParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(source); err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct {
+		name, version, skillRoot string
+	}{{"claude", "2.1.221 (Claude Code)", ".claude"}, {"codex", "codex-cli 0.144.1", ".agents"}} {
+		t.Run(fixture.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			harness := filepath.Join(t.TempDir(), fixture.name)
+			writeCLIFile(t, harness, "#!/bin/sh\necho '"+fixture.version+"'\n", 0o755)
+			var output, stderr bytes.Buffer
+			if err := Run([]string{"apply", fresh, "--workspace", workspace, "--harness", fixture.name, "--command", harness}, strings.NewReader(""), &output, &stderr, self); err != nil {
+				t.Fatal(err)
+			}
+			if got := readCLIFile(t, filepath.Join(workspace, fixture.skillRoot, "skills", "review", "references", "binary")); got != string([]byte{0, 1, 2, 255}) {
+				t.Fatalf("fresh copied acquired resource = %q", got)
+			}
+			if got := readCLIFile(t, filepath.Join(workspace, fixture.skillRoot, "skills", "plugin-review", "SKILL.md")); !strings.Contains(got, "Review from the Plugin") {
+				t.Fatalf("fresh copied Plugin Skill = %q", got)
+			}
+			serverPath := filepath.Join(fresh, "plugins", "review-pack", "server.sh")
+			if info, err := os.Stat(serverPath); err != nil || info.Mode().Perm()&0o111 == 0 {
+				t.Fatalf("fresh acquired Plugin server = %v, %v", info, err)
+			}
+			configPath := filepath.Join(workspace, ".mcp.json")
+			if fixture.name == "codex" {
+				configPath = filepath.Join(workspace, ".codex", "config.toml")
+			}
+			config := readCLIFile(t, configPath)
+			if !strings.Contains(config, "review-server") || !strings.Contains(config, serverPath) {
+				t.Fatalf("fresh acquired Plugin MCP config omitted server identity or path: %s", config)
+			}
+		})
 	}
 }
 
@@ -1615,6 +1683,34 @@ func writeCLIFile(t *testing.T, path, content string, mode os.FileMode) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func copyCLITree(t *testing.T, source, destination string) {
+	t.Helper()
+	if err := filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, relative)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, content, info.Mode().Perm())
+	}); err != nil {
 		t.Fatal(err)
 	}
 }

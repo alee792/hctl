@@ -12,4 +12,6 @@ require (
 	hctl/channeladapter v0.0.0
 )
 
+require golang.org/x/term v0.36.0
+
 replace hctl/channeladapter => ./channeladapter

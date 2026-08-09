@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,10 +65,12 @@ type Prospective struct {
 }
 
 type Manager struct {
-	AgentRoot string
-	Plugins   Hooks
-	Skills    Hooks
-	Approve   func(TrustSummary) error
+	AgentRoot        string
+	Plugins          Hooks
+	Skills           Hooks
+	Approve          func(TrustSummary) error
+	ApproveRemoval   func(ComponentStatus) error
+	ArchiveTransport http.RoundTripper
 }
 
 type TrustSummary struct {
@@ -137,7 +140,7 @@ func (manager Manager) Add(ctx context.Context, kind Kind, selector Selector) (D
 		if err != nil {
 			return err
 		}
-		candidate, err := Materialize(ctx, root, selector)
+		candidate, err := materialize(ctx, root, selector, manager.ArchiveTransport)
 		if err != nil {
 			return err
 		}
@@ -220,7 +223,7 @@ func (manager Manager) Update(ctx context.Context, kind Kind, name string, selec
 		if selector != nil {
 			selected = *selector
 		}
-		candidate, err := Materialize(ctx, root, selected)
+		candidate, err := materialize(ctx, root, selected, manager.ArchiveTransport)
 		if err != nil {
 			return err
 		}
@@ -320,6 +323,7 @@ func (manager Manager) Remove(ctx context.Context, kind Kind, name string, force
 			return fmt.Errorf("acquired %s %q is not recorded", kind, name)
 		}
 		selected := lock.Dependencies[index]
+		selectedState := StateClean
 		for otherIndex, dependency := range lock.Dependencies {
 			state, _, inspectErr := inspectDependency(root, dependency)
 			if otherIndex == index {
@@ -329,6 +333,7 @@ func (manager Manager) Remove(ctx context.Context, kind Kind, name string, force
 				if state != StateClean && !force {
 					return fmt.Errorf("acquired %s %q is %s; explicit destructive removal is required", kind, name, state)
 				}
+				selectedState = state
 				continue
 			}
 			if inspectErr != nil || state != StateClean {
@@ -353,6 +358,12 @@ func (manager Manager) Remove(ctx context.Context, kind Kind, name string, force
 		}
 		if hooks.ValidateProspective != nil {
 			if err := hooks.ValidateProspective(Prospective{AgentRoot: root, Kind: kind, Name: name, Destination: selected.Destination, Replacing: &selected, Removing: true, CurrentLock: lock, NextLock: nextLock, Snapshot: snapshot}); err != nil {
+				return err
+			}
+		}
+		if manager.ApproveRemoval != nil {
+			status := ComponentStatus{Kind: kind, Name: name, ManifestName: name, State: selectedState, Dependency: &selected}
+			if err := manager.ApproveRemoval(status); err != nil {
 				return err
 			}
 		}

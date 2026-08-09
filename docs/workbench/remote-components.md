@@ -2,8 +2,9 @@
 
 - Status: the outcome-level direction is accepted in `docs/vision.md`; the
   standalone MCP source and command contract is implemented through ADR 0034
-  and #97, and ADR 0035's shared Plugin and Skill acquisition foundation is
-  implemented through #99 while #100 and #101 still own public commands
+  and #97, and ADR 0035's shared Plugin and Skill acquisition foundation and
+  Plugin commands are implemented through #99 and #100 while #101 still owns
+  the public Skill commands
 - Started: 2026-08-08
 - Purpose: retain the product-model questions and proposed journeys behind
   the filed GitHub issues until their contracts are accepted in the product
@@ -41,9 +42,9 @@ runtime, credential, and ownership questions, so this note keeps them separate.
   removed. The external channel-adapter host now provides a second capability
   on the generic installed-package envelope without a vendor switch in hctl
   core.
-- Hctl now contains shared non-CLI acquisition, provenance, update, removal,
-  status, and project-load verification primitives. It does not yet expose the
-  public Agent Plugin or Agent Skill command families.
+- Hctl now contains shared acquisition, provenance, update, removal, status,
+  and project-load verification primitives. The public Agent Plugin command
+  family is implemented; the Agent Skill command family remains.
 
 ## Filesystem model
 
@@ -124,16 +125,15 @@ Therefore:
   `plugin.json` merely to consume the plugin.
 - `plugins/` vendoring is hctl's current dependency decision, not a requirement
   of the Agent Plugins specification.
-- Manual replacement is the only currently exposed hctl update path. ADR 0035
-  defines the client-owned automated replacement contract; its shared engine
-  is implemented, while the public #100 and #101 journeys remain a product gap,
-  not behavior prescribed by the specification.
+- Manual placement remains supported, and ADR 0035's client-owned automated
+  Plugin replacement contract is exposed through `hctl plugin`. The remaining
+  public Skill journey is an hctl product gap, not behavior prescribed by the
+  specification.
 
-Issue #96 updates the README, product specification, and glossary to show the
-publisher and consumer roles explicitly. Those canonical documents now state
-that acquisition and update mechanics are client-owned, describe hctl's
-current manual local-copy workflow, and keep the future automated consumer
-contract under #95 rather than attributing it to the open specification.
+Issue #96 updated the README, product specification, and glossary to show the
+publisher and consumer roles explicitly. Issue #100 now documents the
+implemented optional hctl Plugin acquisition journey without attributing its
+source or update mechanics to the open specification.
 
 ## Accepted acquisition and update properties
 
@@ -185,13 +185,12 @@ their existing behavior.
 - #98 accepted the shared acquired-dependency contract for Agent Plugins and
   Skills in ADR 0035.
 - #99 completed acquisition, provenance, drift, and replacement mechanics.
-- #100 owns the Agent Plugin consumer commands and is the next implementation
-  slice.
-- #101 owns the Agent Skill consumer commands and follows the same landed
-  foundation.
+- #100 implements the Agent Plugin consumer commands.
+- #101 owns the remaining Agent Skill consumer commands on the same landed
+  foundation and is the next implementation slice.
 
-Issues #100 and #101 can now leave dependency-blocked triage after their exact
-public command surfaces are reconciled with the landed shared interfaces.
+Issue #101 can now proceed on the exact public command surface reconciled with
+the landed shared interfaces.
 
 ## Questions settled by ADR 0035
 
@@ -211,10 +210,10 @@ public command surfaces are reconciled with the landed shared interfaces.
 
 ## Implementation-ticket gate
 
-ADR 0034 satisfied this gate for completed #97. ADR 0035 and #99 now satisfy it
-for the shared dependency foundation. #100 and #101 can bind their public
-component-specific commands to the landed interfaces without duplicating
-source, trust, provenance, locking, drift, or recovery mechanics.
+ADR 0034 satisfied this gate for completed #97. ADR 0035 and #99 satisfy it for
+the shared dependency foundation. #100 binds the Plugin commands and #101 can
+bind the Skill commands without duplicating source, trust, provenance,
+locking, drift, or recovery mechanics.
 
 ### Accepted first delivery boundary
 

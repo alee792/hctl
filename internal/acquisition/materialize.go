@@ -64,6 +64,10 @@ func (candidate *Candidate) Close() error {
 // Materialize resolves a selector only for this explicit operation and stages
 // a normalized complete tree beneath the agent root's filesystem.
 func Materialize(ctx context.Context, agentRoot string, selector Selector) (*Candidate, error) {
+	return materialize(ctx, agentRoot, selector, nil)
+}
+
+func materialize(ctx context.Context, agentRoot string, selector Selector, transport http.RoundTripper) (*Candidate, error) {
 	root, err := canonicalAgentRoot(agentRoot)
 	if err != nil {
 		return nil, err
@@ -120,7 +124,7 @@ func Materialize(ctx context.Context, agentRoot string, selector Selector) (*Can
 			candidate.SelectedBasename = remoteRootBasename(selector.URL, "git")
 		}
 	case SourceArchive:
-		source, entries, err := resolveArchive(ctx, selector)
+		source, entries, err := resolveArchive(ctx, selector, transport)
 		if err != nil {
 			return fail(err)
 		}
@@ -296,7 +300,7 @@ func writeArchiveEntries(root string, entries []archiveEntry) error {
 	return writeTree(root, Tree{Entries: treeEntries})
 }
 
-func resolveArchive(ctx context.Context, selector Selector) (Source, []archiveEntry, error) {
+func resolveArchive(ctx context.Context, selector Selector, transport http.RoundTripper) (Source, []archiveEntry, error) {
 	if err := validateHTTPSURL(selector.URL); err != nil {
 		return Source{}, nil, err
 	}
@@ -311,9 +315,12 @@ func resolveArchive(ctx context.Context, selector Selector) (Source, []archiveEn
 		return Source{}, nil, errors.New("cannot prepare archive request")
 	}
 	request.Header.Set("Accept-Encoding", "identity")
+	if transport == nil {
+		transport = archiveTransport
+	}
 	client := &http.Client{
 		Timeout:   2 * time.Minute,
-		Transport: archiveTransport,
+		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return errors.New("archive redirects are not allowed")
 		},

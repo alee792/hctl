@@ -17,14 +17,14 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### [GitHub #100](https://github.com/alee792/hctl/issues/100) — Add the Agent Plugin consumer workflow
+### [GitHub #101](https://github.com/alee792/hctl/issues/101) — Add the Agent Skill consumer workflow
 
-Bind the landed shared acquisition engine to the exact `hctl plugin add`,
+Bind the landed shared acquisition engine to the exact `hctl skill add`,
 `status`, `update`, and `remove` syntax accepted by ADR 0035. Preserve the
-publisher's complete Plugin directory and existing manifest, Skill, MCP,
-collision, native-generation, staging, trust, and manual-Plugin behavior. Keep
-the command adapter free of provider branches, credentials, dependency
-execution, marketplaces, and Skill-command behavior owned by #101.
+complete Skill directory, frontmatter identity, resources, collision,
+native-generation, staging, trust, and manual-Skill behavior. Keep the command
+adapter free of provider branches, credentials, dependency execution,
+marketplaces, and Plugin-specific lifecycle logic already owned by #100.
 
 ## Ready for human
 
@@ -39,6 +39,26 @@ with a temporary least-privilege bot credential and retain only bounded
 redacted evidence.
 
 ## Completed
+
+### [GitHub #100](https://github.com/alee792/hctl/issues/100) — Add the Agent Plugin consumer workflow
+
+**Outcome:** Added exact-root `hctl plugin add`, `status`, `update`, and
+`remove` commands as a thin adapter over the shared acquisition engine. Local,
+resolved HTTPS Git, and digest-pinned HTTPS archive selectors acquire complete
+publisher-authored Plugin directories without reconstructing manifests;
+terminal confirmation or `--yes` gates mutation, status remains offline, and
+commands never choose a harness or implicitly apply.
+
+**Evidence:** CLI regressions cover credential-free local, loopback-TLS Git,
+ZIP, and TAR.GZ sources through the same Manager path; closed selector grammar;
+duplicate and orphan flags; noninteractive failure; affirmative and canceled
+terminal trust; bounded Plugin/Skill/MCP/executable summaries; clean, drifted,
+missing, and manual-untracked status; source-reusing changed and unchanged
+updates; collision and destructive-removal safeguards; locked removal
+approval; and exact agent-root selection. Exact manifests, binary resources,
+executable modes, and empty directories survive acquisition. A fresh copied
+agent applies an acquired Plugin Skill, executable relative MCP server, and
+resources to both Claude and Codex after the original source is unavailable.
 
 ### [GitHub #99](https://github.com/alee792/hctl/issues/99) — Implement shared directory acquisition and provenance
 

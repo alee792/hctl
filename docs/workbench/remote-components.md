@@ -121,11 +121,11 @@ Therefore:
 - Manual replacement is the only current hctl update path. That is a product
   gap, not prescribed behavior from the specification.
 
-Current documentation is technically consistent with the accepted vendored
-slice but can too easily be read as a plugin-authoring journey. Future cleanup
-should explicitly show publisher versus consumer roles, say that acquisition
-and update semantics are client-owned, and describe hctl's supported consumer
-workflow.
+Issue #96 updates the README, product specification, and glossary to show the
+publisher and consumer roles explicitly. Those canonical documents now state
+that acquisition and update mechanics are client-owned, describe hctl's
+current manual local-copy workflow, and keep the future automated consumer
+contract under #95 rather than attributing it to the open specification.
 
 ## Proposed acquisition and update properties
 
@@ -179,8 +179,8 @@ is not yet an hctl contract and should not be adopted silently.
 ## Filed issue graph
 
 - #95 is the outcome epic for remote connections and reusable dependencies.
-- #96 is the ready documentation correction for Agent Plugin publisher and
-  consumer journeys.
+- #96 is the completed documentation clarification for Agent Plugin publisher
+  and consumer journeys.
 - #97 owns generic filesystem-authored native MCP connections.
 - #98 owns the shared acquired-dependency contract for Agent Plugins and Agent
   Skills.

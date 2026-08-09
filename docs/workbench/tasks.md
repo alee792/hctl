@@ -17,16 +17,8 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### [GitHub #96](https://github.com/alee792/hctl/issues/96) — Clarify Agent Plugin publisher and consumer journeys
-
-Clarify in the README, product specification, and glossary that a publisher
-authors the complete Agent Plugin directory and its `plugin.json`, while a
-consumer acquires that directory without reconstructing its manifest. State
-that the Agent Plugins specification does not define installation, vendoring,
-or updates, and document hctl's current manual local-copy behavior without
-changing it. Read the [remote components design notes](remote-components.md)
-first. This documentation-only correction must not implement the unsettled
-acquisition and update contracts in #98 through #101.
+No agent-ready work is currently triaged. The next remote-component tickets
+remain in `needs-triage` until their product decisions are accepted.
 
 ## Ready for human
 
@@ -41,6 +33,21 @@ with a temporary least-privilege bot credential and retain only bounded
 redacted evidence.
 
 ## Completed
+
+### [GitHub #96](https://github.com/alee792/hctl/issues/96) — Clarify Agent Plugin publisher and consumer journeys
+
+**Outcome:** Distinguished the complete publisher-authored Agent Plugin package
+from hctl's current consumer action of reviewing and manually copying that
+directory beneath `plugins/`. Clarified that `plugin.json` is not reconstructed
+by consumers, local vendoring is an hctl choice rather than a specification
+distribution rule, updates remain manual, and Plugin-bundled MCP stays distinct
+from standalone connections. No acquisition or update behavior changed.
+
+**Evidence:** [PR #107](https://github.com/alee792/hctl/pull/107) labels the
+package in the README example and gives the literal consumer journey. The
+product specification records the current manual source contract and future
+#95 boundary. The glossary defines Plugin publisher and consumer roles and
+links the official Agent Plugins and Agent Skills specifications.
 
 ### [GitHub #85](https://github.com/alee792/hctl/issues/85) — Complete the Discord extraction and remove vendor dependencies from hctl core
 

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"hctl/internal/acquisition"
 )
@@ -94,6 +95,55 @@ func TestAcquiredSkillLoadsOfflineDetectsDriftAndRemovesExplicitly(t *testing.T)
 	after, err := Load(root, "codex")
 	if err != nil || after.SourceFingerprint == before {
 		t.Fatalf("removal did not produce a valid distinct project: %v", err)
+	}
+}
+
+func TestRemovalApprovalHoldsTheAcquisitionOperationLock(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	root := agent(t, "portable")
+	source := filepath.Join(t.TempDir(), "review")
+	write(t, filepath.Join(source, "SKILL.md"), "---\nname: review\ndescription: Review.\n---\n")
+	manager := AcquisitionManager(root)
+	if _, err := manager.Add(context.Background(), acquisition.Skill, acquisition.Selector{Type: acquisition.SourceLocal, Path: source}); err != nil {
+		t.Fatal(err)
+	}
+
+	approvalEntered := make(chan struct{})
+	releaseApproval := make(chan struct{})
+	manager.ApproveRemoval = func(status acquisition.ComponentStatus) error {
+		if status.Name != "review" || status.State != acquisition.StateClean || status.Dependency == nil {
+			return fmt.Errorf("unexpected removal status: %#v", status)
+		}
+		close(approvalEntered)
+		<-releaseApproval
+		return nil
+	}
+	removeResult := make(chan error, 1)
+	go func() { removeResult <- manager.Remove(context.Background(), acquisition.Skill, "review", false) }()
+	<-approvalEntered
+
+	statusStarted := make(chan struct{})
+	statusResult := make(chan error, 1)
+	go func() {
+		close(statusStarted)
+		kind := acquisition.Skill
+		_, err := manager.Status(context.Background(), &kind, "review")
+		statusResult <- err
+	}()
+	<-statusStarted
+	select {
+	case err := <-statusResult:
+		close(releaseApproval)
+		<-removeResult
+		t.Fatalf("concurrent status escaped the removal operation lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseApproval)
+	if err := <-removeResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-statusResult; err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("concurrent status did not observe the completed removal: %v", err)
 	}
 }
 

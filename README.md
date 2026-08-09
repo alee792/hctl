@@ -74,17 +74,28 @@ apply; there is no registration file to update.
 
 An [Agent Plugin v1](https://agent-plugins.org/specification) is a complete
 directory package authored by its publisher, including its `plugin.json` and
-any conventional components. To consume an existing Plugin with hctl today,
-review and copy that complete directory intact beneath
-`plugins/<storage-name>/`; do not recreate its manifest or manufacture a
-wrapper Plugin. The storage directory name is local organization only; the
-publisher's manifest supplies Plugin identity. The specification standardizes
-the package and client contract, but does not prescribe a universal source,
-install command, marketplace, registry, vendoring rule, or update workflow.
-Hctl does not yet acquire, add, update, or remove Plugin source: the consumer
-manually places and replaces the complete local directory and reapplies the
-agent. Those automated consumer operations are planned under
-[GitHub epic #95](https://github.com/alee792/hctl/issues/95).
+any conventional components. A consumer acquires that complete directory; do
+not recreate its manifest or manufacture a wrapper Plugin. The specification
+standardizes the package and client contract, but does not prescribe a
+universal source, install command, marketplace, registry, vendoring rule, or
+update workflow.
+
+Hctl can copy a reviewed Plugin from one exact local directory, HTTPS Git ref,
+or digest-pinned HTTPS ZIP/TAR.GZ archive into conventional portable source:
+
+```console
+hctl plugin add ./my-agent --from-dir ../review-pack
+hctl plugin status ./my-agent
+hctl plugin update ./my-agent review-pack
+hctl plugin remove ./my-agent review-pack
+```
+
+Interactive add, update, and removal require confirmation; automation must
+pass `--yes`. Add and update are the only source-networked phases. Status and
+ordinary apply use the committed local tree and never advance a moving ref.
+Manual untracked directories beneath `plugins/` remain supported. Acquisition
+is optional hctl behavior, not an Agent Plugins distribution rule, and none of
+these commands implicitly applies the agent.
 
 Hctl validates each local `plugin.json`, imports skills from its fixed
 `skills/` location, and maps valid `stdio` or `streamable-http` declarations

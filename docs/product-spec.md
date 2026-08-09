@@ -154,23 +154,22 @@ specification defines the package layout and conformant client behavior. It
 does not prescribe a universal distribution source, install command,
 marketplace, registry, vendoring rule, or update workflow.
 
-Hctl's current consumer contract is manual local source placement. After
-obtaining and reviewing a complete Plugin directory, the consumer copies it
-intact beneath `plugins/<storage-name>/` and reapplies the agent. The storage
-directory name is only hctl source organization; `plugin.json` supplies Plugin
-identity and need not use the same name. Hctl has no Plugin acquisition, add,
-update, or remove command. Updating currently means the consumer manually
-replaces the complete local directory and reapplies. Automated consumer
-operations are planned under
-[GitHub epic #95](https://github.com/alee792/hctl/issues/95).
+Hctl implements the ADR 0035 Plugin consumer commands: `hctl plugin add`,
+`status`, `update`, and `remove`. They acquire and review a complete Plugin
+directory and copy it intact beneath `plugins/<manifest-name>/`; the consumer
+does not rebuild `plugin.json`. Manual untracked directories beneath
+`plugins/<storage-name>/` remain supported, and their storage name remains
+independent of publisher identity. Acquisition is an optional client-owned
+workflow, not component registration or an Agent Plugins distribution rule.
 
-ADR 0035 accepts the acquisition contract that those commands will implement;
-it does not claim that the commands are already present. The same client-owned
-workflow applies to complete root Agent Skill directories. Acquisition copies
-reviewed bytes into conventional portable source rather than recording a
-fetch-on-apply dependency. Add and update are the only operations that may
-resolve a source or use the network. Ordinary apply, stage, and status use only
-the committed local tree and never advance a moving reference.
+The same accepted client-owned workflow applies to complete root Agent Skill
+directories, but its public `hctl skill` command adapter is not yet
+implemented. Acquisition copies reviewed bytes into conventional portable
+source rather than recording a fetch-on-apply dependency. Add and update are
+the only operations that may resolve a source or use the network. Ordinary
+apply, stage, and status use only the committed local tree and never advance a
+moving reference. Plugin commands take the exact positional agent root and do
+not implicitly select a harness, workspace, or apply operation.
 
 The accepted source selectors are one exact local directory, one HTTPS Git
 repository plus bounded ref and optional exact component subdirectory, or one

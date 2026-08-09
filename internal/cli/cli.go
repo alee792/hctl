@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -14,6 +16,9 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
+	"hctl/internal/acquisition"
 	"hctl/internal/channel/adapterhost"
 	"hctl/internal/channelconfig"
 	"hctl/internal/channelselection"
@@ -41,6 +46,7 @@ Commands:
   stage AGENT --harness <claude|codex>    Prepare a runnable filesystem tree
   integration <command>                   Manage external integration packages
   connection <add|status|remove>          Manage authored native MCP connections
+  plugin <add|status|update|remove>       Acquire complete Agent Plugin directories
   run AGENT --harness <claude|codex>      Run configured conversational channels
   channel <setup|status|remove> discord AGENT
                                           Manage the installed Discord adapter
@@ -68,6 +74,8 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 		return runIntegration(args[1:], output, stderr)
 	case "connection":
 		return runConnection(args[1:], output, stderr)
+	case "plugin":
+		return runPlugin(args[1:], input, output, stderr)
 	case "run":
 		return runAgent(args[1:], input, output, stderr, self)
 	case "channel":
@@ -79,8 +87,376 @@ func Run(args []string, input io.Reader, output, stderr io.Writer, self string) 
 	case "hook":
 		return runHook(args[1:], input, output)
 	default:
-		return fmt.Errorf("unknown command %q; expected version, apply, stage, integration, connection, run, channel, or schedule", args[0])
+		return fmt.Errorf("unknown command %q; expected version, apply, stage, integration, connection, plugin, run, channel, or schedule", args[0])
 	}
+}
+
+const pluginUsage = `Usage:
+  hctl plugin add AGENT --from-dir DIR [--subdir DIR] [--yes]
+  hctl plugin add AGENT --from-git HTTPS_URL --ref REF [--subdir DIR] [--yes]
+  hctl plugin add AGENT --from-archive HTTPS_URL --sha256 SHA256 [--subdir DIR] [--yes]
+  hctl plugin status AGENT [NAME]
+  hctl plugin update AGENT NAME [SOURCE SELECTOR] [--yes]
+  hctl plugin remove AGENT NAME [--force] [--yes]
+`
+
+type acquisitionSourceFlags struct {
+	fromDirectory *string
+	fromGit       *string
+	fromArchive   *string
+	ref           *string
+	sha256        *string
+	subdirectory  *string
+}
+
+func addAcquisitionSourceFlags(flags *flag.FlagSet) acquisitionSourceFlags {
+	return acquisitionSourceFlags{
+		fromDirectory: flags.String("from-dir", "", "exact local component directory"),
+		fromGit:       flags.String("from-git", "", "HTTPS Git repository URL"),
+		fromArchive:   flags.String("from-archive", "", "direct HTTPS ZIP or TAR.GZ URL"),
+		ref:           flags.String("ref", "", "Git ref resolved during this operation"),
+		sha256:        flags.String("sha256", "", "lowercase archive SHA-256"),
+		subdirectory:  flags.String("subdir", "", "exact component subdirectory"),
+	}
+}
+
+func (source acquisitionSourceFlags) selector(flags *flag.FlagSet, required bool) (*acquisition.Selector, error) {
+	provided := map[string]bool{}
+	flags.Visit(func(current *flag.Flag) { provided[current.Name] = true })
+	selectors := 0
+	for _, name := range []string{"from-dir", "from-git", "from-archive"} {
+		if provided[name] {
+			selectors++
+		}
+	}
+	if selectors == 0 {
+		if required {
+			return nil, errors.New("exactly one --from-dir, --from-git, or --from-archive selector is required")
+		}
+		if provided["ref"] || provided["sha256"] || provided["subdir"] {
+			return nil, errors.New("--ref, --sha256, and --subdir require a source selector")
+		}
+		return nil, nil
+	}
+	if selectors != 1 {
+		return nil, errors.New("source selectors are mutually exclusive")
+	}
+	if provided["subdir"] && *source.subdirectory == "" {
+		return nil, errors.New("--subdir must be nonempty when supplied")
+	}
+	selector := &acquisition.Selector{Subdirectory: *source.subdirectory}
+	switch {
+	case provided["from-dir"]:
+		if provided["ref"] || provided["sha256"] {
+			return nil, errors.New("--from-dir does not accept --ref or --sha256")
+		}
+		selector.Type, selector.Path = acquisition.SourceLocal, *source.fromDirectory
+	case provided["from-git"]:
+		if !provided["ref"] || *source.ref == "" || provided["sha256"] {
+			return nil, errors.New("--from-git requires exactly one nonempty --ref and does not accept --sha256")
+		}
+		selector.Type, selector.URL, selector.Ref = acquisition.SourceGit, *source.fromGit, *source.ref
+	case provided["from-archive"]:
+		if !provided["sha256"] || *source.sha256 == "" || provided["ref"] {
+			return nil, errors.New("--from-archive requires exactly one nonempty --sha256 and does not accept --ref")
+		}
+		selector.Type, selector.URL, selector.SHA256 = acquisition.SourceArchive, *source.fromArchive, *source.sha256
+	}
+	return selector, nil
+}
+
+func rejectDuplicateFlags(arguments []string, names ...string) error {
+	known := make(map[string]bool, len(names))
+	for _, name := range names {
+		known[name] = true
+	}
+	seen := map[string]bool{}
+	for _, argument := range arguments {
+		if !strings.HasPrefix(argument, "-") {
+			continue
+		}
+		name := strings.TrimLeft(argument, "-")
+		if index := strings.IndexByte(name, '='); index >= 0 {
+			name = name[:index]
+		}
+		if !known[name] {
+			continue
+		}
+		if seen[name] {
+			return fmt.Errorf("--%s may be supplied at most once", name)
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
+type acquisitionMutationOptions struct {
+	selector *acquisition.Selector
+	yes      bool
+}
+
+func parseAcquisitionMutationOptions(command string, arguments []string, stderr io.Writer, sourceRequired bool) (acquisitionMutationOptions, error) {
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	sourceFlags := addAcquisitionSourceFlags(flags)
+	yes := flags.Bool("yes", false, "approve the reviewed dependency noninteractively")
+	if err := rejectDuplicateFlags(arguments, "from-dir", "from-git", "from-archive", "ref", "sha256", "subdir", "yes"); err != nil {
+		return acquisitionMutationOptions{}, err
+	}
+	if err := flags.Parse(arguments); err != nil {
+		return acquisitionMutationOptions{}, err
+	}
+	if flags.NArg() != 0 {
+		return acquisitionMutationOptions{}, fmt.Errorf("unexpected %s arguments", command)
+	}
+	selector, err := sourceFlags.selector(flags, sourceRequired)
+	if err != nil {
+		return acquisitionMutationOptions{}, err
+	}
+	return acquisitionMutationOptions{selector: selector, yes: *yes}, nil
+}
+
+type terminalMarker interface {
+	Terminal() bool
+}
+
+type acquisitionTransportProviderForTesting interface {
+	acquisitionArchiveTransportForTesting() http.RoundTripper
+}
+
+func pluginAcquisitionManager(agent string, input io.Reader) acquisition.Manager {
+	manager := project.AcquisitionManager(agent)
+	if provider, ok := input.(acquisitionTransportProviderForTesting); ok {
+		manager.ArchiveTransport = provider.acquisitionArchiveTransportForTesting()
+	}
+	return manager
+}
+
+func terminalInput(input io.Reader) bool {
+	if marked, ok := input.(terminalMarker); ok {
+		return marked.Terminal()
+	}
+	file, ok := input.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
+}
+
+func requireAcquisitionApproval(input io.Reader, terminal io.Writer, yes bool, prompt string) error {
+	if yes {
+		return nil
+	}
+	if !terminalInput(input) {
+		return errors.New("noninteractive dependency mutation requires --yes")
+	}
+	if _, err := fmt.Fprintf(terminal, "%s [y/N]: ", prompt); err != nil {
+		return err
+	}
+	answer, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return errors.New("cannot read dependency confirmation")
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	if answer != "y" && answer != "yes" {
+		return errors.New("dependency mutation canceled")
+	}
+	return nil
+}
+
+func configurePluginAcquisitionApproval(manager *acquisition.Manager, input io.Reader, terminal io.Writer, yes bool, prompt string) error {
+	if !yes && !terminalInput(input) {
+		return errors.New("noninteractive dependency mutation requires --yes")
+	}
+	manager.Approve = func(summary acquisition.TrustSummary) error {
+		if err := printPluginTrustSummary(terminal, summary); err != nil {
+			return err
+		}
+		return requireAcquisitionApproval(input, terminal, yes, prompt)
+	}
+	return nil
+}
+
+func runPlugin(args []string, input io.Reader, output, stderr io.Writer) error {
+	if len(args) == 0 || len(args) == 1 && isHelp(args[0]) {
+		_, err := io.WriteString(output, pluginUsage)
+		return err
+	}
+	if len(args) == 2 && isHelp(args[1]) {
+		_, err := io.WriteString(output, pluginUsage)
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			return errors.New("usage: hctl plugin add AGENT SOURCE_SELECTOR [--yes]")
+		}
+		options, err := parseAcquisitionMutationOptions("plugin add", args[2:], stderr, true)
+		if err != nil {
+			return err
+		}
+		manager := pluginAcquisitionManager(args[1], input)
+		if err := configurePluginAcquisitionApproval(&manager, input, stderr, options.yes, "Acquire this Agent Plugin?"); err != nil {
+			return err
+		}
+		dependency, err := manager.Add(ctx, acquisition.Plugin, *options.selector)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "added plugin=%q destination=%q tree_sha256=%s\n", dependency.Name, dependency.Destination, dependency.TreeSHA256); err != nil {
+			return err
+		}
+		return printApplyNext(output, args[1])
+	case "status":
+		if len(args) != 2 && len(args) != 3 {
+			return errors.New("usage: hctl plugin status AGENT [NAME]")
+		}
+		manager := project.AcquisitionManager(args[1])
+		var name string
+		if len(args) == 3 {
+			name = args[2]
+		}
+		kind := acquisition.Plugin
+		statuses, err := manager.Status(ctx, &kind, name)
+		if err != nil {
+			return err
+		}
+		if len(statuses) == 0 {
+			_, err := fmt.Fprintln(output, "no plugins configured")
+			return err
+		}
+		for _, status := range statuses {
+			if err := printPluginStatus(output, status); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "update":
+		if len(args) < 3 {
+			return errors.New("usage: hctl plugin update AGENT NAME [SOURCE_SELECTOR] [--yes]")
+		}
+		options, err := parseAcquisitionMutationOptions("plugin update", args[3:], stderr, false)
+		if err != nil {
+			return err
+		}
+		manager := pluginAcquisitionManager(args[1], input)
+		if err := configurePluginAcquisitionApproval(&manager, input, stderr, options.yes, "Update this Agent Plugin?"); err != nil {
+			return err
+		}
+		dependency, changed, err := manager.Update(ctx, acquisition.Plugin, args[2], options.selector)
+		if err != nil {
+			return err
+		}
+		operation := "updated"
+		if !changed {
+			operation = "unchanged"
+		}
+		if _, err := fmt.Fprintf(output, "%s plugin=%q destination=%q tree_sha256=%s\n", operation, dependency.Name, dependency.Destination, dependency.TreeSHA256); err != nil {
+			return err
+		}
+		return printApplyNext(output, args[1])
+	case "remove":
+		if len(args) < 3 {
+			return errors.New("usage: hctl plugin remove AGENT NAME [--force] [--yes]")
+		}
+		flags := flag.NewFlagSet("plugin remove", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		force := flags.Bool("force", false, "remove a drifted or missing tracked Plugin")
+		yes := flags.Bool("yes", false, "confirm removal noninteractively")
+		if err := rejectDuplicateFlags(args[3:], "force", "yes"); err != nil {
+			return err
+		}
+		if err := flags.Parse(args[3:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return errors.New("unexpected plugin remove arguments")
+		}
+		if *force && !*yes {
+			return errors.New("--force requires --yes")
+		}
+		manager := project.AcquisitionManager(args[1])
+		manager.ApproveRemoval = func(status acquisition.ComponentStatus) error {
+			if err := printPluginStatus(stderr, status); err != nil {
+				return err
+			}
+			return requireAcquisitionApproval(input, stderr, *yes, "Remove this acquired Agent Plugin?")
+		}
+		if err := manager.Remove(ctx, acquisition.Plugin, args[2], *force); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "removed plugin=%q destination=%q\n", args[2], "plugins/"+args[2]); err != nil {
+			return err
+		}
+		return printApplyNext(output, args[1])
+	default:
+		return fmt.Errorf("unknown plugin command %q; expected add, status, update, or remove", args[0])
+	}
+}
+
+func printPluginTrustSummary(output io.Writer, summary acquisition.TrustSummary) error {
+	executableCount := len(summary.ExecutablePaths) + summary.AdditionalExecutables
+	if _, err := fmt.Fprintf(output, "trust kind=%s name=%q destination=%q tree_sha256=%s files=%d bytes=%d executables=%d plugin_skills=%d plugin_mcp_servers=%d\n", summary.Kind, summary.Name, summary.Destination, summary.TreeSHA256, summary.FileCount, summary.ByteCount, executableCount, summary.PluginSkillCount, summary.PluginMCPServerCount); err != nil {
+		return err
+	}
+	if err := printAcquisitionSource(output, summary.Source); err != nil {
+		return err
+	}
+	for _, path := range summary.ExecutablePaths {
+		if _, err := fmt.Fprintf(output, "executable=%q\n", path); err != nil {
+			return err
+		}
+	}
+	if summary.AdditionalExecutables > 0 {
+		_, err := fmt.Fprintf(output, "additional_executables=%d\n", summary.AdditionalExecutables)
+		return err
+	}
+	return nil
+}
+
+func printPluginStatus(output io.Writer, status acquisition.ComponentStatus) error {
+	manifestName := status.ManifestName
+	if manifestName == "" && status.Dependency != nil {
+		manifestName = status.Dependency.Name
+	}
+	if _, err := fmt.Fprintf(output, "plugin=%q manifest=%q state=%s", status.Name, manifestName, status.State); err != nil {
+		return err
+	}
+	if status.Dependency != nil {
+		dependency := status.Dependency
+		if _, err := fmt.Fprintf(output, " destination=%q tree_sha256=%s files=%d bytes=%d", dependency.Destination, dependency.TreeSHA256, dependency.FileCount, dependency.ByteCount); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(output); err != nil {
+			return err
+		}
+		return printAcquisitionSource(output, dependency.Source)
+	}
+	_, err := fmt.Fprintln(output)
+	return err
+}
+
+func printAcquisitionSource(output io.Writer, source acquisition.Source) error {
+	switch source.Type {
+	case acquisition.SourceLocal:
+		_, err := fmt.Fprintf(output, "source_type=local path=%q subdirectory=%q\n", source.Path, source.Subdirectory)
+		return err
+	case acquisition.SourceGit:
+		_, err := fmt.Fprintf(output, "source_type=git url=%q ref=%q commit=%s subdirectory=%q\n", source.URL, source.Ref, source.Commit, source.Subdirectory)
+		return err
+	case acquisition.SourceArchive:
+		_, err := fmt.Fprintf(output, "source_type=archive url=%q sha256=%s format=%s subdirectory=%q\n", source.URL, source.SHA256, source.Format, source.Subdirectory)
+		return err
+	default:
+		return errors.New("dependency source type is invalid")
+	}
+}
+
+func printApplyNext(output io.Writer, agent string) error {
+	if _, err := fmt.Fprintf(output, "next: hctl apply %s --harness claude\n", agent); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(output, "next: hctl apply %s --harness codex\n", agent)
+	return err
 }
 
 func runConnection(args []string, output, stderr io.Writer) error {

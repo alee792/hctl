@@ -1,6 +1,6 @@
 # Working status
 
-- Updated: 2026-08-08
+- Updated: 2026-08-09
 - Repository: GitHub-backed `hctl` experiment; publication remains pending and
   product naming remains deferred
 - Purpose: let a clean session resume without depending on chat history or the
@@ -209,6 +209,15 @@ a generated custom subagent, and session resume in a fresh external workspace.
   configuration. Root skills and earlier plugin/server sources win deterministic
   name collisions; invalid components warn without suppressing independent
   valid components. Plugin MCP remains native and unmanaged by hctl.
+- ADR 0035 accepts the shared Plugin and Skill acquisition contract for
+  implementation in #99–#101. Explicit add/update vendors one reviewed local,
+  exact resolved HTTPS Git, or digest-pinned HTTPS archive component into
+  conventional source and records its immutable tree identity in the optional
+  committed `hctl-dependencies.json`. Apply and status never fetch or advance
+  it; tracked drift fails before workspace mutation. The lock is provenance,
+  not component registration, and hctl leaves the external `skills-lock.json`
+  opaque. Manual components remain supported while the commands are not yet
+  implemented.
 - Intentionally nonportable native files use a literal
   `harnesses/claude/.claude/` or `harnesses/codex/.codex/` tree. Only the
   selected tree is copied, its files share the existing source-fingerprint and
@@ -304,11 +313,12 @@ package command and no portability claim for raw workspace caches.
 Product naming, the concrete secretless-broker backend, and proposal review UX
 are also intentionally unresolved.
 
-The generic standalone MCP contract is accepted in ADR 0034 and awaits #97
-implementation. Remote Agent Plugin and Agent Skill acquisition, provenance,
-trust, and update questions remain open in the
-[remote components design notes](remote-components.md) and
-[GitHub epic #95](https://github.com/alee792/hctl/issues/95).
+The generic standalone MCP contract in ADR 0034 is implemented by #97. Agent
+Plugin and Agent Skill source, pinning, provenance, trust, drift, update, and
+removal decisions are accepted in ADR 0035; #99 is the next implementation
+slice, followed by the component command journeys in #100 and #101. The
+[remote components design notes](remote-components.md) retain the complete
+decision history for [GitHub epic #95](https://github.com/alee792/hctl/issues/95).
 
 ## Current design frontier
 

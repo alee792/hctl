@@ -43,11 +43,11 @@ by consumers, local vendoring is an hctl choice rather than a specification
 distribution rule, updates remain manual, and Plugin-bundled MCP stays distinct
 from standalone connections. No acquisition or update behavior changed.
 
-**Evidence:** The README now labels the package in its example and gives the
-literal consumer journey. The product specification records the current
-manual source contract and future #95 boundary. The glossary defines Plugin
-publisher and consumer roles and links the official Agent Plugins and Agent
-Skills specifications.
+**Evidence:** [PR #107](https://github.com/alee792/hctl/pull/107) labels the
+package in the README example and gives the literal consumer journey. The
+product specification records the current manual source contract and future
+#95 boundary. The glossary defines Plugin publisher and consumer roles and
+links the official Agent Plugins and Agent Skills specifications.
 
 ### [GitHub #85](https://github.com/alee792/hctl/issues/85) — Complete the Discord extraction and remove vendor dependencies from hctl core
 

@@ -27,8 +27,8 @@ The repository contains a small Go CLI that:
   0035: exact local, resolved HTTPS Git, and digest-pinned HTTPS archive sources
   materialize as complete bounded trees; deterministic provenance, offline
   drift checks, operation locking, and journal recovery are integrated into
-  every project load and staged source snapshot; the public Plugin add, status,
-  update, and remove commands are implemented while the Skill adapter remains;
+  every project load and staged source snapshot; the public Plugin and Skill
+  add, status, update, and remove commands are implemented;
 - applies portable agent instructions, root and vendored Agent Plugins v1
   skills with bundled resources, native unmanaged plugin MCP declarations,
   immediate inherited subagents with an optional
@@ -217,8 +217,8 @@ a generated custom subagent, and session resume in a fresh external workspace.
   suppressing independent valid components. Plugin MCP remains native and
   unmanaged by hctl.
 - ADR 0035's shared Plugin and Skill acquisition foundation is implemented for
-  #99, and #100 binds its public Plugin command adapter; #101 still owns the
-  Skill command adapter. The shared engine vendors one reviewed local,
+  #99, with public Plugin and Skill command adapters from #100 and #101. The
+  shared engine vendors one reviewed local,
   exact resolved HTTPS Git, or digest-pinned HTTPS archive component into
   conventional source and records its immutable tree identity in the optional
   committed `hctl-dependencies.json`. Apply and status never fetch or advance
@@ -322,8 +322,8 @@ are also intentionally unresolved.
 
 The generic standalone MCP contract in ADR 0034 is implemented by #97. Agent
 Plugin and Agent Skill source, pinning, provenance, trust, drift, update, and
-removal decisions are accepted in ADR 0035; #99's shared engine and #100's
-Plugin commands are implemented, with #101's Skill commands next. The
+removal decisions are accepted in ADR 0035; #99's shared engine and #100/#101's
+Plugin and Skill commands are implemented. The
 [remote components design notes](remote-components.md) retain the complete
 decision history for [GitHub epic #95](https://github.com/alee792/hctl/issues/95).
 

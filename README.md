@@ -72,6 +72,21 @@ directory containing `SKILL.md` and optional scripts, references, assets, or
 other resources. Adding a skill directory makes it available on the next
 apply; there is no registration file to update.
 
+Existing complete Skills can also be copied into portable source through the
+same reviewed local, exact HTTPS Git ref, or digest-pinned HTTPS archive forms
+as Plugins:
+
+```console
+hctl skill add ./my-agent --from-dir ../review
+hctl skill status ./my-agent
+hctl skill update ./my-agent review
+hctl skill remove ./my-agent review
+```
+
+Manual untracked directories beneath `skills/` remain supported. These
+commands preserve `SKILL.md` and the complete accepted resource tree, require
+interactive confirmation or `--yes` for mutation, and never implicitly apply.
+
 An [Agent Plugin v1](https://agent-plugins.org/specification) is a complete
 directory package authored by its publisher, including its `plugin.json` and
 any conventional components. A consumer acquires that complete directory; do

@@ -17,14 +17,7 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-### [GitHub #101](https://github.com/alee792/hctl/issues/101) — Add the Agent Skill consumer workflow
-
-Bind the landed shared acquisition engine to the exact `hctl skill add`,
-`status`, `update`, and `remove` syntax accepted by ADR 0035. Preserve the
-complete Skill directory, frontmatter identity, resources, collision,
-native-generation, staging, trust, and manual-Skill behavior. Keep the command
-adapter free of provider branches, credentials, dependency execution,
-marketplaces, and Plugin-specific lifecycle logic already owned by #100.
+No autonomous implementation task is currently unblocked after #101.
 
 ## Ready for human
 
@@ -39,6 +32,22 @@ with a temporary least-privilege bot credential and retain only bounded
 redacted evidence.
 
 ## Completed
+
+### [GitHub #101](https://github.com/alee792/hctl/issues/101) — Add the Agent Skill consumer workflow
+
+**Outcome:** Added exact-root `hctl skill add`, `status`, `update`, and
+`remove` commands through the same component-neutral CLI and acquisition
+Manager path as Plugins. Complete root Skills retain exact `SKILL.md`, nested
+resources, binary bytes, executable intent, and empty directories; mutations
+require terminal confirmation or `--yes`, status remains offline, manual Skills
+remain untracked, and commands never select a harness or implicitly apply.
+
+**Evidence:** Public command regressions cover local, loopback-TLS Git, ZIP,
+and TAR.GZ source equivalence; closed selector grammar and exact roots; bounded
+Skill trust without Plugin-only labels; clean, manual-untracked, drifted,
+missing, changed, unchanged, destructive removal, collision, cancellation, and
+shared recovery behavior. A fresh copied agent applies the complete acquired
+Skill resources identically to Claude and Codex after its source is removed.
 
 ### [GitHub #100](https://github.com/alee792/hctl/issues/100) — Add the Agent Plugin consumer workflow
 

@@ -162,14 +162,15 @@ does not rebuild `plugin.json`. Manual untracked directories beneath
 independent of publisher identity. Acquisition is an optional client-owned
 workflow, not component registration or an Agent Plugins distribution rule.
 
-The same accepted client-owned workflow applies to complete root Agent Skill
-directories, but its public `hctl skill` command adapter is not yet
-implemented. Acquisition copies reviewed bytes into conventional portable
-source rather than recording a fetch-on-apply dependency. Add and update are
-the only operations that may resolve a source or use the network. Ordinary
-apply, stage, and status use only the committed local tree and never advance a
-moving reference. Plugin commands take the exact positional agent root and do
-not implicitly select a harness, workspace, or apply operation.
+The same accepted client-owned workflow is implemented for complete root Agent
+Skill directories through `hctl skill add`, `status`, `update`, and `remove`.
+Manual untracked Skills remain supported. Acquisition copies reviewed bytes
+into conventional portable source rather than recording a fetch-on-apply
+dependency. Add and update are the only operations that may resolve a source
+or use the network. Ordinary apply, stage, and status use only the committed
+local tree and never advance a moving reference. Plugin and Skill commands take
+the exact positional agent root and do not implicitly select a harness,
+workspace, or apply operation.
 
 The accepted source selectors are one exact local directory, one HTTPS Git
 repository plus bounded ref and optional exact component subdirectory, or one

@@ -241,6 +241,136 @@ func TestPluginConsumerReportsAndForceRemovesMissingDependency(t *testing.T) {
 	}
 }
 
+func TestSkillConsumerCommandsAndFreshApply(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	agent := filepath.Join(t.TempDir(), "agent")
+	writeCLIFile(t, filepath.Join(agent, "instructions.md"), "---\ndescription: Skill consumer.\n---\n\nUse Skills.\n", 0o644)
+	writeCLIFile(t, filepath.Join(agent, "skills", "manual", "SKILL.md"), "---\nname: manual\ndescription: Manual.\n---\n", 0o644)
+	sourceParent := t.TempDir()
+	source := filepath.Join(sourceParent, "review")
+	writeCLISkillFixture(t, source, "one\n")
+
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"skill", "add", agent, "--from-dir", source, "--yes"}, strings.NewReader(""), &output, &stderr, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `added skill="review"`) || !strings.Contains(stderr.String(), "executables=1") || strings.Contains(stderr.String(), "plugin_skills") {
+		t.Fatalf("Skill add output=%q stderr=%q", output.String(), stderr.String())
+	}
+	wantMarker := "---\nname: review\ndescription: Review carefully.\n---\n\nReview.\n"
+	if got := readCLIFile(t, filepath.Join(agent, "skills", "review", "SKILL.md")); got != wantMarker {
+		t.Fatalf("acquired SKILL.md changed: %q", got)
+	}
+	output.Reset()
+	if err := Run([]string{"skill", "status", agent}, strings.NewReader(""), &output, io.Discard, ""); err != nil {
+		t.Fatal(err)
+	}
+	if status := output.String(); !strings.Contains(status, `skill="review" skill_name="review" state=clean`) || !strings.Contains(status, `skill="manual" skill_name="manual" state=untracked`) || !strings.Contains(status, "source_type=local") {
+		t.Fatalf("Skill status=%q", status)
+	}
+	writeCLIFile(t, filepath.Join(source, "references", "guide.txt"), "two\n", 0o644)
+	output.Reset()
+	if err := Run([]string{"skill", "update", agent, "review", "--yes"}, strings.NewReader(""), &output, io.Discard, ""); err != nil || !strings.Contains(output.String(), `updated skill="review"`) {
+		t.Fatalf("Skill update=%q err=%v", output.String(), err)
+	}
+	output.Reset()
+	if err := Run([]string{"skill", "update", agent, "review", "--yes"}, strings.NewReader(""), &output, io.Discard, ""); err != nil || !strings.Contains(output.String(), `unchanged skill="review"`) {
+		t.Fatalf("unchanged Skill update=%q err=%v", output.String(), err)
+	}
+
+	fresh := filepath.Join(t.TempDir(), "fresh-agent")
+	copyCLITree(t, agent, fresh)
+	writeCLIFile(t, filepath.Join(agent, "skills", "review", "drift.txt"), "drift\n", 0o644)
+	if err := Run([]string{"skill", "remove", agent, "review", "--force", "--yes"}, strings.NewReader(""), io.Discard, io.Discard, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run([]string{"skill", "add", agent, "--from-dir", source, "--yes"}, strings.NewReader(""), io.Discard, io.Discard, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(agent, "skills", "review")); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := Run([]string{"skill", "status", agent, "review"}, strings.NewReader(""), &output, io.Discard, ""); err != nil || !strings.Contains(output.String(), "state=missing") {
+		t.Fatalf("missing Skill status=%q err=%v", output.String(), err)
+	}
+	if err := Run([]string{"skill", "remove", agent, "review", "--force", "--yes"}, strings.NewReader(""), io.Discard, io.Discard, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(sourceParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(agent); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join(fresh, "skills", "review", "empty")); err != nil || !info.IsDir() {
+		t.Fatalf("fresh acquired Skill empty directory=%v %v", info, err)
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct{ name, version, skillRoot string }{{"claude", "2.1.221 (Claude Code)", ".claude"}, {"codex", "codex-cli 0.144.1", ".agents"}} {
+		t.Run(fixture.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			harness := filepath.Join(t.TempDir(), fixture.name)
+			writeCLIFile(t, harness, "#!/bin/sh\necho '"+fixture.version+"'\n", 0o755)
+			if err := Run([]string{"apply", fresh, "--workspace", workspace, "--harness", fixture.name, "--command", harness}, strings.NewReader(""), io.Discard, io.Discard, self); err != nil {
+				t.Fatal(err)
+			}
+			generated := filepath.Join(workspace, fixture.skillRoot, "skills", "review")
+			if got := readCLIFile(t, filepath.Join(generated, "references", "binary")); got != string([]byte{0, 1, 2, 255}) {
+				t.Fatalf("generated Skill binary=%q", got)
+			}
+			if info, err := os.Stat(filepath.Join(generated, "scripts", "review.sh")); err != nil || info.Mode().Perm()&0o111 == 0 {
+				t.Fatalf("generated Skill executable=%v %v", info, err)
+			}
+		})
+	}
+}
+
+func TestSkillCommandClosedGrammarCancellationAndPluginCollision(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	agent := filepath.Join(t.TempDir(), "agent")
+	writeCLIFile(t, filepath.Join(agent, "instructions.md"), "---\ndescription: Skill consumer.\n---\n\nUse Skills.\n", 0o644)
+	source := filepath.Join(t.TempDir(), "review")
+	writeCLISkillFixture(t, source, "one\n")
+	for _, fixture := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"skill", "add", agent, "--yes"}, "exactly one"},
+		{[]string{"skill", "add", agent, "--from-git", "https://example.com/repo.git", "--yes"}, "requires exactly one"},
+		{[]string{"skill", "add", agent, "--from-archive", "https://example.com/review.zip", "--yes"}, "requires exactly one"},
+		{[]string{"skill", "update", agent, "review", "--subdir", "nested", "--yes"}, "require a source selector"},
+	} {
+		if err := Run(fixture.args, strings.NewReader(""), io.Discard, io.Discard, ""); err == nil || !strings.Contains(err.Error(), fixture.want) {
+			t.Fatalf("Skill selector error=%v for %v", err, fixture.args)
+		}
+	}
+	if err := Run([]string{"skill", "add", agent, "--from-dir", source}, strings.NewReader("yes\n"), io.Discard, io.Discard, ""); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("noninteractive Skill add did not fail closed: %v", err)
+	}
+	terminal := &markedTerminalReader{Reader: strings.NewReader("no\n")}
+	if err := Run([]string{"skill", "add", agent, "--from-dir", source}, terminal, io.Discard, io.Discard, ""); err == nil || !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("Skill cancellation=%v", err)
+	}
+	writeCLIFile(t, filepath.Join(agent, "plugins", "pack", "plugin.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"pack"}`, 0o644)
+	writeCLIFile(t, filepath.Join(agent, "plugins", "pack", "skills", "review", "SKILL.md"), "---\nname: review\ndescription: Plugin Skill.\n---\n", 0o644)
+	if err := Run([]string{"skill", "add", agent, "--from-dir", source, "--yes"}, strings.NewReader(""), io.Discard, io.Discard, ""); err == nil || !strings.Contains(err.Error(), "collides") {
+		t.Fatalf("Plugin Skill collision=%v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(agent, "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run([]string{"skill", "status", filepath.Join(agent, "skills")}, strings.NewReader(""), io.Discard, io.Discard, ""); err == nil || !strings.Contains(err.Error(), "instructions") {
+		t.Fatalf("Skill status inferred an agent root: %v", err)
+	}
+}
+
 func TestPluginCommandSelectorGrammarAndCancellation(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	agent := filepath.Join(t.TempDir(), "agent")
@@ -329,7 +459,7 @@ func TestPluginSourceFlagsProduceSharedTypedSelectors(t *testing.T) {
 	}
 }
 
-func TestPluginRemoteSourceCommandsUseSharedManager(t *testing.T) {
+func TestRemoteComponentCommandsUseSharedManager(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	source := filepath.Join(t.TempDir(), "review-pack")
 	writeCLIPluginFixture(t, source, "remote\n")
@@ -337,9 +467,17 @@ func TestPluginRemoteSourceCommandsUseSharedManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	skillSource := filepath.Join(t.TempDir(), "review")
+	writeCLISkillFixture(t, skillSource, "remote\n")
+	skillTree, err := acquisition.ReadTree(skillSource)
+	if err != nil {
+		t.Fatal(err)
+	}
 	archives := map[string][]byte{
-		"zip":    cliPluginZIP(t, source),
-		"tar.gz": cliPluginTarGzip(t, source),
+		"review-pack.zip":    cliComponentZIP(t, source, "review-pack"),
+		"review-pack.tar.gz": cliComponentTarGzip(t, source, "review-pack"),
+		"review.zip":         cliComponentZIP(t, skillSource, "review"),
+		"review.tar.gz":      cliComponentTarGzip(t, skillSource, "review"),
 	}
 
 	webRoot := t.TempDir()
@@ -350,16 +488,20 @@ func TestPluginRemoteSourceCommandsUseSharedManager(t *testing.T) {
 	runCLIGit(t, work, "config", "user.name", "Fixture")
 	runCLIGit(t, work, "config", "user.email", "fixture@example.com")
 	copyCLITree(t, source, filepath.Join(work, "review-pack"))
+	copyCLITree(t, skillSource, filepath.Join(work, "review"))
 	if err := os.Remove(filepath.Join(work, "review-pack", "empty")); err != nil {
 		t.Fatal(err)
 	}
-	runCLIGit(t, work, "add", "review-pack")
+	if err := os.Remove(filepath.Join(work, "review", "empty")); err != nil {
+		t.Fatal(err)
+	}
+	runCLIGit(t, work, "add", "review-pack", "review")
 	runCLIGit(t, work, "commit", "-m", "fixture")
 	runCLIGit(t, work, "remote", "add", "origin", repository)
 	runCLIGit(t, work, "push", "origin", "main")
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if payload, ok := archives[strings.TrimPrefix(request.URL.Path, "/review-pack.")]; ok {
+		if payload, ok := archives[strings.TrimPrefix(request.URL.Path, "/")]; ok {
 			_, _ = writer.Write(payload)
 			return
 		}
@@ -407,25 +549,28 @@ func TestPluginRemoteSourceCommandsUseSharedManager(t *testing.T) {
 	t.Setenv("GIT_TERMINAL_PROMPT", "0")
 
 	fixtures := []struct {
-		name     string
-		args     []string
-		expected acquisition.Tree
+		name, noun, component string
+		args                  []string
+		expected              acquisition.Tree
 	}{
-		{"git", []string{"--from-git", server.URL + "/component.git", "--ref", "refs/heads/main", "--subdir", "review-pack"}, mustReadCLITree(t, filepath.Join(work, "review-pack"))},
-		{"zip", []string{"--from-archive", server.URL + "/review-pack.zip", "--sha256", cliSHA256(archives["zip"]), "--subdir", "review-pack"}, sourceTree},
-		{"tar.gz", []string{"--from-archive", server.URL + "/review-pack.tar.gz", "--sha256", cliSHA256(archives["tar.gz"]), "--subdir", "review-pack"}, sourceTree},
+		{"plugin git", "plugin", "review-pack", []string{"--from-git", server.URL + "/component.git", "--ref", "refs/heads/main", "--subdir", "review-pack"}, mustReadCLITree(t, filepath.Join(work, "review-pack"))},
+		{"plugin zip", "plugin", "review-pack", []string{"--from-archive", server.URL + "/review-pack.zip", "--sha256", cliSHA256(archives["review-pack.zip"]), "--subdir", "review-pack"}, sourceTree},
+		{"plugin tar.gz", "plugin", "review-pack", []string{"--from-archive", server.URL + "/review-pack.tar.gz", "--sha256", cliSHA256(archives["review-pack.tar.gz"]), "--subdir", "review-pack"}, sourceTree},
+		{"skill git", "skill", "review", []string{"--from-git", server.URL + "/component.git", "--ref", "refs/heads/main", "--subdir", "review"}, mustReadCLITree(t, filepath.Join(work, "review"))},
+		{"skill zip", "skill", "review", []string{"--from-archive", server.URL + "/review.zip", "--sha256", cliSHA256(archives["review.zip"]), "--subdir", "review"}, skillTree},
+		{"skill tar.gz", "skill", "review", []string{"--from-archive", server.URL + "/review.tar.gz", "--sha256", cliSHA256(archives["review.tar.gz"]), "--subdir", "review"}, skillTree},
 	}
 	for _, fixture := range fixtures {
 		t.Run(fixture.name, func(t *testing.T) {
 			agent := filepath.Join(t.TempDir(), "agent")
 			writeCLIFile(t, filepath.Join(agent, "instructions.md"), "---\ndescription: Remote Plugin.\n---\n\nUse it.\n", 0o644)
-			arguments := append([]string{"plugin", "add", agent}, fixture.args...)
+			arguments := append([]string{fixture.noun, "add", agent}, fixture.args...)
 			arguments = append(arguments, "--yes")
 			input := &acquisitionTransportReader{Reader: strings.NewReader(""), transport: server.Client().Transport}
 			if err := Run(arguments, input, io.Discard, io.Discard, ""); err != nil {
 				t.Fatal(err)
 			}
-			installed, err := acquisition.ReadTree(filepath.Join(agent, "plugins", "review-pack"))
+			installed, err := acquisition.ReadTree(filepath.Join(agent, fixture.noun+"s", fixture.component))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2067,7 +2212,18 @@ func writeCLIPluginFixture(t *testing.T, root, resource string) {
 	writeCLIFile(t, filepath.Join(root, "resource.txt"), resource, 0o644)
 }
 
-func cliPluginZIP(t *testing.T, root string) []byte {
+func writeCLISkillFixture(t *testing.T, root, guide string) {
+	t.Helper()
+	writeCLIFile(t, filepath.Join(root, "SKILL.md"), "---\nname: review\ndescription: Review carefully.\n---\n\nReview.\n", 0o644)
+	writeCLIFile(t, filepath.Join(root, "scripts", "review.sh"), "#!/bin/sh\n", 0o755)
+	writeCLIFile(t, filepath.Join(root, "references", "guide.txt"), guide, 0o644)
+	writeCLIFile(t, filepath.Join(root, "references", "binary"), string([]byte{0, 1, 2, 255}), 0o644)
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func cliComponentZIP(t *testing.T, root, rootName string) []byte {
 	t.Helper()
 	var output bytes.Buffer
 	writer := zip.NewWriter(&output)
@@ -2076,7 +2232,7 @@ func cliPluginZIP(t *testing.T, root string) []byte {
 		if err != nil {
 			t.Fatal(err)
 		}
-		header.Name = "review-pack/" + path
+		header.Name = rootName + "/" + path
 		if info.IsDir() {
 			header.Name += "/"
 		}
@@ -2095,7 +2251,7 @@ func cliPluginZIP(t *testing.T, root string) []byte {
 	return output.Bytes()
 }
 
-func cliPluginTarGzip(t *testing.T, root string) []byte {
+func cliComponentTarGzip(t *testing.T, root, rootName string) []byte {
 	t.Helper()
 	var output bytes.Buffer
 	gzipWriter := gzip.NewWriter(&output)
@@ -2105,7 +2261,7 @@ func cliPluginTarGzip(t *testing.T, root string) []byte {
 		if err != nil {
 			t.Fatal(err)
 		}
-		header.Name = "review-pack/" + path
+		header.Name = rootName + "/" + path
 		if err := writer.WriteHeader(header); err != nil {
 			t.Fatal(err)
 		}

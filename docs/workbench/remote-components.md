@@ -2,9 +2,8 @@
 
 - Status: the outcome-level direction is accepted in `docs/vision.md`; the
   standalone MCP source and command contract is implemented through ADR 0034
-  and #97, and ADR 0035's shared Plugin and Skill acquisition foundation and
-  Plugin commands are implemented through #99 and #100 while #101 still owns
-  the public Skill commands
+  and #97, and ADR 0035's shared Plugin and Skill acquisition foundation plus
+  both public component command families are implemented through #99-#101
 - Started: 2026-08-08
 - Purpose: retain the product-model questions and proposed journeys behind
   the filed GitHub issues until their contracts are accepted in the product
@@ -12,12 +11,13 @@
 
 ## Why this note exists
 
-The desired product should let a non-developer add an MCP connection, Agent
-Plugin, or Agent Skill that already exists elsewhere, apply the agent, and
-interact with it through the selected native harness. The current prototype
-can consume local source, but its acquisition and update journeys are either
-absent or provider-shaped. Broad discussion can obscure the distinct package,
-runtime, credential, and ownership questions, so this note keeps them separate.
+The desired product lets a non-developer add an MCP connection, Agent Plugin,
+or Agent Skill that already exists elsewhere, apply the agent, and interact
+with it through the selected native harness. When this note opened, local
+consumption existed but acquisition and update were absent or provider-shaped;
+#97 and #99-#101 now implement the accepted generic journeys. Broad discussion
+can obscure the distinct package, runtime, credential, and ownership questions,
+so this note keeps them separate.
 
 ## Current contract and implementation
 
@@ -43,8 +43,8 @@ runtime, credential, and ownership questions, so this note keeps them separate.
   on the generic installed-package envelope without a vendor switch in hctl
   core.
 - Hctl now contains shared acquisition, provenance, update, removal, status,
-  and project-load verification primitives. The public Agent Plugin command
-  family is implemented; the Agent Skill command family remains.
+  and project-load verification primitives. The public Agent Plugin and Agent
+  Skill command families are implemented.
 
 ## Filesystem model
 
@@ -126,9 +126,9 @@ Therefore:
 - `plugins/` vendoring is hctl's current dependency decision, not a requirement
   of the Agent Plugins specification.
 - Manual placement remains supported, and ADR 0035's client-owned automated
-  Plugin replacement contract is exposed through `hctl plugin`. The remaining
-  public Skill journey is an hctl product gap, not behavior prescribed by the
-  specification.
+  Plugin replacement contract is exposed through `hctl plugin`; the matching
+  root Skill contract is exposed through `hctl skill`. Neither journey is
+  behavior prescribed by the component specifications.
 
 Issue #96 updated the README, product specification, and glossary to show the
 publisher and consumer roles explicitly. Issue #100 now documents the
@@ -186,11 +186,10 @@ their existing behavior.
   Skills in ADR 0035.
 - #99 completed acquisition, provenance, drift, and replacement mechanics.
 - #100 implements the Agent Plugin consumer commands.
-- #101 owns the remaining Agent Skill consumer commands on the same landed
-  foundation and is the next implementation slice.
+- #101 implements the Agent Skill consumer commands on the same landed
+  foundation.
 
-Issue #101 can now proceed on the exact public command surface reconciled with
-the landed shared interfaces.
+The first explicit Plugin and Skill consumer delivery is complete.
 
 ## Questions settled by ADR 0035
 
@@ -211,9 +210,9 @@ the landed shared interfaces.
 ## Implementation-ticket gate
 
 ADR 0034 satisfied this gate for completed #97. ADR 0035 and #99 satisfy it for
-the shared dependency foundation. #100 binds the Plugin commands and #101 can
-bind the Skill commands without duplicating source, trust, provenance,
-locking, drift, or recovery mechanics.
+the shared dependency foundation. #100 and #101 bind the Plugin and Skill
+commands without duplicating source, trust, provenance, locking, drift, or
+recovery mechanics.
 
 ### Accepted first delivery boundary
 

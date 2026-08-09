@@ -1,11 +1,11 @@
 # Remote components design notes
 
 - Status: the outcome-level direction is accepted in `docs/vision.md`; the
-  implementation mechanics in this note remain ideation
+  implementation mechanics remain ideation tracked under GitHub epic #95
 - Started: 2026-08-08
-- Purpose: retain product-model questions and proposed journeys before they
-  are split into GitHub issues or accepted in the product specification and
-  ADRs
+- Purpose: retain the product-model questions and proposed journeys behind
+  the filed GitHub issues until their contracts are accepted in the product
+  specification and ADRs
 
 ## Why this note exists
 
@@ -30,9 +30,17 @@ runtime, credential, and ownership questions, so this note keeps them separate.
   directories. Hctl validates the publisher-authored `plugin.json`, imports
   skills, and maps supported `mcp.json` servers into native harness
   configuration.
-- The current GitHub connection source and legacy managed implementation are
-  provider-specific. The accepted replacement selects an operator-installed
-  official GitHub MCP package and emits native Claude or Codex configuration.
+- The operator-installed official GitHub MCP package now emits native Claude
+  and Codex configuration. Its maintainer journey and credential-free operator
+  documentation and regressions are complete; separately authorized live PAT
+  acceptance has not run. Installed-package resolution and native server
+  rendering are generic once given a resolved capability, but authored project
+  loading, selection and resolution wiring, validation, staging, and generated
+  model guidance remain GitHub-specific.
+- The anonymous managed GitHub client and its runtime fallback have been
+  removed. The external channel-adapter host now provides a second capability
+  on the generic installed-package envelope without a vendor switch in hctl
+  core.
 - Hctl does not currently acquire or update Agent Plugins or Agent Skills.
 
 ## Proposed filesystem model
@@ -92,8 +100,9 @@ transport. That is a different product boundary from consuming a native MCP
 server.
 
 The GitHub connection should become a fixture or consumer of the generic path,
-not the template for another provider switch. Existing issue #67 needs to be
-reconciled with this direction before implementation.
+not the template for another provider switch. Completed issues #67, #71, and
+#72 provide the regression baseline; issue #97 owns generalizing the remaining
+authored source selection and staging without weakening those journeys.
 
 ## Agent Plugin publisher and consumer distinction
 
@@ -155,28 +164,35 @@ is not yet an hctl contract and should not be adopted silently.
 
 ## Existing related issues
 
-- #67: emit the official GitHub MCP server through native Claude and Codex
-  configuration; should reuse the generic connection path.
-- #74: install process-isolated third-party integrations without rebuilding
-  hctl; provides the package foundation for installed executable MCP servers.
+- #67, #71, and #72 are completed evidence for the operator-installed GitHub
+  MCP package, native Claude and Codex rendering, the maintainer journey, and
+  credential-free operator documentation and regressions. Live PAT acceptance
+  remains separately authorized and unexecuted.
+- #74, #75, and #76 are completed evidence for the generic installed-package
+  foundation, package management, and harness-neutral native MCP resolution.
+- #84 and #85 are completed evidence that the same package envelope can host
+  an external channel adapter while hctl core remains vendor-agnostic.
 - #77: managed MCP gateway.
 - #78: credential isolation.
 - #80: brokered remote HTTP MCP and OAuth.
 
-No issue has yet been created from this note. The attempted GitHub app write on
-2026-08-08 was denied before issue creation, and the CLI fallback was stopped
-when the discussion returned to product alignment.
+## Filed issue graph
 
-## Tentative issue shape after alignment
+- #95 is the outcome epic for remote connections and reusable dependencies.
+- #96 is the ready documentation correction for Agent Plugin publisher and
+  consumer journeys.
+- #97 owns generic filesystem-authored native MCP connections.
+- #98 owns the shared acquired-dependency contract for Agent Plugins and Agent
+  Skills.
+- #99 owns acquisition, provenance, drift, and replacement mechanics and is
+  blocked on #98.
+- #100 owns the Agent Plugin consumer commands and is blocked on #99.
+- #101 owns the Agent Skill consumer commands and is blocked on #99.
 
-1. An epic for remote connections and reusable dependencies.
-2. Generic filesystem-authored MCP connections.
-3. One pinned directory-dependency acquisition and provenance primitive.
-4. Agent Plugin add, status, update, remove, and consumer documentation.
-5. Agent Skill add, status, update, and remove.
-
-These should remain `needs-triage` until the root selection, source locator,
-pinning, lock/provenance, drift, and credential boundaries above are accepted.
+Issues #97 through #101 remain `needs-triage` until their relevant root
+selection, schema, source locator, pinning, provenance, drift, trust, and
+credential decisions below are accepted. Filing the graph records the product
+work; it does not settle those contracts.
 
 ## Questions to settle next
 
@@ -192,6 +208,9 @@ pinning, lock/provenance, drift, and credential boundaries above are accepted.
 5. Where should source provenance and local content identity be recorded so it
    is portable enough for another machine but remains separate from upstream
    manifests?
+
+Issue #97 owns decisions 1 through 3 for connections. Issue #98 owns the
+shared dependency decisions in 1, 4, and 5 before #99 through #101 proceed.
 
 ## Implementation-ticket gate
 
@@ -315,8 +334,10 @@ operation. No background or apply-time update is allowed.
 Decide whether the current body-only `connections/github.md` is migrated with
 a compatibility warning or deliberately broken before publication. The
 generic connection implementation should supersede its provider-specific
-parser and generator. Issue #67 then becomes the installed GitHub package
-fixture/specialization rather than a separate connection architecture.
+parser and generator. Completed issues #67, #71, and #72 remain the installed
+GitHub package fixture and regression baseline rather than a separate
+connection architecture. There is no anonymous managed GitHub implementation
+or runtime fallback left to remove.
 
 Keep Plugin-bundled MCP separate: adding a Plugin preserves and consumes its
 publisher-authored `mcp.json`; it does not synthesize a second connection file.

@@ -1,9 +1,10 @@
 # Native GitHub MCP
 
-An agent requests GitHub by adding `connections/github.md`. Hctl then maps the
-operator-installed official `github/github-mcp-server` package into native
-Claude Code or Codex project configuration. There is no GitHub SDK in hctl and
-no manual MCP JSON editing in this journey.
+An agent requests GitHub through the generic `connections/github.md` installed
+target. The file selects the operator-installed official
+`github/github-mcp-server` package and its `github` capability; hctl maps that
+selection into native Claude Code or Codex project configuration. There is no
+GitHub SDK, provider adapter, or manual MCP JSON editing in this journey.
 
 > **Unmanaged credential and effect boundary:** Claude Code or Codex, the
 > model-accessible shell and execution tools, plugins, the official server, and
@@ -31,7 +32,16 @@ and required environment *name* with `value=not-read`. `verify` is the offline
 status check for every cached byte. Neither command starts the package or reads
 the PAT.
 
-Add a bounded model-facing description to the agent:
+Add the connection to the exact agent root:
+
+```sh
+hctl connection add ./my-agent github \
+  --package github-mcp-server --capability github \
+  --context "Use the official native GitHub tools for repository, issue, and pull-request work."
+hctl connection status ./my-agent github
+```
+
+This atomically creates the ordinary versioned source:
 
 ```text
 my-agent/
@@ -43,12 +53,19 @@ my-agent/
 For example:
 
 ```md
+---
+type: mcp
+package: github-mcp-server
+capability: github
+---
+
 Use the official native GitHub tools discovered by the harness for repository
 issues and pull requests.
 ```
 
-Apply to the intended workspace while offline. The installed package, not
-`PATH`, supplies the exact executable:
+Connection discovery and exact package resolution are offline. Apply to the
+intended workspace explicitly; the installed package, not `PATH`, supplies the
+exact executable:
 
 ```sh
 mkdir -p ./my-workspace
@@ -154,11 +171,13 @@ hctl integration enable github-mcp-server
 hctl integration remove github-mcp-server
 ```
 
-There is no separate `status` command: `inspect` reports selected state and
-`verify` proves the complete installed closure offline. Disablement removes the
+There is no separate integration-package `status` command: `inspect` reports
+selected package state and `verify` proves the complete installed closure
+offline. `hctl connection status ./my-agent github` separately reports the
+authored selection and its offline resolution health. Disablement removes the
 package from future resolution without deleting metadata. Removal retires the
-selected record and retains immutable shared cache bytes. Reinstalling the
-same exact package can reuse that cache.
+selected record and retains immutable shared cache bytes. Reinstalling the same
+exact package can reuse that cache.
 
 For a reviewed future package source, update the selected immutable identity
 explicitly rather than rerunning install against a changed identity:
@@ -180,7 +199,7 @@ to resolve the current package again.
 Remove the package in this order so a workspace never retains an apparently
 current stale entry:
 
-1. remove `connections/github.md` from every consuming agent source;
+1. run `hctl connection remove AGENT github` for every consuming agent source;
 2. reapply every local workspace so its generated native GitHub entry is
    removed, and rebuild staged outputs/images without the connection;
 3. run `hctl integration remove github-mcp-server`; and
@@ -191,11 +210,13 @@ reapply and does not erase previously generated native configuration. If that
 happens, restore or enable the exact package, follow the order above, and then
 remove or disable it.
 
-Apply and stage are offline and verify current package state. An agent without
-`connections/github.md` neither resolves nor stages this package. Hctl-owned
-scheduled, channel, and continuation process opens re-resolve current package
-state before opening a native child. Plain direct Claude or Codex launches do
-not; their generated configuration remains unchanged until reapply.
+Connection discovery and package resolution during apply and stage are offline
+and verify current package state; other apply responsibilities retain their
+documented behavior. An agent without `connections/github.md` neither resolves
+nor stages this package. Hctl-owned scheduled, channel, and continuation
+process opens re-resolve current package state before opening a native child.
+Plain direct Claude or Codex launches do not; their generated configuration
+remains unchanged until reapply.
 
 ## Troubleshooting
 

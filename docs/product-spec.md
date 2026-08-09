@@ -450,8 +450,9 @@ policy, verifies every pinned identity, materializes a local package source,
 and invokes the generic package installer. Hctl itself still follows no
 redirect and contains no GitHub downloader, cache, SDK, or vendor switch.
 Users do not select an asset, install Go, copy a binary onto `PATH`, or know the
-shared cache layout. Once installed, verification, apply, resolution, and
-staging are offline and use the exact prepared state rather than `PATH`.
+shared cache layout. Once installed, verification, connection resolution during
+apply, and staging are offline and use the exact prepared state rather than
+`PATH`.
 
 Claude receives a project `.mcp.json` stdio entry using `/usr/bin/env -C` to
 enter that package root and exec the exact installed server. Codex receives a

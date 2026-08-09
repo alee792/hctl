@@ -63,25 +63,29 @@ func TestToolSourceChangesFingerprint(t *testing.T) {
 	}
 }
 
-func TestLoadDiscoversGitHubConnectionForBothHarnesses(t *testing.T) {
+func TestLoadDiscoversGenericConnectionsForBothHarnesses(t *testing.T) {
 	root := agent(t, "portable")
 	baseline, err := Load(root, "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if baseline.GitHubConnection != nil {
-		t.Fatalf("missing connection = %#v", baseline.GitHubConnection)
+	if len(baseline.Connections) != 0 {
+		t.Fatalf("missing connections = %#v", baseline.Connections)
 	}
 	path := filepath.Join(root, "connections", "github.md")
-	write(t, path, "Read public GitHub repositories and issues.\n")
+	write(t, path, "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nRead public GitHub repositories and issues.\n")
+	write(t, filepath.Join(root, "connections", "reference.md"), "---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n")
 
 	for _, harness := range []string{"claude", "codex"} {
 		loaded, err := Load(root, harness)
 		if err != nil {
 			t.Fatalf("%s: %v", harness, err)
 		}
-		if loaded.GitHubConnection == nil || loaded.GitHubConnection.Description != "Read public GitHub repositories and issues." || loaded.GitHubConnection.Path != "connections/github.md" {
-			t.Fatalf("%s GitHub connection = %#v", harness, loaded.GitHubConnection)
+		if len(loaded.Connections) != 2 || loaded.Connections[0].Name != "github" || loaded.Connections[0].Context != "Read public GitHub repositories and issues." || loaded.Connections[0].Package != "github-mcp-server" || loaded.Connections[0].Capability != "github" || loaded.Connections[0].Path != "connections/github.md" {
+			t.Fatalf("%s installed connection = %#v", harness, loaded.Connections)
+		}
+		if loaded.Connections[1].Name != "reference" || loaded.Connections[1].Transport != "streamable-http" || loaded.Connections[1].URL != "https://example.com/mcp" || loaded.Connections[1].Context != "" {
+			t.Fatalf("%s remote connection = %#v", harness, loaded.Connections[1])
 		}
 		if loaded.SourceFingerprint == baseline.SourceFingerprint {
 			t.Fatalf("%s connection did not join the source fingerprint", harness)
@@ -89,7 +93,7 @@ func TestLoadDiscoversGitHubConnectionForBothHarnesses(t *testing.T) {
 	}
 
 	first, _ := Load(root, "claude")
-	write(t, path, "Read public GitHub data carefully.\n")
+	write(t, path, "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nRead public GitHub data carefully.\n")
 	second, err := Load(root, "claude")
 	if err != nil {
 		t.Fatal(err)
@@ -105,11 +109,25 @@ func TestLoadRejectsInvalidConnections(t *testing.T) {
 		content []byte
 		want    string
 	}{
-		"empty GitHub description":     {"connections/github.md", nil, "must contain 1-1024"},
-		"oversized GitHub description": {"connections/github.md", bytes.Repeat([]byte("a"), 1025), "must contain 1-1024"},
-		"non-UTF-8 GitHub description": {"connections/github.md", []byte{0xff}, "valid UTF-8"},
-		"unsupported file":             {"connections/gitlab.md", []byte("GitLab.\n"), "supports github.md only"},
-		"unsupported directory":        {"connections/github/connection.md", []byte("GitHub.\n"), "supports github.md only"},
+		"legacy body only":             {"connections/github.md", []byte("GitHub.\n"), "connection must start with YAML frontmatter declaring \"type: mcp\" and one supported target; body-only connection files are no longer supported"},
+		"oversized context":            {"connections/github.md", append([]byte("---\ntype: mcp\npackage: pkg\ncapability: github\n---\n"), bytes.Repeat([]byte("a"), 1025)...), "at most 1024"},
+		"non-UTF-8 source":             {"connections/github.md", []byte{0xff}, "valid UTF-8"},
+		"unsupported extension":        {"connections/github.json", []byte("{}\n"), "Markdown files only"},
+		"unsupported directory":        {"connections/github/connection.md", []byte("GitHub.\n"), "real regular file"},
+		"invalid name":                 {"connections/GitHub.md", []byte("---\ntype: mcp\npackage: pkg\ncapability: github\n---\n"), "connection name must match"},
+		"reserved name":                {"connections/managed.md", []byte("---\ntype: mcp\npackage: pkg\ncapability: managed\n---\n"), "must not be reserved"},
+		"unknown field":                {"connections/github.md", []byte("---\ntype: mcp\npackage: pkg\ncapability: github\nheader: nope\n---\n"), "must contain exactly"},
+		"duplicate field":              {"connections/github.md", []byte("---\ntype: mcp\npackage: pkg\npackage: other\ncapability: github\n---\n"), "duplicated"},
+		"mixed targets":                {"connections/github.md", []byte("---\ntype: mcp\npackage: pkg\ncapability: github\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n"), "must contain exactly"},
+		"non-string":                   {"connections/github.md", []byte("---\ntype: mcp\npackage: pkg\ncapability: 1\n---\n"), "must be a string"},
+		"tagged value":                 {"connections/github.md", []byte("---\ntype: mcp\npackage: pkg\ncapability: !tag github\n---\n"), "must be a string"},
+		"alias":                        {"connections/github.md", []byte("---\ntype: mcp\npackage: &pkg package\ncapability: *pkg\n---\n"), "aliases are not supported"},
+		"multiple YAML documents":      {"connections/github.md", []byte("---\ntype: mcp\npackage: pkg\ncapability: github\n...\ntype: mcp\n---\n"), "must contain one YAML document"},
+		"remote query":                 {"connections/public.md", []byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp?q=1\n---\n"), "absolute HTTPS URL"},
+		"remote port without hostname": {"connections/public.md", []byte("---\ntype: mcp\ntransport: streamable-http\nurl: https://:443/mcp\n---\n"), "absolute HTTPS URL"},
+		"remote wrong transport":       {"connections/public.md", []byte("---\ntype: mcp\ntransport: sse\nurl: https://example.com/mcp\n---\n"), "must contain exactly"},
+		"installed invalid package":    {"connections/github.md", []byte("---\ntype: mcp\npackage: GitHub\ncapability: github\n---\n"), "package\" is invalid"},
+		"installed invalid capability": {"connections/github.md", []byte("---\ntype: mcp\npackage: pkg\ncapability: git_hub\n---\n"), "capability\" is invalid"},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -124,7 +142,7 @@ func TestLoadRejectsInvalidConnections(t *testing.T) {
 	t.Run("connection file symlink", func(t *testing.T) {
 		root := agent(t, "portable")
 		outside := filepath.Join(t.TempDir(), "github.md")
-		write(t, outside, "GitHub.\n")
+		write(t, outside, "---\ntype: mcp\npackage: pkg\ncapability: github\n---\n")
 		path := filepath.Join(root, "connections", "github.md")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -140,12 +158,23 @@ func TestLoadRejectsInvalidConnections(t *testing.T) {
 	t.Run("connections directory symlink", func(t *testing.T) {
 		root := agent(t, "portable")
 		outside := t.TempDir()
-		write(t, filepath.Join(outside, "github.md"), "GitHub.\n")
+		write(t, filepath.Join(outside, "github.md"), "---\ntype: mcp\npackage: pkg\ncapability: github\n---\n")
 		if err := os.Symlink(outside, filepath.Join(root, "connections")); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "real directory") {
 			t.Fatalf("connections directory symlink was not rejected: %v", err)
+		}
+	})
+
+	t.Run("inventory bound", func(t *testing.T) {
+		root := agent(t, "portable")
+		for index := 0; index < maxConnections+1; index++ {
+			name := fmt.Sprintf("server%03d", index)
+			write(t, filepath.Join(root, "connections", name+".md"), "---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n")
+		}
+		if _, err := Load(root, "claude"); err == nil || !strings.Contains(err.Error(), "at most 128 entries") {
+			t.Fatalf("oversized inventory was not rejected: %v", err)
 		}
 	})
 }

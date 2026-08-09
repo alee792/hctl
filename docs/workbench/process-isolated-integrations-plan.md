@@ -153,7 +153,7 @@ The goal is complete only when:
 - Root hctl builds and tests without GitHub or Discord SDK dependencies.
 - GitHub-free and Discord-free agents omit their respective artifacts from
   generated and staged closures.
-- Apply remains offline.
+- Package resolution during apply remains offline.
 - Credential boundaries and unmanaged limitations are documented plainly.
 - Relevant root and separate-module quality gates pass.
 - Epics #74, #64, and #81 accurately reflect completion and implementation

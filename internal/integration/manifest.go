@@ -76,6 +76,20 @@ var (
 
 var channelProfileID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
 
+func ValidatePackageID(value string) error {
+	if !packageIDPattern.MatchString(value) || len(value) > 128 {
+		return errors.New("integration package id is invalid")
+	}
+	return nil
+}
+
+func ValidateCapabilityID(value string) error {
+	if !capabilityID.MatchString(value) || len(value) > 64 {
+		return errors.New("integration capability id is invalid")
+	}
+	return nil
+}
+
 // ValidateChannelProfileID applies the closed opaque-id-v1 selector grammar.
 // A profile is a non-secret identity, never a path, command, environment name,
 // or credential reference.
@@ -433,8 +447,8 @@ func (manifest Manifest) Validate() error {
 	if manifest.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("integration manifest schema_version must be %d", SchemaVersion)
 	}
-	if !packageIDPattern.MatchString(manifest.ID) || len(manifest.ID) > 128 {
-		return errors.New("integration package id is invalid")
+	if err := ValidatePackageID(manifest.ID); err != nil {
+		return err
 	}
 	if err := version.Validate(manifest.Version); err != nil {
 		return errors.New("integration package version must be an exact semantic version")
@@ -475,7 +489,7 @@ func (manifest Manifest) Validate() error {
 	}
 	capabilities := make(map[string]bool, len(manifest.Capabilities))
 	for index, capability := range manifest.Capabilities {
-		if !capabilityID.MatchString(capability.ID) || len(capability.ID) > 64 {
+		if ValidateCapabilityID(capability.ID) != nil {
 			return fmt.Errorf("capabilities[%d]: capability id is invalid", index)
 		}
 		if capabilities[capability.ID] {

@@ -98,7 +98,8 @@ context, staged tree, or registry layer. OpenAI's current
 documents API-key login, headless login, cache locations, and credential-store
 options.
 
-An agent with `connections/github.md` separately needs runtime-only
+An agent whose generic `connections/github.md` selects
+`github-mcp-server`/`github` separately needs runtime-only
 `GITHUB_PERSONAL_ACCESS_TOKEN` injection. Pass the variable when the container
 starts; never place it in an image `ARG`, `ENV`, build secret, source tree, or
 staged filesystem. The harness/model may read it and hctl does not govern its

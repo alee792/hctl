@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -123,6 +124,145 @@ func TestIntegrationPackageCLIJourneyIsExplicitAndContentFree(t *testing.T) {
 	}
 }
 
+func TestConnectionCLIAuthorsInspectsAndRemovesGenericSources(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := integration.NewDefaultStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageRoot := writeCLIGitHubPackage(t, "1.8.0", []byte("#!/bin/sh\nexit 0\n"))
+	if _, err := store.Install(context.Background(), integration.InstallOptions{Source: packageRoot, Trust: integration.TrustOperator}); err != nil {
+		t.Fatal(err)
+	}
+	agent := filepath.Join(t.TempDir(), "agent")
+	writeCLIFile(t, filepath.Join(agent, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+
+	var output, stderr bytes.Buffer
+	if err := Run([]string{"connection", "add", agent, "github", "--package", "github-mcp-server", "--capability", "github", "--context", "Use discovered GitHub tools."}, strings.NewReader(""), &output, &stderr, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCLIFile(t, filepath.Join(agent, "connections", "github.md")); got != "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nUse discovered GitHub tools.\n" {
+		t.Fatalf("installed source = %q", got)
+	}
+	if !strings.Contains(output.String(), "next: hctl apply "+agent+" --harness claude") || !strings.Contains(output.String(), "next: hctl apply "+agent+" --harness codex") {
+		t.Fatalf("add output = %q", output.String())
+	}
+	output.Reset()
+	if err := Run([]string{"connection", "add", agent, "public", "--url", "https://127.0.0.1:1/mcp"}, strings.NewReader(""), &output, &stderr, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCLIFile(t, filepath.Join(agent, "connections", "public.md")); got != "---\ntype: mcp\ntransport: streamable-http\nurl: https://127.0.0.1:1/mcp\n---\n" {
+		t.Fatalf("remote source = %q", got)
+	}
+
+	output.Reset()
+	if err := Run([]string{"connection", "status", agent}, strings.NewReader(""), &output, &stderr, ""); err != nil {
+		t.Fatal(err)
+	}
+	status := output.String()
+	installed := "connection=github target=installed package=github-mcp-server capability=github status=ready harnesses=claude,codex context=present"
+	remote := "connection=public target=remote transport=streamable-http url=https://127.0.0.1:1/mcp status=configured runtime=unchecked context=absent"
+	if !strings.Contains(status, installed) || !strings.Contains(status, remote) || strings.Index(status, "connection=github") > strings.Index(status, "connection=public") {
+		t.Fatalf("connection status = %q", status)
+	}
+	before := readCLIFile(t, filepath.Join(agent, "connections", "public.md"))
+	if err := Run([]string{"connection", "add", agent, "public", "--url", "https://example.com/other"}, strings.NewReader(""), io.Discard, &stderr, ""); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("overwrite error = %v", err)
+	}
+	if after := readCLIFile(t, filepath.Join(agent, "connections", "public.md")); after != before {
+		t.Fatal("failed add changed existing source")
+	}
+	if err := Run([]string{"connection", "add", agent, "wrong", "--package", "github-mcp-server", "--capability", "github"}, strings.NewReader(""), io.Discard, &stderr, ""); err == nil || !strings.Contains(err.Error(), "must equal connection name") {
+		t.Fatalf("server-name mismatch error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections", "wrong.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched add wrote source: %v", err)
+	}
+	if err := Run([]string{"connection", "add", agent, "bad", "--url", "https://example.com/mcp?token=nope"}, strings.NewReader(""), io.Discard, &stderr, ""); err == nil || !strings.Contains(err.Error(), "absolute HTTPS URL") {
+		t.Fatalf("bad URL error = %v", err)
+	}
+
+	if err := store.SetEnabled(context.Background(), "github-mcp-server", false); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := Run([]string{"connection", "status", agent, "github"}, strings.NewReader(""), &output, &stderr, ""); err == nil || !strings.Contains(err.Error(), "connections/github.md") || !strings.Contains(output.String(), "status=unhealthy") {
+		t.Fatalf("unhealthy status = %q, %v", output.String(), err)
+	}
+	output.Reset()
+	if err := Run([]string{"connection", "remove", agent, "github"}, strings.NewReader(""), &output, &stderr, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections", "github.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unhealthy source was not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections")); err != nil {
+		t.Fatalf("remove deleted connections directory: %v", err)
+	}
+	if err := Run([]string{"connection", "status", filepath.Join(agent, "connections")}, strings.NewReader(""), io.Discard, &stderr, ""); err == nil || !strings.Contains(err.Error(), "instructions") {
+		t.Fatalf("inferred-root status error = %v", err)
+	}
+}
+
+func TestConnectionAddRejectsPluginCollisionAndRemoveRejectsUnsafeTarget(t *testing.T) {
+	agent := t.TempDir()
+	writeCLIFile(t, filepath.Join(agent, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	plugin := filepath.Join(agent, "plugins", "catalog")
+	writeCLIFile(t, filepath.Join(plugin, "plugin.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"catalog"}`, 0o644)
+	writeCLIFile(t, filepath.Join(plugin, "mcp.json"), `{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"catalog":{"type":"streamable-http","url":"https://example.com/mcp"}}}`, 0o644)
+	if err := Run([]string{"connection", "add", agent, "catalog", "--url", "https://example.com/standalone"}, strings.NewReader(""), io.Discard, io.Discard, ""); err == nil || !strings.Contains(err.Error(), "collides with an authored plugin server") {
+		t.Fatalf("plugin collision error = %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	writeCLIFile(t, outside, "outside\n", 0o644)
+	if err := os.MkdirAll(filepath.Join(agent, "connections"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(agent, "connections", "unsafe.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run([]string{"connection", "remove", agent, "unsafe"}, strings.NewReader(""), io.Discard, io.Discard, ""); err == nil || !strings.Contains(err.Error(), "real regular file") {
+		t.Fatalf("unsafe remove error = %v", err)
+	}
+	if got := readCLIFile(t, outside); got != "outside\n" {
+		t.Fatalf("unsafe remove changed symlink target: %q", got)
+	}
+	writeCLIFile(t, filepath.Join(agent, "connections", "legacy.md"), "legacy body-only source\n", 0o644)
+	if err := Run([]string{"connection", "remove", agent, "legacy"}, strings.NewReader(""), io.Discard, io.Discard, ""); err != nil {
+		t.Fatalf("remove unhealthy authored source: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections", "legacy.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unhealthy authored source remains: %v", err)
+	}
+}
+
+func TestConnectionAddEnforcesPostAddInventoryAndSourceBounds(t *testing.T) {
+	agent := t.TempDir()
+	writeCLIFile(t, filepath.Join(agent, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	for index := 0; index < 128; index++ {
+		name := fmt.Sprintf("server%03d", index)
+		writeCLIFile(t, filepath.Join(agent, "connections", name+".md"), "---\ntype: mcp\ntransport: streamable-http\nurl: https://example.com/mcp\n---\n", 0o644)
+	}
+	if err := Run([]string{"connection", "add", agent, "overflow", "--url", "https://example.com/mcp"}, strings.NewReader(""), io.Discard, io.Discard, ""); err == nil || !strings.Contains(err.Error(), "at most 128 entries") {
+		t.Fatalf("post-add inventory bound error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(agent, "connections", "overflow.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("overflow add wrote source: %v", err)
+	}
+
+	smallAgent := t.TempDir()
+	writeCLIFile(t, filepath.Join(smallAgent, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
+	endpoint := "https://example.com/" + strings.Repeat("a", 8<<10)
+	if err := Run([]string{"connection", "add", smallAgent, "oversized", "--url", endpoint}, strings.NewReader(""), io.Discard, io.Discard, ""); err == nil || !strings.Contains(err.Error(), "at most 8192 bytes") {
+		t.Fatalf("post-add source bound error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(smallAgent, "connections", "oversized.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized add wrote source: %v", err)
+	}
+}
+
 func TestApplySelectsInstalledGitHubNativeMCPWithoutReadingPAT(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -169,7 +309,7 @@ func TestApplySelectsInstalledGitHubNativeMCPWithoutReadingPAT(t *testing.T) {
 
 	source := filepath.Join(t.TempDir(), "github-agent")
 	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
-	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Inspect GitHub through discovered tools.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nInspect GitHub through discovered tools.\n", 0o644)
 	harness := filepath.Join(t.TempDir(), "codex")
 	writeCLIFile(t, harness, "#!/bin/sh\necho 'codex-cli 0.144.1'\n", 0o755)
 	self, err := os.Executable()
@@ -180,7 +320,7 @@ func TestApplySelectsInstalledGitHubNativeMCPWithoutReadingPAT(t *testing.T) {
 	if err := Run([]string{"apply", source, "--harness", "codex", "--command", harness}, strings.NewReader(""), &output, &stderr, self); err != nil {
 		t.Fatal(err)
 	}
-	if got := output.String(); !strings.Contains(got, "native server=github startup=optional trust=native-project") || !strings.Contains(got, "value=not-read") || !strings.Contains(got, "managed tools=echo") || strings.Contains(got, "github__") || strings.Contains(got, fakeValue) {
+	if got := output.String(); !strings.Contains(got, "native server=github package=github-mcp-server capability=github") || !strings.Contains(got, "owned by codex") || !strings.Contains(got, "managed tools=echo") || strings.Contains(got, "github__") || strings.Contains(got, fakeValue) {
 		t.Fatalf("apply output = %q", got)
 	}
 	config := readCLIFile(t, filepath.Join(source, ".codex", "config.toml"))
@@ -215,7 +355,7 @@ func TestScheduledOpenRevalidatesCurrentGitHubPackageState(t *testing.T) {
 	}
 	source := filepath.Join(t.TempDir(), "scheduled-github-agent")
 	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Scheduled GitHub agent.\n---\n\nBe concise.\n", 0o644)
-	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nUse discovered GitHub tools.\n", 0o644)
 	writeCLIFile(t, filepath.Join(source, "schedules", "probe.md"), "---\ncron: '* * * * *'\n---\n\nProbe GitHub.\n", 0o644)
 	p, err := project.Load(source, "codex")
 	if err != nil {
@@ -294,7 +434,7 @@ func TestDelayedChannelOpenAndReopenUseCurrentGitHubPackage(t *testing.T) {
 	installCLIChannelAdapter(t, store)
 	source := filepath.Join(t.TempDir(), "channel-github-agent")
 	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Channel GitHub agent.\n---\n\nBe concise.\n", 0o644)
-	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+	writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nUse discovered GitHub tools.\n", 0o644)
 	writeCLIFile(t, filepath.Join(source, "channels", "discord.md"), "---\nmode: ambient\n---\n\nParticipate when useful.\n", 0o644)
 	p, err := project.Load(source, "codex")
 	if err != nil {
@@ -366,7 +506,7 @@ func TestGuardedWritableChannelOpenPreservesWritableSetup(t *testing.T) {
 	installCLIChannelAdapter(t, store)
 	root := filepath.Join(t.TempDir(), "writable-channel-agent")
 	writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Writable channel agent.\n---\n\nBe concise.\n", 0o644)
-	writeCLIFile(t, filepath.Join(root, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+	writeCLIFile(t, filepath.Join(root, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nUse discovered GitHub tools.\n", 0o644)
 	writeCLIFile(t, filepath.Join(root, "channels", "discord.md"), "---\nmode: ambient\n---\n\nParticipate when useful.\n", 0o644)
 	p, err := project.Load(root, "codex")
 	if err != nil {
@@ -432,7 +572,7 @@ func TestParkedContinuationsRevalidateCurrentGitHubPackage(t *testing.T) {
 			}
 			root := filepath.Join(t.TempDir(), harnessName+"-parked-agent")
 			writeCLIFile(t, filepath.Join(root, "instructions.md"), "---\ndescription: Parked continuation agent.\n---\n\nBe concise.\n", 0o644)
-			writeCLIFile(t, filepath.Join(root, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+			writeCLIFile(t, filepath.Join(root, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nUse discovered GitHub tools.\n", 0o644)
 			p, err := project.Load(root, harnessName)
 			if err != nil {
 				t.Fatal(err)
@@ -844,7 +984,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fixture_issue
 			}
 			source := filepath.Join(t.TempDir(), "maintainer")
 			writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Headless GitHub fixture.\n---\n\nUse discovered GitHub outcomes.\n", 0o644)
-			writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "Use discovered GitHub tools.\n", 0o644)
+			writeCLIFile(t, filepath.Join(source, "connections", "github.md"), "---\ntype: mcp\npackage: github-mcp-server\ncapability: github\n---\n\nUse discovered GitHub tools.\n", 0o644)
 			command := filepath.Join(t.TempDir(), harnessName)
 			writeCLIFile(t, command, script, 0o755)
 			probe := filepath.Join(t.TempDir(), "native-probe")
@@ -1067,15 +1207,15 @@ func TestApplyRejectsUnsupportedChannelBeforeWorkspaceMutation(t *testing.T) {
 	}
 }
 
-func TestApplyRejectsUnsupportedConnectionBeforeWorkspaceMutation(t *testing.T) {
+func TestApplyRejectsLegacyBodyOnlyConnectionBeforeWorkspaceMutation(t *testing.T) {
 	source := t.TempDir()
 	workspace := t.TempDir()
 	writeCLIFile(t, filepath.Join(source, "instructions.md"), "---\ndescription: Test agent.\n---\n\nBe concise.\n", 0o644)
 	writeCLIFile(t, filepath.Join(source, "connections", "gitlab.md"), "GitLab.\n", 0o644)
 	var output, stderr bytes.Buffer
 	err := Run([]string{"apply", source, "--workspace", workspace, "--harness", "codex"}, strings.NewReader(""), &output, &stderr, "")
-	if err == nil || !strings.Contains(err.Error(), "supports github.md only") {
-		t.Fatalf("unsupported connection error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "body-only connection files are no longer supported") {
+		t.Fatalf("legacy connection error = %v", err)
 	}
 	entries, readErr := os.ReadDir(workspace)
 	if readErr != nil || len(entries) != 0 {

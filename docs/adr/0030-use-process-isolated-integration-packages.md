@@ -6,6 +6,7 @@
   [ADR 0027](0027-stage-agent-filesystems-for-downstream-oci-builds.md)
 - Specialized by: [ADR 0031](0031-use-the-official-github-server-as-native-unmanaged-mcp.md)
 - Extended by: [ADR 0032](0032-use-a-bounded-semantic-channel-adapter-protocol.md)
+  and [ADR 0034](0034-author-generic-native-mcp-connections.md)
 
 ## Plain-English summary
 

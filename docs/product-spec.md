@@ -126,7 +126,8 @@ byte budgets bound the work performed by load and apply:
 | Vendored plugins | 128 directory entries | `plugin.json` and `mcp.json` 128 KiB each; each plugin `skills/` location has 1,024 entries |
 | Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration is at most 8 MiB |
 | Selected harness-specific files | 1,024 | 1 MiB each and 8 MiB aggregate |
-| Connections and channels | One implemented file each | `github.md` and `discord.md` are 8 KiB files whose authored descriptions or policies contain 1-1,024 characters |
+| Standalone MCP connections | 128 | 8 KiB per source; optional Markdown context contains at most 1,024 characters |
+| Channels | One implemented file | `discord.md` is an 8 KiB file whose authored policy contains 1-1,024 characters |
 
 These ceilings are not configurable authoring API. Exceeding a root-project
 or project-level directory ceiling fails before workspace mutation. Invalid or
@@ -295,19 +296,143 @@ subagents, and managed MCP setup continue to use their existing conventions.
 Case-folded aliases of these paths are also rejected before mutation so agent
 source remains safe to apply to common case-insensitive workspaces.
 
-The optional `connections/github.md` file contains a 1-1024 character UTF-8
-Markdown description. Its conventional path registers a connection named
-`github`; there is no connection manifest or name field. It requests capability
-id `github` from the operator-installed `github-mcp-server` integration package.
-It contains no credential value or reference, installed version, executable
-path, repository grant, tool allowlist, or approval decision. Any other entry
-under `connections/` fails before workspace mutation. The description remains
-model-facing guidance in generated instructions; it does not replace or freeze
-the official server's discovered tool descriptions or schemas.
+The optional `connections/` directory contains at most 128 immediate, real,
+regular UTF-8 files named `<name>.md`. Entries are not nested and symlinks are
+never followed. The filename supplies the connection and native MCP server
+name: 1-64 characters beginning with a lowercase ASCII letter and otherwise
+containing lowercase letters, digits, underscores, or hyphens. `managed` is
+reserved. Each source is at most 8 KiB and starts with a closed YAML
+frontmatter mapping whose plain string `type` is exactly `mcp`.
+
+An installed stdio connection contains exactly `type`, `package`, and
+`capability`:
+
+```md
+---
+type: mcp
+package: github-mcp-server
+capability: github
+---
+
+Use the discovered GitHub tools for repository, issue, and pull-request work.
+```
+
+The package and capability identifiers select one installed, enabled, trusted,
+compatible `native-mcp` version-1 capability through the generic integration
+store. The capability already owns stdio transport, executable, arguments,
+working directory, non-secret environment defaults, required ambient names,
+startup, native trust, and supported harness targets; authored connection
+source cannot repeat or override them. Its stable native server name must equal
+the filename-derived connection name.
+
+A credential-free remote connection contains exactly `type`, `transport`, and
+`url`, with transport fixed to `streamable-http`:
+
+```md
+---
+type: mcp
+transport: streamable-http
+url: https://example.com/mcp
+---
+
+Use this connection for the public reference catalog.
+```
+
+The remote URL is absolute HTTPS with a nonempty host and no user information,
+query, or fragment. The initial schema has no headers, bearer-token or
+environment references, OAuth fields, timeouts, tool filters, approval grants,
+provider names, frozen tool catalogs, or other transport parameters. Unknown,
+duplicate, mixed-target, aliased, tagged, merged, non-string, or multidocument
+frontmatter fails before workspace mutation. Hctl validates but does not open
+the URL, resolve DNS, inspect TLS, follow redirects, authenticate, or prove
+server compatibility. Authenticated remote MCP remains outside this delivery.
+
+Content after frontmatter is optional trusted Markdown usage context. Hctl
+trims it; whitespace-only content is absent and nonempty content contains at
+most 1,024 Unicode characters. When the project has connections, generated
+instructions contain one bounded `Native MCP connections` section. Connections
+appear in lexical name order, every name appears once, and each nonempty body
+appears once without its frontmatter. One generic boundary statement says the
+selected native harness owns MCP startup, trust, approval, authentication,
+discovery, calls, and effects. The body is not sent upstream and does not
+replace tool descriptions, schemas, or server-returned instructions. Exact
+source bytes participate in the source fingerprint.
+
+Standalone connection names cannot collide with `managed`, another standalone
+connection, or an accepted Plugin MCP server. Such a collision fails the
+project before mutation; hctl never renames, shadows, or skips a standalone
+connection. An installed capability whose server name differs from its
+connection filename fails as a target mismatch. Claude application also rejects its
+lowercase reserved names `workspace`, `claude-in-chrome`, and `computer-use`.
+Existing warning-and-first-wins handling among independently optional Plugin
+MCP declarations remains unchanged. Harness-owned user, administrator,
+enterprise, and future built-in configuration remains subject to native
+precedence and diagnostics where hctl cannot safely preflight it.
+
+Authors need not hand-edit native Claude or Codex configuration. The portable
+source commands are:
+
+```text
+hctl connection add AGENT NAME --package PACKAGE --capability CAPABILITY [--context TEXT]
+hctl connection add AGENT NAME --url HTTPS_URL [--context TEXT]
+hctl connection status AGENT [NAME]
+hctl connection remove AGENT NAME
+```
+
+Every command requires the exact positional agent root; callers already there
+use `.` explicitly. Its required `instructions.md` proves the selected
+directory is an agent project. Hctl does not search ancestors, infer an
+`agents/` directory, choose a workspace, or choose a harness. `add` validates
+the closed source form and atomically creates `connections/NAME.md` without
+overwriting any existing path. Package add also performs offline exact package
+resolution and verifies the capability's server name before writing. Remote
+add validates the URL without contacting it. Add does not install, enable,
+trust, update, or remove a package and does not apply a workspace.
+
+`status` lists all connections lexically or one exact selected name. For an
+installed target it performs offline exact resolution and reports bounded
+package/capability health and supported harnesses without execution. For a
+remote target it reports `configured` and `runtime=unchecked` without a network
+request. Malformed source or an unresolved installed target returns nonzero
+with an authored-path diagnostic. `remove` deletes only the exact real regular
+source file, even when its declared target is unhealthy; it does not remove
+package state, remove the directory, or reapply workspaces. A missing or unsafe
+path fails without mutation. Add and remove finish with explicit guidance to
+run ordinary `hctl apply AGENT --harness ...` for each intended workspace.
+There is no connection update command because the Markdown remains ordinary
+versioned source and may be edited directly.
+
+Installed targets reuse the generic offline resolver and native stdio
+generation already proven by the GitHub delivery. Remote targets reuse the
+existing safe Plugin HTTP renderer: Claude receives project `.mcp.json` with
+`type: "http"` and the exact URL; Codex receives a project MCP table with the
+exact URL, `enabled = true`, `required = false`, and prompt approval. No auth or
+header field is emitted. Remote connections are startup-optional. Installed
+staging copies only the selected capability closure; remote staging copies no
+integration package bytes. Agents without a connection generate and stage no
+corresponding server or closure. Apply and stage never contact a remote MCP
+endpoint.
+
+This source contract deliberately breaks the experimental body-only
+`connections/github.md` form before publication. Hctl neither infers GitHub
+from a filename nor rewrites the file. A body-only source fails at its authored
+path with:
+
+```text
+connection must start with YAML frontmatter declaring "type: mcp" and one supported target; body-only connection files are no longer supported
+```
+
+Existing projects migrate by adding the installed frontmatter shown above and
+retaining their Markdown body. See
+[ADR 0034](adr/0034-author-generic-native-mcp-connections.md). Plugin-bundled
+MCP remains solely in the publisher-authored Plugin `mcp.json`; hctl does not
+synthesize a standalone connection from it or require a standalone server to
+be wrapped in a Plugin.
 
 GitHub uses the official external `github/github-mcp-server` executable through
 the `native-mcp` v1 capability. Hctl reuses the package installation,
-verification, cache, offline apply, and selective-closure journey; it does not
+verification, cache, offline connection resolution during apply, and
+selective-closure journey; it does not
 import a GitHub SDK or implement an API client. The stable native server name is
 `github`, its collision policy is rejection, and its command is the exact
 verified installed executable with the sole argument `stdio`. Its working
@@ -343,8 +468,9 @@ precedence and diagnostics.
 Authentication is deliberately unmanaged. Local shells and headless service,
 container, or secret-manager configuration inject the same
 `GITHUB_PERSONAL_ACCESS_TOKEN` into the Claude or Codex launch environment. The
-official server reads it directly. Apply remains offline and neither requires
-nor resolves the value. Hctl never writes it into source, package state,
+official server reads it directly. GitHub connection discovery and package
+resolution during apply remain offline and neither require nor resolve the
+value. Hctl never writes it into source, package state,
 generated files, apply records, caches, images, staged filesystems, logs,
 diagnostics, or retained evidence.
 
@@ -390,7 +516,7 @@ That current-package guard applies to hctl-owned process opens. A plain
 does not resolve package state through hctl. After an update, the operator must
 reapply every consuming workspace before restarting its harness or owning
 service; direct and staged images must be rebuilt from the updated package.
-Safe removal first removes `connections/github.md`, then reapplies local
+Safe removal first runs `hctl connection remove AGENT github`, then reapplies local
 consumers and rebuilds staged outputs to remove generated configuration and
 closure, then removes the package and restarts or redeploys. Removing or
 disabling the package first makes the still-declared connection fail reapply
@@ -401,7 +527,9 @@ delivery. The official server's OAuth and GitHub App modes remain separate
 follow-up work. Native Git and `gh` authentication are separately operator-owned
 and unmanaged: the MCP PAT does not promise either, and the MCP surface does not
 promise exact branch publication with local Git history. See
-[ADR 0031](adr/0031-use-the-official-github-server-as-native-unmanaged-mcp.md).
+[ADR 0031](adr/0031-use-the-official-github-server-as-native-unmanaged-mcp.md)
+and its generic authored-source amendment in
+[ADR 0034](adr/0034-author-generic-native-mcp-connections.md).
 The [native GitHub MCP journey](github-native-mcp.md) is the canonical local,
 service/container, package-lifecycle, troubleshooting, and optional live
 acceptance procedure. Live acceptance is not part of the credential-free
@@ -882,8 +1010,9 @@ remains with that capability's delivery, rather than becoming a generic plugin
 runtime. For `native-mcp`, the offline consumer can derive a credential-free,
 harness-targeted launch descriptor from the exact installed metadata and
 verified paths. It does not read ambient values or write native configuration.
-#67 remains responsible for mapping authored connection source into generated
-Claude and Codex configuration and proving the native runtime journey.
+#97 maps generic authored connection source into generated Claude and Codex
+configuration. Completed #67, #71, and #72 remain the installed GitHub runtime
+and regression evidence rather than a separate provider path.
 
 The first recognized capability is `native-mcp` version 1. It declares a
 stable native server name with collision behavior fixed to rejection, the exact

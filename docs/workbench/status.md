@@ -193,8 +193,9 @@ a generated custom subagent, and session resume in a fresh external workspace.
   warns when that harness does not document honoring it.
 - Authored-project cardinality ceilings are deliberately high rather than
   ordinary-use quotas: 256 aggregate skills, 128 tools and subagents, 256
-  schedules, 128 plugins and plugin MCP servers, and 1,024 skill, tool-source,
-  or selected harness files where applicable. Shared file and byte budgets
+  schedules, 128 plugins, plugin MCP servers, and standalone MCP connections,
+  and 1,024 skill, tool-source, or selected harness files where applicable.
+  Shared file and byte budgets
   bound skill-set and tool-source work; tool catalogs and calls retain separate
   protocol ceilings; generated MCP configuration is bounded consistently with
   later verification. [ADR 0029](../adr/0029-bound-authored-projects-with-aggregate-budgets.md)
@@ -212,6 +213,14 @@ a generated custom subagent, and session resume in a fresh external workspace.
   `harnesses/claude/.claude/` or `harnesses/codex/.codex/` tree. Only the
   selected tree is copied, its files share the existing source-fingerprint and
   apply-ownership protections, and hctl neither merges nor interprets them.
+- ADR 0034 accepts a provider-neutral standalone MCP source and author-command
+  contract. A bounded `connections/<name>.md` selects either one exact installed
+  `native-mcp` capability or one credential-free HTTPS Streamable HTTP URL;
+  optional Markdown appears once in generated instructions. Connection commands
+  require an explicit positional agent root. Remote v1 excludes headers and
+  authentication, and body-only GitHub source receives a clean migration break.
+  Native Claude or Codex continues to own runtime trust, authentication, calls,
+  and effects.
 - The GitHub connection follows Eve's `connections/`, path-derived name, and
   model-facing description conventions, but requests the installed official
   `github-mcp-server` through native Claude or Codex MCP configuration. Its
@@ -294,8 +303,9 @@ package command and no portability claim for raw workspace caches.
 Product naming, the concrete secretless-broker backend, and proposal review UX
 are also intentionally unresolved.
 
-Generic MCP connections and remote Agent Plugin and Agent Skill acquisition,
-provenance, trust, and update questions are tracked in the
+The generic standalone MCP contract is accepted in ADR 0034 and awaits #97
+implementation. Remote Agent Plugin and Agent Skill acquisition, provenance,
+trust, and update questions remain open in the
 [remote components design notes](remote-components.md) and
 [GitHub epic #95](https://github.com/alee792/hctl/issues/95).
 
@@ -417,6 +427,18 @@ before retiring package state. Live GitHub acceptance was not executed because n
 allowlisted test repository, read/write scope, or native-approval exercise was
 explicitly authorized; the record supplies the exact opt-in and redaction
 contract instead.
+
+ADR 0034 and #97 now define the accepted next implementation step without
+weakening that evidence: replace the `github.md`-only loader, resolver wiring,
+validation, staging, summaries, and generated prose with a bounded generic
+connection inventory. Its installed form authors package and capability ids;
+its remote form authors a credential-free HTTPS Streamable HTTP URL. Exact
+commands, name and collision rules, optional-body rendering, remote non-contact,
+selective staging, and the clean body-only migration diagnostic are settled.
+The implementation has not landed yet: current runnable examples and operator
+documentation therefore remain body-only and GitHub-specific until the #97
+implementation updates the loader and those fixtures together.
+
 Every hctl-owned scheduled or channel session open, channel reopen, and native
 continuation process start re-resolves and verifies current offline package
 state before opening the harness, so disablement, removal, updates, or

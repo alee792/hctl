@@ -1,7 +1,8 @@
 # Remote components design notes
 
 - Status: the outcome-level direction is accepted in `docs/vision.md`; the
-  implementation mechanics remain ideation tracked under GitHub epic #95
+  standalone MCP source and command contract is accepted in ADR 0034 for #97,
+  while Plugin and Skill acquisition mechanics remain ideation under #98
 - Started: 2026-08-08
 - Purpose: retain the product-model questions and proposed journeys behind
   the filed GitHub issues until their contracts are accepted in the product
@@ -43,19 +44,19 @@ runtime, credential, and ownership questions, so this note keeps them separate.
   core.
 - Hctl does not currently acquire or update Agent Plugins or Agent Skills.
 
-## Proposed filesystem model
+## Filesystem model
 
 ### Agent root
 
-Use convention and explicit selection together:
+Use convention and explicit selection together. ADR 0034 accepts this rule for
+connection commands; #98 still owns applying it to acquired dependencies:
 
 - The destination agent root is the exact `AGENT` directory supplied to the
   command, consistent with `hctl apply AGENT`.
 - The required `instructions.md` proves that the selected directory is an
   agent project.
-- A convenience default to `.` could be considered only when `.` itself is a
-  valid agent root. Hctl should not search ancestors or infer a parent
-  `agents/` directory.
+- Callers already in the root pass `.` explicitly. Hctl does not default,
+  search ancestors, or infer a parent `agents/` directory.
 
 ### Imported component root
 
@@ -72,20 +73,23 @@ Resolve a source to one exact component directory:
 
 ### MCP connection source
 
-The proposed authoring surface is `connections/<name>.md`:
+ADR 0034 accepts `connections/<name>.md` as the authoring surface:
 
 - The filename supplies the stable connection name.
 - Frontmatter supplies machine-readable transport and target parameters.
 - The optional Markdown body supplies trusted, model-facing usage context. It
   is not sent to the upstream MCP server and is not a credential channel.
 - Credential values never appear in the file. The initial generic native path
-  should cover credential-free remote MCP and operator-installed stdio MCP.
+  covers credential-free remote MCP and operator-installed stdio MCP.
   Authenticated managed remote MCP remains dependent on the accepted gateway,
   credential-isolation, and OAuth work.
 
-The exact frontmatter schema is deliberately unsettled. It must distinguish at
-least an installed `native-mcp` package capability from a remote
-`streamable-http` target without introducing provider names into hctl core.
+Installed source contains exactly `type: mcp`, `package`, and `capability`.
+Remote source contains exactly `type: mcp`, `transport: streamable-http`, and
+one credential-free HTTPS `url`. The first remote slice has no headers, auth,
+timeouts, filters, or approval fields. The accepted examples, bounds,
+diagnostics, rendering, commands, and clean body-only migration are recorded in
+[ADR 0034](../adr/0034-author-generic-native-mcp-connections.md).
 
 ## Genericity boundary
 
@@ -181,7 +185,8 @@ is not yet an hctl contract and should not be adopted silently.
 - #95 is the outcome epic for remote connections and reusable dependencies.
 - #96 is the completed documentation clarification for Agent Plugin publisher
   and consumer journeys.
-- #97 owns generic filesystem-authored native MCP connections.
+- #97 owns implementation of the accepted generic filesystem-authored native
+  MCP connection contract.
 - #98 owns the shared acquired-dependency contract for Agent Plugins and Agent
   Skills.
 - #99 owns acquisition, provenance, drift, and replacement mechanics and is
@@ -189,34 +194,29 @@ is not yet an hctl contract and should not be adopted silently.
 - #100 owns the Agent Plugin consumer commands and is blocked on #99.
 - #101 owns the Agent Skill consumer commands and is blocked on #99.
 
-Issues #97 through #101 remain `needs-triage` until their relevant root
-selection, schema, source locator, pinning, provenance, drift, trust, and
-credential decisions below are accepted. Filing the graph records the product
-work; it does not settle those contracts.
+Issue #97 is ready for implementation after its accepted specification lands.
+Issues #98 through #101 remain `needs-triage` until their source locator,
+pinning, provenance, drift, trust, and credential decisions below are accepted.
+Filing the graph records that later product work; it does not settle those
+contracts.
 
 ## Questions to settle next
 
-1. Should add commands always require positional `AGENT`, or may they default
-   to `.` when `.` is already a valid agent root?
-2. What is the smallest readable connection frontmatter that covers installed
-   stdio MCP and credential-free remote Streamable HTTP MCP?
-3. Should connection prose become a bounded generated instruction section, or
-   does each native harness offer a better model-facing connection-description
-   field?
-4. Which immutable remote locator forms are required for the first Plugin and
+1. Which immutable remote locator forms are required for the first Plugin and
    Skill acquisition slice?
-5. Where should source provenance and local content identity be recorded so it
+2. Where should source provenance and local content identity be recorded so it
    is portable enough for another machine but remains separate from upstream
    manifests?
 
-Issue #97 owns decisions 1 through 3 for connections. Issue #98 owns the
-shared dependency decisions in 1, 4, and 5 before #99 through #101 proceed.
+ADR 0034 settles connection root selection, schema, Markdown rendering, command
+semantics, and migration for #97. Issue #98 owns the remaining shared
+dependency decisions before #99 through #101 proceed.
 
 ## Implementation-ticket gate
 
-The following product decisions materially change public source, commands, or
-safety behavior and should be accepted before implementation tickets are
-marked `ready-for-agent`.
+ADR 0034 satisfies this gate for #97. The remaining decisions materially change
+Plugin or Skill source, commands, or safety behavior and must be accepted before
+#99 through #101 are marked `ready-for-agent`.
 
 ### First delivery boundary
 
@@ -235,9 +235,10 @@ MCP endpoint.
 
 ### Command targets and names
 
-Confirm that add, status, update, and remove commands always receive an exact
-positional `AGENT`; callers in the agent root use `.` explicitly. Decide how a
-destination name is chosen and how collisions fail:
+Connection add, status, and remove now require an exact positional `AGENT`;
+callers in the root use `.` explicitly. #98 must apply or deliberately amend
+that accepted precedent for dependency add, status, update, and remove and
+decide how each dependency destination name is chosen:
 
 - a connection needs an explicit name because a remote MCP endpoint may expose
   no stable package identity;
@@ -248,22 +249,22 @@ destination name is chosen and how collisions fail:
 
 No operation should silently replace an existing destination.
 
-### Generic connection schema and rendering
+### Generic connection schema and rendering — accepted
 
-Accept the exact initial `connections/<name>.md` frontmatter. At minimum it
-must discriminate `type: mcp` and exactly one of:
+ADR 0034 accepts exact `connections/<name>.md` frontmatter discriminating
+`type: mcp` and exactly one of:
 
 - an installed package and `native-mcp` capability; or
 - a credential-free remote Streamable HTTP URL.
 
-Decide whether non-secret arguments, environment-variable names, and literal
-headers are allowed in the first schema. Credential values, provider names,
-tool catalogs, tool filters, and approval grants should remain absent.
+Installed process arguments and ambient environment names remain package-owned.
+The remote first slice excludes literal headers. Credential values, provider
+names, tool catalogs, tool filters, and approval grants remain absent.
 
-Confirm how the Markdown body reaches the model. The recommended
-harness-neutral behavior is one bounded generated instruction section naming
-the connection and including its nonempty prose. It is not sent upstream and
-does not rewrite MCP tool descriptions.
+The optional Markdown body reaches both harnesses through one bounded generated
+instruction section naming the connection and including its nonempty prose
+once. It is not sent upstream and does not rewrite MCP tool descriptions,
+schemas, or server-returned instructions.
 
 ### Remote source locator
 
@@ -331,13 +332,13 @@ operation. No background or apply-time update is allowed.
 
 ### Migration and overlap
 
-Decide whether the current body-only `connections/github.md` is migrated with
-a compatibility warning or deliberately broken before publication. The
-generic connection implementation should supersede its provider-specific
-parser and generator. Completed issues #67, #71, and #72 remain the installed
-GitHub package fixture and regression baseline rather than a separate
-connection architecture. There is no anonymous managed GitHub implementation
-or runtime fallback left to remove.
+ADR 0034 accepts a clean pre-publication break for body-only
+`connections/github.md`, with an exact generic migration diagnostic and no
+compatibility inference or automatic rewrite. The generic implementation
+supersedes its provider-specific parser and generator. Completed issues #67,
+#71, and #72 remain the installed GitHub package fixture and regression baseline
+rather than a separate connection architecture. There is no anonymous managed
+GitHub implementation or runtime fallback left to remove.
 
 Keep Plugin-bundled MCP separate: adding a Plugin preserves and consumes its
 publisher-authored `mcp.json`; it does not synthesize a second connection file.

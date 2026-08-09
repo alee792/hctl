@@ -6,6 +6,8 @@
 - Amends: [ADR 0015](0015-enforce-read-only-channel-sessions.md)
 - Specializes: [ADR 0030](0030-use-process-isolated-integration-packages.md)
 - Reuses: [ADR 0020](0020-map-plugin-mcp-through-native-harness-configuration.md)
+- Authored selection amended by:
+  [ADR 0034](0034-author-generic-native-mcp-connections.md)
 
 ## Plain-English summary
 

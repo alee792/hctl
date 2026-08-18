@@ -3,24 +3,24 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tools_root="$repo_root/.tools"
-go_version=1.26.5
+go_version=1.26.6
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-x86_64)
     go_platform=darwin-amd64
-    go_sha256=6231d8d3b8f5552ec6cbf6d685bdd5482e1e703214b120e89b3bf0d7bf1ef725
+    go_sha256=08b65a63f244115121ced6c3b55ad38d801a7442acad5c949a17aad84ae6d684
     ;;
   Darwin-arm64)
     go_platform=darwin-arm64
-    go_sha256=efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a
+    go_sha256=2dc95ce4675829f2df0e86b28bcef3283635902062a5f0580ca659bf570f3204
     ;;
   Linux-x86_64)
     go_platform=linux-amd64
-    go_sha256=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
+    go_sha256=708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89
     ;;
   Linux-aarch64 | Linux-arm64)
     go_platform=linux-arm64
-    go_sha256=fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49
+    go_sha256=d0507e9e9d7fe012aae570108cbd76c15de879e17130ab8cb90d4d7445cb1f2e
     ;;
   *)
     echo "unsupported development platform: $(uname -s)-$(uname -m)" >&2

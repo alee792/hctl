@@ -10,8 +10,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"hctl/internal/dispatchstate"
 	"hctl/internal/interaction"
-	"hctl/internal/session"
 	"hctl/internal/worktree"
 )
 
@@ -23,8 +23,8 @@ var interactionOutcomePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 type conversationStore struct {
 	mu    sync.Mutex
 	root  string
-	state *session.State
-	save  func(string, *session.State) error
+	state *dispatchstate.State
+	save  func(string, *dispatchstate.State) error
 }
 
 type conversationRef struct {
@@ -56,11 +56,11 @@ type workspaceRecord struct {
 }
 
 func openConversationStore(root string) (*conversationStore, error) {
-	state, err := session.Load(root)
+	state, err := dispatchstate.Load(root)
 	if err != nil {
 		return nil, err
 	}
-	return &conversationStore{root: root, state: state, save: session.Save}, nil
+	return &conversationStore{root: root, state: state, save: dispatchstate.Save}, nil
 }
 
 func (s *conversationStore) persist() error { return s.save(s.root, s.state) }
@@ -341,7 +341,7 @@ func (s *conversationStore) assignWorkspaceAndAccept(ref conversationRef, worksp
 	return status, false, err
 }
 
-func (s *conversationStore) lookup(ref conversationRef) (*session.Conversation, error) {
+func (s *conversationStore) lookup(ref conversationRef) (*dispatchstate.Conversation, error) {
 	if s.state.SchemaVersion == 1 && len(s.state.Conversations) != 1 {
 		return nil, errors.New("legacy dispatch state cannot be assigned to an agent unambiguously")
 	}
@@ -380,10 +380,10 @@ func (s *conversationStore) accept(ref conversationRef, id, text string) (string
 	return status, false, err
 }
 
-func (s *conversationStore) startNext(ref conversationRef) (session.Input, error) {
+func (s *conversationStore) startNext(ref conversationRef) (dispatchstate.Input, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var next session.Input
+	var next dispatchstate.Input
 	err := s.persistMutation(func() error {
 		conversation, err := s.conversation(ref)
 		if err != nil {
@@ -705,7 +705,7 @@ func (s *conversationStore) persistMutationIfChanged(mutate func() (bool, error)
 	return nil
 }
 
-func conversationInputStatus(conversation *session.Conversation, inputID string) (string, bool) {
+func conversationInputStatus(conversation *dispatchstate.Conversation, inputID string) (string, bool) {
 	for _, input := range conversation.Queue {
 		if input.ID == inputID {
 			return input.Status, true
@@ -717,7 +717,7 @@ func conversationInputStatus(conversation *session.Conversation, inputID string)
 	return "", false
 }
 
-func conversationAdmissionStatus(conversation *session.Conversation, inputID string) (status string, duplicate, blocked bool) {
+func conversationAdmissionStatus(conversation *dispatchstate.Conversation, inputID string) (status string, duplicate, blocked bool) {
 	if status, duplicate = conversationInputStatus(conversation, inputID); duplicate {
 		return status, true, false
 	}
@@ -727,12 +727,12 @@ func conversationAdmissionStatus(conversation *session.Conversation, inputID str
 	return "", false, false
 }
 
-func cloneSessionState(state *session.State) (*session.State, error) {
+func cloneSessionState(state *dispatchstate.State) (*dispatchstate.State, error) {
 	encoded, err := json.Marshal(state)
 	if err != nil {
 		return nil, errors.New("cannot snapshot dispatch state")
 	}
-	var clone session.State
+	var clone dispatchstate.State
 	if err := json.Unmarshal(encoded, &clone); err != nil {
 		return nil, errors.New("cannot snapshot dispatch state")
 	}
@@ -751,6 +751,6 @@ func cloneInteractionState(state interaction.DurableState) (interaction.DurableS
 	return clone, nil
 }
 
-func (s *conversationStore) conversation(ref conversationRef) (*session.Conversation, error) {
+func (s *conversationStore) conversation(ref conversationRef) (*dispatchstate.Conversation, error) {
 	return s.state.GetOrCreate(ref.agentID, ref.harness, ref.id, ref.fingerprint)
 }

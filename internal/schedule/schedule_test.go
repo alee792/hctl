@@ -7,9 +7,9 @@ import (
 	"reflect"
 	"testing"
 
+	"hctl/internal/dispatchstate"
 	"hctl/internal/harness"
 	"hctl/internal/project"
-	"hctl/internal/session"
 )
 
 func TestTriggerUsesPromptFreshSessionsAndDeduplicates(t *testing.T) {
@@ -57,7 +57,7 @@ func TestTriggerRejectsUnknownScheduleWithoutOpeningHarness(t *testing.T) {
 
 func TestTriggerRecoversSameOccurrenceAsUncertainWithoutRetry(t *testing.T) {
 	p := scheduledProject(t)
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestTriggerRecoversSameOccurrenceAsUncertainWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	conversation.SessionID = "interrupted-session"
-	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+	if err := dispatchstate.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
 

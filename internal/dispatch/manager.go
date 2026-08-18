@@ -141,35 +141,29 @@ type managedConversation struct {
 	err          error
 }
 
-func NewManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout time.Duration, emit func(string, Event) error) (*Manager, error) {
-	return NewManagerWithIdleTimeout(ctx, p, driver, turnTimeout, DefaultIdleTimeout, emit)
+// Config bounds one Manager. Zero values select the documented defaults;
+// TurnTimeout and Emit are required.
+type Config struct {
+	TurnTimeout         time.Duration             // required, positive
+	IdleTimeout         time.Duration             // 0 selects DefaultIdleTimeout
+	MaxResidentSessions int                       // 0 selects DefaultMaxResidentSessions
+	MaxActiveTurns      int                       // 0 selects DefaultMaxActiveTurns
+	Emit                func(string, Event) error // required
+	Workspaces          WorkspaceProvider         // optional writable-workspace provisioning
+	Configure           func(*Manager) error      // optional pre-admission binding
 }
 
-func NewManagerWithIdleTimeout(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error) (*Manager, error) {
-	return newManager(ctx, p, driver, turnTimeout, idleTimeout, DefaultMaxResidentSessions, DefaultMaxActiveTurns, emit, newTimer, nil)
-}
-
-func NewManagerWithWorkspace(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, emit func(string, Event) error, workspaces WorkspaceProvider) (*Manager, error) {
-	return NewManagerWithWorkspaceAndLimits(ctx, p, driver, turnTimeout, idleTimeout, DefaultMaxResidentSessions, DefaultMaxActiveTurns, emit, workspaces)
-}
-
-func NewManagerWithWorkspaceAndLimits(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, workspaces WorkspaceProvider) (*Manager, error) {
-	return NewManagerWithWorkspaceAndLimitsConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, workspaces, nil)
-}
-
-func NewManagerWithWorkspaceAndLimitsConfigured(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, workspaces WorkspaceProvider, configure func(*Manager) error) (*Manager, error) {
-	if workspaces == nil {
-		return nil, errors.New("managed writable workspace provider is required")
+func NewManager(ctx context.Context, p *project.Project, driver harness.Driver, config Config) (*Manager, error) {
+	if config.IdleTimeout == 0 {
+		config.IdleTimeout = DefaultIdleTimeout
 	}
-	return newManagerConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newTimer, workspaces, configure)
-}
-
-func NewManagerWithLimits(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error) (*Manager, error) {
-	return NewManagerWithLimitsConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, nil)
-}
-
-func NewManagerWithLimitsConfigured(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, configure func(*Manager) error) (*Manager, error) {
-	return newManagerConfigured(ctx, p, driver, turnTimeout, idleTimeout, maxResident, maxActive, emit, newTimer, nil, configure)
+	if config.MaxResidentSessions == 0 {
+		config.MaxResidentSessions = DefaultMaxResidentSessions
+	}
+	if config.MaxActiveTurns == 0 {
+		config.MaxActiveTurns = DefaultMaxActiveTurns
+	}
+	return newManagerConfigured(ctx, p, driver, config.TurnTimeout, config.IdleTimeout, config.MaxResidentSessions, config.MaxActiveTurns, config.Emit, newTimer, config.Workspaces, config.Configure)
 }
 
 func newManager(ctx context.Context, p *project.Project, driver harness.Driver, turnTimeout, idleTimeout time.Duration, maxResident, maxActive int, emit func(string, Event) error, timers timerFactory, workspaces WorkspaceProvider) (*Manager, error) {

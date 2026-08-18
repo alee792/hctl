@@ -196,13 +196,18 @@ func New(ctx context.Context, config Config, delivery Delivery) (*Controller, er
 		}
 		return manager.ConfigureInteractionReady(c.interactionReady)
 	}
-	var err error
-	if workspaceManager != nil {
-		_, err = dispatch.NewManagerWithWorkspaceAndLimitsConfigured(controllerCtx, config.Project, config.Driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, workspaceManager, configure)
-	} else {
-		_, err = dispatch.NewManagerWithLimitsConfigured(controllerCtx, config.Project, config.Driver, config.TurnTimeout, config.IdleTimeout, config.MaxResident, config.MaxActive, emit, configure)
+	managerConfig := dispatch.Config{
+		TurnTimeout:         config.TurnTimeout,
+		IdleTimeout:         config.IdleTimeout,
+		MaxResidentSessions: config.MaxResident,
+		MaxActiveTurns:      config.MaxActive,
+		Emit:                emit,
+		Configure:           configure,
 	}
-	if err != nil {
+	if workspaceManager != nil {
+		managerConfig.Workspaces = workspaceManager
+	}
+	if _, err := dispatch.NewManager(controllerCtx, config.Project, config.Driver, managerConfig); err != nil {
 		cancel()
 		return nil, err
 	}

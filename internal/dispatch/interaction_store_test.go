@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"hctl/internal/dispatchstate"
 	"hctl/internal/interaction"
-	"hctl/internal/session"
 )
 
 func TestConversationStorePersistsInteractionMutationsAcrossConversations(t *testing.T) {
@@ -60,7 +60,7 @@ func TestConversationStoreRollsBackInteractionWhenSaveFails(t *testing.T) {
 	}
 	ref := conversationRef{agentID: "agent@one", harness: "codex", id: "conversation", fingerprint: "source-1"}
 	openStoreTestInteraction(t, store, ref, storeTestLifecycle("a"))
-	store.save = func(string, *session.State) error { return errors.New("disk full") }
+	store.save = func(string, *dispatchstate.State) error { return errors.New("disk full") }
 	err = store.updateInteraction(ref, storeTestLifecycle("a").ID, func(pending *interaction.Lifecycle) error {
 		pending.Delivery = interaction.DeliveryUncertain
 		return nil
@@ -323,7 +323,7 @@ func TestConversationStoreOpenRejectsMismatchedAndRollsBackFailedSave(t *testing
 	if status, _, err := store.inputStatus(ref, pending.InputID); err != nil || status != "active" {
 		t.Fatalf("mismatch changed queue: %q, %v", status, err)
 	}
-	store.save = func(string, *session.State) error { return errors.New("disk full") }
+	store.save = func(string, *dispatchstate.State) error { return errors.New("disk full") }
 	if err := store.openInteraction(ref, pending); err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("open save error = %v", err)
 	}
@@ -404,7 +404,7 @@ func TestConversationStoreFinishRejectsInvalidPhaseAndRollsBackFailedSave(t *tes
 	if err := store.updateInteraction(ref, pending.ID, prepareResumingInteraction); err != nil {
 		t.Fatal(err)
 	}
-	store.save = func(string, *session.State) error { return errors.New("disk full") }
+	store.save = func(string, *dispatchstate.State) error { return errors.New("disk full") }
 	if err := store.finishInteraction(ref, finish); err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("finish save error = %v", err)
 	}

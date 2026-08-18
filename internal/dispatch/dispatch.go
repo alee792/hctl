@@ -13,9 +13,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"hctl/internal/dispatchstate"
 	"hctl/internal/harness"
 	"hctl/internal/project"
-	"hctl/internal/session"
 )
 
 const (
@@ -136,36 +136,11 @@ func RunSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, runOptions{policy: harness.PolicyDefault, store: store})
 }
 
-// RunSubmissionsWithTurnTimeout drives a long-lived channel conversation while
-// bounding each native harness turn independently.
-func RunSubmissionsWithTurnTimeout(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submissions <-chan Submission, emit func(Event) error, timeout time.Duration) error {
-	if timeout <= 0 {
-		return errors.New("turn timeout must be positive")
-	}
-	if err := validateDispatch(conversationID, emit); err != nil {
-		return err
-	}
-	store, err := openConversationStore(p.WorkspaceRoot)
-	if err != nil {
-		return err
-	}
-	return runSubmissions(ctx, p, driver, conversationID, submissions, emit, runOptions{turnTimeout: timeout, policy: harness.PolicyDefault, store: store})
-}
-
 // RunTask drives bounded task input while opening a fresh native harness
 // session for every accepted input. Durable dispatch outcomes still deduplicate
 // retries within the supplied conversation.
 func RunTask(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submission Submission, emit func(Event) error) error {
 	return runTask(ctx, p, driver, conversationID, submission, emit, 0, nil)
-}
-
-// RunTaskWithTurnTimeout drives one fresh-session task while bounding its
-// native harness turn independently from the caller's overall context.
-func RunTaskWithTurnTimeout(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submission Submission, emit func(Event) error, timeout time.Duration) error {
-	if timeout <= 0 || timeout > maxTaskTurnTimeout {
-		return errors.New("task turn timeout must be positive and at most 30m")
-	}
-	return runTask(ctx, p, driver, conversationID, submission, emit, timeout, newTimer)
 }
 
 func runTask(ctx context.Context, p *project.Project, driver harness.Driver, conversationID string, submission Submission, emit func(Event) error, timeout time.Duration, timers timerFactory) error {
@@ -216,7 +191,7 @@ func runSubmissions(ctx context.Context, p *project.Project, driver harness.Driv
 	}
 
 	inputOpen := true
-	var active *session.Input
+	var active *dispatchstate.Input
 	var process harness.Session
 	turnHeld := false
 	residentHeld := false
@@ -484,14 +459,14 @@ dispatchLoop:
 				continue
 			}
 			if message.deadline {
-				terminalSessionID, err := store.completeWithReason(ref, active.ID, "uncertain", session.OutcomeReasonDeadlineExceeded, "", freshSessions)
+				terminalSessionID, err := store.completeWithReason(ref, active.ID, "uncertain", dispatchstate.OutcomeReasonDeadlineExceeded, "", freshSessions)
 				if err != nil {
 					return err
 				}
 				completedID := active.ID
 				active = nil
 				process = nil
-				sink.emit(Event{Type: "turn.uncertain", InputID: completedID, SessionID: terminalSessionID, TurnID: completedID, Status: "deadline_exceeded", Reason: session.OutcomeReasonDeadlineExceeded})
+				sink.emit(Event{Type: "turn.uncertain", InputID: completedID, SessionID: terminalSessionID, TurnID: completedID, Status: "deadline_exceeded", Reason: dispatchstate.OutcomeReasonDeadlineExceeded})
 				if sink.err != nil {
 					return fmt.Errorf("%w: %v", errDispatchEventDelivery, sink.err)
 				}
@@ -688,7 +663,7 @@ func validateInput(value Submission) string {
 	return ""
 }
 
-func runTurn(ctx context.Context, process harness.Session, input session.Input, messages chan<- turnMessage, timeout time.Duration, timers timerFactory, abortOnDeadline bool) {
+func runTurn(ctx context.Context, process harness.Session, input dispatchstate.Input, messages chan<- turnMessage, timeout time.Duration, timers timerFactory, abortOnDeadline bool) {
 	if !abortOnDeadline {
 		if timeout > 0 {
 			var cancel context.CancelFunc
@@ -725,7 +700,7 @@ func runTurn(ctx context.Context, process harness.Session, input session.Input, 
 	}
 }
 
-func runHarnessTurn(ctx context.Context, process harness.Session, input session.Input, messages chan<- turnMessage) {
+func runHarnessTurn(ctx context.Context, process harness.Session, input dispatchstate.Input, messages chan<- turnMessage) {
 	emit := func(event harness.Event) {
 		copy := event
 		messages <- turnMessage{event: &copy}

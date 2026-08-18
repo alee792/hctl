@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
+	"hctl/internal/dispatchstate"
 	"hctl/internal/harness"
 	"hctl/internal/integration"
 	"hctl/internal/interaction"
 	"hctl/internal/project"
-	"hctl/internal/session"
 	"hctl/internal/worktree"
 )
 
@@ -29,10 +29,10 @@ func TestManagerOwnsIndependentConversationLifecycles(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 32)
-	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestManagerOwnsIndependentConversationLifecycles(t *testing.T) {
 		t.Fatalf("opened harness processes = %d, want one per conversation", got)
 	}
 
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,13 +105,13 @@ func TestManagerConfiguresRequestInputBeforeRecoveredWorkersStart(t *testing.T) 
 	p := testProject(t)
 	driver := newNamedManagerDriver("codex")
 	configured := false
-	manager, err := NewManagerWithLimitsConfigured(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(string, Event) error { return nil }, func(manager *Manager) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(string, Event) error { return nil }, Configure: func(manager *Manager) error {
 		if driver.openCount() != 0 {
 			t.Fatal("recovered worker opened before request-input configuration")
 		}
 		configured = true
 		return manager.ConfigureRequestInput(func(string) RequestInputHandler { return nil })
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,12 +130,12 @@ func TestManagerParkingReleasesCapacityAndPreservesSuccessor(t *testing.T) {
 	p := testProject(t)
 	driver := newNamedManagerDriver("codex")
 	waitingEvents := make(chan Event, 4)
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(_ string, event Event) error {
 		if event.Status == "waiting_for_input" {
 			waitingEvents <- event
 		}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestManagerColdRestartDrainsSuccessorAfterTerminalInteraction(t *testing.T)
 			if err := store.finishInteraction(ref, interaction.FinishRequest{InteractionID: pending.ID, Phase: test.phase, OriginOutcome: test.outcome, FinishedAt: finishedAt}); err != nil {
 				t.Fatal(err)
 			}
-			manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(string, Event) error { return nil })
+			manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(string, Event) error { return nil }})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -327,7 +327,7 @@ func TestManagerColdRestartAndShutdownPreserveWaitingLifecycle(t *testing.T) {
 			if err != nil || expected.Pending == nil {
 				t.Fatalf("expected state = %#v, %v", expected.Pending, err)
 			}
-			manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(string, Event) error { return nil })
+			manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(string, Event) error { return nil }})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -357,10 +357,10 @@ func TestManagerQueuesOneConversationBehindOneResidentProcess(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 32)
-	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,10 +396,10 @@ func TestManagerBoundsActiveTurnsAndAdvancesConversationsFairly(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 64)
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 2, 1, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 2, MaxActiveTurns: 1, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestManagerBoundsActiveTurnsAndAdvancesConversationsFairly(t *testing.T) {
 func TestManagerShutdownDoesNotGrantWaitingCapacity(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 2, 1, func(string, Event) error { return nil })
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 2, MaxActiveTurns: 1, Emit: func(string, Event) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func TestManagerShutdownDoesNotGrantWaitingCapacity(t *testing.T) {
 
 func TestManagerRestartReusesDurableQueueWithoutDuplicateCapacity(t *testing.T) {
 	p := testProject(t)
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,12 +478,12 @@ func TestManagerRestartReusesDurableQueueWithoutDuplicateCapacity(t *testing.T) 
 			t.Fatalf("seed durable input = duplicate %v, error %v", duplicate, err)
 		}
 	}
-	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+	if err := dispatchstate.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
 
 	driver := newManagerDriver()
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 2, 1, func(string, Event) error { return nil })
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 2, MaxActiveTurns: 1, Emit: func(string, Event) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,10 +519,10 @@ func TestManagerHibernatesIdleResidentUnderCapacityPressure(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 64)
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,10 +557,10 @@ func TestManagerRotatesResidentAfterTurnToPreventStarvation(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 64)
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,10 +593,10 @@ func TestManagerConsumesSynchronousCapacityHandoffBeforeReopening(t *testing.T) 
 	p := testProject(t)
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 64)
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -707,7 +707,7 @@ func TestManagerRunsConcurrentWritableSurfacesInIsolationForHarnesses(t *testing
 			driver.release("guild-write")
 			waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-guild": "guild-write"})
 
-			state, err := session.Load(p.WorkspaceRoot)
+			state, err := dispatchstate.Load(p.WorkspaceRoot)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -797,7 +797,7 @@ func TestManagerContainsHarnessFailureToOneWritableConversation(t *testing.T) {
 	if status := manager.Status("discord-dm"); status.State != LifecycleIdle || status.Pending != 0 {
 		t.Fatalf("DM state after guild failure = %+v", status)
 	}
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -946,7 +946,7 @@ func TestManagerStopsRuntimeWhenDispatchEventDeliveryFails(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	deliveryErr := errors.New("event transport failed")
-	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(string, Event) error { return deliveryErr })
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, Emit: func(string, Event) error { return deliveryErr }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -967,13 +967,13 @@ func TestManagerStopsRuntimeWhenDispatchEventDeliveryFails(t *testing.T) {
 
 func TestManagerReconcilesPersistedWorktreesConservativelyAtStartup(t *testing.T) {
 	p := testProject(t)
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	type fixture struct {
 		name       string
-		queue      []session.Input
+		queue      []dispatchstate.Input
 		outcomes   map[string]string
 		order      []string
 		retiring   bool
@@ -982,8 +982,8 @@ func TestManagerReconcilesPersistedWorktreesConservativelyAtStartup(t *testing.T
 	}
 	fixtures := []fixture{
 		{name: "clean", inspection: worktree.Inspection{Clean: true, Merged: true, Reason: "clean and merged"}},
-		{name: "active", queue: []session.Input{{ID: "active-input", Text: "active content", Status: "active"}}, inspection: worktree.Inspection{Clean: true, Merged: true, Reason: "clean and merged"}},
-		{name: "queued", queue: []session.Input{{ID: "queued-input", Text: "queued content", Status: "queued"}}, inspection: worktree.Inspection{Clean: true, Merged: true, Reason: "clean and merged"}},
+		{name: "active", queue: []dispatchstate.Input{{ID: "active-input", Text: "active content", Status: "active"}}, inspection: worktree.Inspection{Clean: true, Merged: true, Reason: "clean and merged"}},
+		{name: "queued", queue: []dispatchstate.Input{{ID: "queued-input", Text: "queued content", Status: "queued"}}, inspection: worktree.Inspection{Clean: true, Merged: true, Reason: "clean and merged"}},
 		{name: "uncertain", outcomes: map[string]string{"prior-input": "uncertain"}, order: []string{"prior-input"}, inspection: worktree.Inspection{Clean: true, Merged: true, Reason: "clean and merged"}},
 		{name: "dirty", inspection: worktree.Inspection{Merged: true, Reason: "dirty or untracked work"}},
 		{name: "unmerged", inspection: worktree.Inspection{Clean: true, Reason: "unmerged commits"}},
@@ -1017,11 +1017,11 @@ func TestManagerReconcilesPersistedWorktreesConservativelyAtStartup(t *testing.T
 		provider.inspections[item.name] = item.inspection
 		provider.inspectErrs[item.name] = item.inspectErr
 	}
-	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+	if err := dispatchstate.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
 
-	manager, err := NewManagerWithWorkspace(context.Background(), p, newManagerDriver(), time.Minute, time.Hour, func(string, Event) error { return nil }, provider)
+	manager, err := NewManager(context.Background(), p, newManagerDriver(), Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, Emit: func(string, Event) error { return nil }, Workspaces: provider})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1057,7 +1057,7 @@ func TestManagerReconcilesPersistedWorktreesConservativelyAtStartup(t *testing.T
 		}
 	}
 
-	persisted, err := session.Load(p.WorkspaceRoot)
+	persisted, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1076,12 +1076,12 @@ func TestManagerReconcilesPersistedWorktreesConservativelyAtStartup(t *testing.T
 	}
 
 	retryProvider := &reconcilingWorkspaceProvider{base: p, assignments: provider.assignments, inspections: provider.inspections, inspectErrs: provider.inspectErrs, retireErrs: map[string]error{}}
-	retried, err := NewManagerWithWorkspace(context.Background(), p, newManagerDriver(), time.Minute, time.Hour, func(string, Event) error { return nil }, retryProvider)
+	retried, err := NewManager(context.Background(), p, newManagerDriver(), Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, Emit: func(string, Event) error { return nil }, Workspaces: retryProvider})
 	if err != nil {
 		t.Fatal(err)
 	}
 	retried.Close()
-	persisted, err = session.Load(p.WorkspaceRoot)
+	persisted, err = dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1094,7 +1094,7 @@ func TestManagerReconcilesPersistedWorktreesConservativelyAtStartup(t *testing.T
 func TestManagerPreservedAssignmentResumesWithoutProvisioning(t *testing.T) {
 	p := testProject(t)
 	assignment := worktree.Assignment{Root: t.TempDir(), Branch: "hctl/test/preserved"}
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1104,7 +1104,7 @@ func TestManagerPreservedAssignmentResumesWithoutProvisioning(t *testing.T) {
 	}
 	conversation.WorkspaceRoot = assignment.Root
 	conversation.WorktreeBranch = assignment.Branch
-	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+	if err := dispatchstate.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
 	provider := &reconcilingWorkspaceProvider{
@@ -1112,7 +1112,7 @@ func TestManagerPreservedAssignmentResumesWithoutProvisioning(t *testing.T) {
 		inspections: map[string]worktree.Inspection{"preserved": {Merged: true, Reason: "dirty or untracked work"}}, inspectErrs: map[string]error{}, retireErrs: map[string]error{},
 	}
 	driver := newManagerDriver()
-	manager, err := NewManagerWithWorkspace(context.Background(), p, driver, time.Minute, time.Hour, func(string, Event) error { return nil }, provider)
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, Emit: func(string, Event) error { return nil }, Workspaces: provider})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1132,7 +1132,7 @@ func TestManagerPreservedAssignmentResumesWithoutProvisioning(t *testing.T) {
 
 func TestManagerRefusesToSkipPersistedWorktreeReconciliation(t *testing.T) {
 	p := testProject(t)
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1142,10 +1142,10 @@ func TestManagerRefusesToSkipPersistedWorktreeReconciliation(t *testing.T) {
 	}
 	conversation.WorkspaceRoot = t.TempDir()
 	conversation.WorktreeBranch = "hctl/test/persisted"
-	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+	if err := dispatchstate.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewManager(context.Background(), p, newManagerDriver(), time.Minute, func(string, Event) error { return nil }); err == nil || !strings.Contains(err.Error(), "Git ownership recovery") {
+	if _, err := NewManager(context.Background(), p, newManagerDriver(), Config{TurnTimeout: time.Minute, Emit: func(string, Event) error { return nil }}); err == nil || !strings.Contains(err.Error(), "Git ownership recovery") {
 		t.Fatalf("manager without reconciliation provider = %v", err)
 	}
 }
@@ -1154,10 +1154,10 @@ func TestManagerResetRequiresIdleConversation(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 16)
-	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1181,7 +1181,7 @@ func TestManagerResetRequiresIdleConversation(t *testing.T) {
 		t.Fatalf("reset status = %+v", status)
 	}
 
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1192,7 +1192,7 @@ func TestManagerResetRequiresIdleConversation(t *testing.T) {
 
 func TestManagerRecoveryDoesNotConsumeNewPendingInput(t *testing.T) {
 	p := testProject(t)
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1206,16 +1206,16 @@ func TestManagerRecoveryDoesNotConsumeNewPendingInput(t *testing.T) {
 	if _, err := conversation.StartNext(); err != nil {
 		t.Fatal(err)
 	}
-	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+	if err := dispatchstate.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
 
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 32)
-	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1237,7 +1237,7 @@ func TestManagerRecoveryDoesNotConsumeNewPendingInput(t *testing.T) {
 
 func TestManagerColdDurableWorkIsBusyAndVisible(t *testing.T) {
 	p := testProject(t)
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1251,11 +1251,11 @@ func TestManagerColdDurableWorkIsBusyAndVisible(t *testing.T) {
 	if _, err := conversation.StartNext(); err != nil {
 		t.Fatal(err)
 	}
-	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+	if err := dispatchstate.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
 
-	manager, err := NewManager(context.Background(), p, newManagerDriver(), time.Minute, func(string, Event) error { return nil })
+	manager, err := NewManager(context.Background(), p, newManagerDriver(), Config{TurnTimeout: time.Minute, Emit: func(string, Event) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1268,7 +1268,7 @@ func TestManagerColdDurableWorkIsBusyAndVisible(t *testing.T) {
 		t.Fatalf("cold durable reset = %v, want busy", err)
 	}
 
-	persisted, err := session.Load(p.WorkspaceRoot)
+	persisted, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1280,7 +1280,7 @@ func TestManagerColdDurableWorkIsBusyAndVisible(t *testing.T) {
 
 func TestManagerStatusDoesNotCreateUnknownConversation(t *testing.T) {
 	p := testProject(t)
-	manager, err := NewManager(context.Background(), p, newManagerDriver(), time.Minute, func(string, Event) error { return nil })
+	manager, err := NewManager(context.Background(), p, newManagerDriver(), Config{TurnTimeout: time.Minute, Emit: func(string, Event) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1313,7 +1313,7 @@ func TestManagerColdResetPreservesLegacyStateSemantics(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			manager, err := NewManager(context.Background(), p, newManagerDriver(), time.Minute, func(string, Event) error { return nil })
+			manager, err := NewManager(context.Background(), p, newManagerDriver(), Config{TurnTimeout: time.Minute, Emit: func(string, Event) error { return nil }})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1322,7 +1322,7 @@ func TestManagerColdResetPreservesLegacyStateSemantics(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			state, err := session.Load(p.WorkspaceRoot)
+			state, err := dispatchstate.Load(p.WorkspaceRoot)
 			if err != nil {
 				t.Fatalf("load after cold legacy reset: %v", err)
 			}
@@ -1414,7 +1414,7 @@ func TestManagerElevatesOnceAndReusesDurableWritableWorkspace(t *testing.T) {
 	if err != nil || result.Status != "queued" {
 		t.Fatalf("elevation = %+v, %v", result, err)
 	}
-	atomicState, err := session.Load(p.WorkspaceRoot)
+	atomicState, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1451,7 +1451,7 @@ func TestManagerElevatesOnceAndReusesDurableWritableWorkspace(t *testing.T) {
 	waitManagedEvents(t, events, "turn.completed", map[string]string{"discord-dm": "message-other"})
 	manager.Close()
 
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1489,10 +1489,10 @@ func TestManagerElevationFailurePreservesReadOnlyConversation(t *testing.T) {
 	provider := &fakeWorkspaceProvider{provisionErr: errors.New("cannot prepare isolated workspace")}
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 32)
-	manager, err := NewManagerWithWorkspace(context.Background(), p, driver, time.Minute, time.Hour, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	}, provider)
+	}, Workspaces: provider})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1508,7 +1508,7 @@ func TestManagerElevationFailurePreservesReadOnlyConversation(t *testing.T) {
 		t.Fatalf("elevation failure = %v", err)
 	}
 
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1585,7 +1585,7 @@ func TestManagerClassifiesHibernateCloseFailureWithoutLosingConversation(t *test
 		t.Fatalf("manager error = %v", manager.Err())
 	}
 
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1600,10 +1600,10 @@ func TestManagerClassifiesReadOnlyPolicyStartupFailure(t *testing.T) {
 	driver := newManagerDriver()
 	driver.openErr = errors.New("read-only policy unsupported")
 	events := make(chan managedEvent, 16)
-	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1707,10 +1707,10 @@ func TestManagerDeduplicatesWithoutInflatingStatus(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 32)
-	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1745,7 +1745,7 @@ func TestManagerDeduplicatesWithoutInflatingStatus(t *testing.T) {
 func TestManagerAdmissionDoesNotBlockLifecycleStatusAtCapacity(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
-	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(string, Event) error { return nil })
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, Emit: func(string, Event) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1784,10 +1784,10 @@ func TestManagerTurnTimeoutAndShutdownRemainBounded(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
 	events := make(chan managedEvent, 16)
-	manager, err := NewManager(context.Background(), p, driver, 10*time.Millisecond, func(conversation string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: 10 * time.Millisecond, Emit: func(conversation string, event Event) error {
 		events <- managedEvent{conversation: conversation, event: event}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1815,7 +1815,7 @@ type managedEvent struct {
 func TestManagerConfiguresManagedInputBeforeAdmission(t *testing.T) {
 	p := testProject(t)
 	driver := newManagerDriver()
-	manager, err := NewManager(context.Background(), p, driver, time.Minute, func(string, Event) error { return nil })
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, Emit: func(string, Event) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1842,10 +1842,10 @@ func TestManagerOwnsCodexContinuationCapacityAndCommitsBeforeTerminalEvent(t *te
 	p := testProject(t)
 	driver := newContinuationManagerDriver()
 	events := make(chan Event, 32)
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(_ string, event Event) error {
 		events <- event
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1916,7 +1916,7 @@ func TestManagerPassesResolvedWritableProjectToContinuationGuard(t *testing.T) {
 	assignment := worktree.Assignment{Root: workspace, Branch: "hctl/test/continued"}
 	provider := &multiWorkspaceProvider{base: p, assignments: map[string]worktree.Assignment{"discord-guild": assignment}, resolveFailures: map[string]error{}}
 	driver := &projectAwareContinuationManagerDriver{managerDriver: newNamedManagerDriver("codex")}
-	manager, err := NewManagerWithWorkspace(context.Background(), p, driver, time.Minute, time.Hour, func(string, Event) error { return nil }, provider)
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, Emit: func(string, Event) error { return nil }, Workspaces: provider})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1980,10 +1980,10 @@ func TestWritableParkedContinuationAuditsPackageResolutionFailures(t *testing.T)
 				driver := newGuardedContinuationManagerDriver(harnessName)
 				var audit diagnosticRecorder
 				var dispatchContent diagnosticRecorder
-				manager, err := NewManagerWithWorkspace(context.Background(), p, driver, time.Minute, time.Hour, func(_ string, event Event) error {
+				manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, Emit: func(_ string, event Event) error {
 					dispatchContent.add(fmt.Sprintf("%+v", event))
 					return nil
-				}, provider)
+				}, Workspaces: provider})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -2036,7 +2036,7 @@ func TestWritableParkedContinuationAuditsPackageResolutionFailures(t *testing.T)
 				if strings.Contains(dispatchContent.string(), expectedErr.Error()) {
 					t.Fatalf("package failure crossed dispatch content: %s", dispatchContent.string())
 				}
-				durable, err := session.Load(p.WorkspaceRoot)
+				durable, err := dispatchstate.Load(p.WorkspaceRoot)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -2072,7 +2072,7 @@ func TestManagerDiagnosticsRetainBoundedTailWhileAuditReceivesEveryFailure(t *te
 
 func TestManagerConstructionAuditsEveryStartupDiagnosticBeforeRetainingTail(t *testing.T) {
 	p := testProject(t)
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2095,13 +2095,13 @@ func TestManagerConstructionAuditsEveryStartupDiagnosticBeforeRetainingTail(t *t
 		provider.inspections[conversationID] = worktree.Inspection{Reason: reason}
 		expected = append(expected, fmt.Sprintf("worktree %s preserved: %s", assignment.Root, reason))
 	}
-	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+	if err := dispatchstate.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
 	var audit diagnosticRecorder
-	manager, err := NewManagerWithWorkspaceAndLimitsConfigured(context.Background(), p, newManagerDriver(), time.Minute, time.Hour, 1, 1, func(string, Event) error { return nil }, provider, func(manager *Manager) error {
+	manager, err := NewManager(context.Background(), p, newManagerDriver(), Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(string, Event) error { return nil }, Workspaces: provider, Configure: func(manager *Manager) error {
 		return manager.ConfigureDiagnosticSink(audit.add)
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2121,10 +2121,10 @@ func TestManagerRestartClaimsDurableAnsweredContinuationOnce(t *testing.T) {
 	_ = store
 	driver := newContinuationManagerDriver()
 	events := make(chan Event, 16)
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(_ string, event Event) error {
 		events <- event
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2169,10 +2169,10 @@ func TestManagerRestartClaimsDurableNativeDeferredContinuationOnce(t *testing.T)
 	}
 	driver := newNativeDeferredManagerDriver()
 	events := make(chan Event, 16)
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(_ string, event Event) error {
 		events <- event
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2203,12 +2203,12 @@ func TestContinuationDeltaDeliveryFailureStopsRuntime(t *testing.T) {
 	_, pending := prepareDurableAnsweredInteraction(t, p, ref)
 	driver := newContinuationManagerDriver()
 	deliveryErr := errors.New("continuation delta transport failed")
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(_ string, event Event) error {
 		if event.Type == "agent.output.delta" {
 			return deliveryErr
 		}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2235,12 +2235,12 @@ func TestContinuationDeltaDeliveryFailureCancelsBeforeDriverReturns(t *testing.T
 	_, _ = prepareDurableAnsweredInteraction(t, p, ref)
 	driver := newBlockedAfterEmitContinuationDriver()
 	deliveryErr := errors.New("continuation callback transport failed")
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(_ string, event Event) error {
 		if event.Type == "agent.output.delta" {
 			return deliveryErr
 		}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2299,12 +2299,12 @@ func TestContinuationTerminalDeliveryFailureStopsRuntimeAfterCommit(t *testing.T
 	_, pending := prepareDurableAnsweredInteraction(t, p, ref)
 	driver := newContinuationManagerDriver()
 	deliveryErr := errors.New("continuation terminal transport failed")
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(_ string, event Event) error {
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(_ string, event Event) error {
 		if event.Type == "turn.completed" {
 			return deliveryErr
 		}
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2356,7 +2356,7 @@ func TestManagerRestartMarksClaimedContinuationUncertainWithoutRetry(t *testing.
 		t.Fatal(err)
 	}
 	driver := newContinuationManagerDriver()
-	manager, err := NewManagerWithLimits(context.Background(), p, driver, time.Minute, time.Hour, 1, 1, func(string, Event) error { return nil })
+	manager, err := NewManager(context.Background(), p, driver, Config{TurnTimeout: time.Minute, IdleTimeout: time.Hour, MaxResidentSessions: 1, MaxActiveTurns: 1, Emit: func(string, Event) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3136,7 +3136,7 @@ func TestManagerStatusValuesStayBounded(t *testing.T) {
 
 func TestManagerStatusRedactsPendingInteraction(t *testing.T) {
 	p := testProject(t)
-	manager, err := NewManager(context.Background(), p, newManagerDriver(), time.Minute, func(string, Event) error { return nil })
+	manager, err := NewManager(context.Background(), p, newManagerDriver(), Config{TurnTimeout: time.Minute, Emit: func(string, Event) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

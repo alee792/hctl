@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"hctl/internal/dispatchstate"
 	"hctl/internal/harness"
 	"hctl/internal/project"
-	"hctl/internal/session"
 )
 
 func TestAcceptsAndDeduplicatesInputDuringActiveTurn(t *testing.T) {
@@ -58,7 +58,7 @@ func TestAcceptsAndDeduplicatesInputDuringActiveTurn(t *testing.T) {
 	if acceptedSecond < 0 || completedFirst < 0 || acceptedSecond > completedFirst {
 		t.Fatalf("second input was not accepted during the active first turn: %#v", events)
 	}
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestAcceptsAndDeduplicatesInputDuringActiveTurn(t *testing.T) {
 
 func TestRecoversActiveInputAsUncertain(t *testing.T) {
 	p := testProject(t)
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestRecoversActiveInputAsUncertain(t *testing.T) {
 	if _, err := conversation.StartNext(); err != nil {
 		t.Fatal(err)
 	}
-	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+	if err := dispatchstate.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
 
@@ -181,7 +181,7 @@ func TestTaskInputsUseFreshSessionsAndDeduplicate(t *testing.T) {
 	if eventIndex(events, "input.duplicate", "occurrence-2") < 0 {
 		t.Fatalf("duplicate task input was not reported: %#v", events)
 	}
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,15 +218,15 @@ func TestTaskTurnDeadlineAbortsAndDurablyDeduplicatesUncertainOutcome(t *testing
 		t.Fatalf("missing deadline lifecycle event: %#v", events)
 	}
 	deadline := events[deadlineIndex]
-	if deadline.Status != "deadline_exceeded" || deadline.Reason != session.OutcomeReasonDeadlineExceeded {
+	if deadline.Status != "deadline_exceeded" || deadline.Reason != dispatchstate.OutcomeReasonDeadlineExceeded {
 		t.Fatalf("deadline event = %+v", deadline)
 	}
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	conversation := findConversation(state, "schedule-daily")
-	if conversation == nil || len(conversation.Queue) != 0 || conversation.Outcomes["occurrence-1"] != "uncertain" || conversation.OutcomeReasons["occurrence-1"] != session.OutcomeReasonDeadlineExceeded || conversation.SessionID != "" {
+	if conversation == nil || len(conversation.Queue) != 0 || conversation.Outcomes["occurrence-1"] != "uncertain" || conversation.OutcomeReasons["occurrence-1"] != dispatchstate.OutcomeReasonDeadlineExceeded || conversation.SessionID != "" {
 		t.Fatalf("deadline state = %#v", conversation)
 	}
 
@@ -235,7 +235,7 @@ func TestTaskTurnDeadlineAbortsAndDurablyDeduplicatesUncertainOutcome(t *testing
 		t.Fatal(err)
 	}
 	duplicateIndex := eventIndex(events, "input.duplicate", "occurrence-1")
-	if driver.openCount() != 1 || duplicateIndex < 0 || events[duplicateIndex].Reason != session.OutcomeReasonDeadlineExceeded {
+	if driver.openCount() != 1 || duplicateIndex < 0 || events[duplicateIndex].Reason != dispatchstate.OutcomeReasonDeadlineExceeded {
 		t.Fatalf("duplicate reopened harness: opens=%d events=%#v", driver.openCount(), events)
 	}
 	select {
@@ -484,7 +484,7 @@ func eventIndex(events []Event, typeName, inputID string) int {
 	return -1
 }
 
-func findConversation(state *session.State, id string) *session.Conversation {
+func findConversation(state *dispatchstate.State, id string) *dispatchstate.Conversation {
 	for _, conversation := range state.Conversations {
 		if conversation.ID == id {
 			return conversation

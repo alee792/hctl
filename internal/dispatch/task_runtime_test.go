@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"hctl/internal/dispatchstate"
 	"hctl/internal/harness"
-	"hctl/internal/session"
 )
 
 type runtimeDriver struct {
@@ -98,7 +98,7 @@ func TestTaskRuntimeSharesStoreAndBoundsConcurrentFreshSessions(t *testing.T) {
 		}
 	}
 	driver.mu.Unlock()
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestTaskRuntimeSharesStoreAndBoundsConcurrentFreshSessions(t *testing.T) {
 
 func TestTaskRuntimeRecoversQueuedAndActiveAsUncertain(t *testing.T) {
 	p := testProject(t)
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestTaskRuntimeRecoversQueuedAndActiveAsUncertain(t *testing.T) {
 	if _, err := conversation.StartNext(); err != nil {
 		t.Fatal(err)
 	}
-	if err := session.Save(p.WorkspaceRoot, state); err != nil {
+	if err := dispatchstate.Save(p.WorkspaceRoot, state); err != nil {
 		t.Fatal(err)
 	}
 	runtime, err := NewTaskRuntime(p, &runtimeDriver{}, time.Second, 1)
@@ -141,7 +141,7 @@ func TestTaskRuntimeRecoversQueuedAndActiveAsUncertain(t *testing.T) {
 	if len(recovered) != 2 || recovered[0] != "queued" || recovered[1] != "active" {
 		t.Fatalf("recovered=%v", recovered)
 	}
-	loaded, err := session.Load(p.WorkspaceRoot)
+	loaded, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,12 +173,12 @@ func TestTaskRuntimeDeadlineIsolatedAndDurable(t *testing.T) {
 	if err != ErrTurnDeadlineExceeded {
 		t.Fatalf("deadline error=%v", err)
 	}
-	state, err := session.Load(p.WorkspaceRoot)
+	state, err := dispatchstate.Load(p.WorkspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	conversation := findConversation(state, "schedule-a")
-	if conversation.Outcomes["deadline"] != "uncertain" || conversation.OutcomeReason("deadline") != session.OutcomeReasonDeadlineExceeded {
+	if conversation.Outcomes["deadline"] != "uncertain" || conversation.OutcomeReason("deadline") != dispatchstate.OutcomeReasonDeadlineExceeded {
 		t.Fatalf("state=%#v", conversation)
 	}
 	close(driver.release)

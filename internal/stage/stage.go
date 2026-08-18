@@ -418,33 +418,12 @@ func underRoot(root, absolute string) string {
 }
 
 func copyProjectSources(p *project.Project, artifactRoot, destination string) error {
-	for _, directory := range p.SourceDirectories {
-		if _, err := rootfs.CleanRelative(directory); err != nil {
-			return fmt.Errorf("agent source directory %s is invalid during staging", directory)
-		}
-		if err := os.MkdirAll(underRoot(artifactRoot, destination+"/"+directory), 0o755); err != nil {
-			return fmt.Errorf("cannot stage agent source directory %s", directory)
-		}
-	}
 	seen := map[string]bool{}
 	for _, source := range p.Sources {
 		if seen[source.Path] {
 			return fmt.Errorf("agent source path %s collides during staging", source.Path)
 		}
 		seen[source.Path] = true
-		if captured, exists := p.SourceContents[source.Path]; exists {
-			if rootfs.SHA256(captured) != source.SHA256 {
-				return fmt.Errorf("captured agent source %s has an invalid identity", source.Path)
-			}
-			mode := os.FileMode(0o644)
-			if source.Executable {
-				mode = 0o755
-			}
-			if err := rootfs.WriteAtomic(artifactRoot, destination+"/"+source.Path, captured, mode); err != nil {
-				return err
-			}
-			continue
-		}
 		info, err := os.Lstat(filepath.Join(p.SourceRoot, filepath.FromSlash(source.Path)))
 		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 64<<20 {
 			return fmt.Errorf("agent source %s changed before staging", source.Path)
@@ -470,12 +449,6 @@ func verifyPreparedSource(p *project.Project) error {
 	for _, source := range p.Sources {
 		files[source.Path] = source
 		for parent := filepath.ToSlash(filepath.Dir(source.Path)); parent != "."; parent = filepath.ToSlash(filepath.Dir(parent)) {
-			directories[parent] = true
-		}
-	}
-	for _, directory := range p.SourceDirectories {
-		directories[directory] = true
-		for parent := filepath.ToSlash(filepath.Dir(directory)); parent != "."; parent = filepath.ToSlash(filepath.Dir(parent)) {
 			directories[parent] = true
 		}
 	}

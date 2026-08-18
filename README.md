@@ -72,45 +72,13 @@ directory containing `SKILL.md` and optional scripts, references, assets, or
 other resources. Adding a skill directory makes it available on the next
 apply; there is no registration file to update.
 
-Existing complete Skills can also be copied into portable source through the
-same reviewed local, exact HTTPS Git ref, or digest-pinned HTTPS archive forms
-as Plugins:
-
-```console
-hctl skill add ./my-agent --from-dir ../review
-hctl skill status ./my-agent
-hctl skill update ./my-agent review
-hctl skill remove ./my-agent review
-```
-
-Manual untracked directories beneath `skills/` remain supported. These
-commands preserve `SKILL.md` and the complete accepted resource tree, require
-interactive confirmation or `--yes` for mutation, and never implicitly apply.
-
 An [Agent Plugin v1](https://agent-plugins.org/specification) is a complete
 directory package authored by its publisher, including its `plugin.json` and
-any conventional components. A consumer acquires that complete directory; do
-not recreate its manifest or manufacture a wrapper Plugin. The specification
-standardizes the package and client contract, but does not prescribe a
-universal source, install command, marketplace, registry, vendoring rule, or
-update workflow.
-
-Hctl can copy a reviewed Plugin from one exact local directory, HTTPS Git ref,
-or digest-pinned HTTPS ZIP/TAR.GZ archive into conventional portable source:
-
-```console
-hctl plugin add ./my-agent --from-dir ../review-pack
-hctl plugin status ./my-agent
-hctl plugin update ./my-agent review-pack
-hctl plugin remove ./my-agent review-pack
-```
-
-Interactive add, update, and removal require confirmation; automation must
-pass `--yes`. Add and update are the only source-networked phases. Status and
-ordinary apply use the committed local tree and never advance a moving ref.
-Manual untracked directories beneath `plugins/` remain supported. Acquisition
-is optional hctl behavior, not an Agent Plugins distribution rule, and none of
-these commands implicitly applies the agent.
+any conventional components. A consumer copies the reviewed complete directory
+beneath `plugins/`; do not recreate its manifest or manufacture a wrapper
+Plugin. Existing complete Skills are vendored the same way: copy the reviewed
+directory beneath `skills/`. Review, version pinning, and provenance belong to
+your own version control, where the rest of the agent source already lives.
 
 Hctl validates each local `plugin.json`, imports skills from its fixed
 `skills/` location, and maps valid `stdio` or `streamable-http` declarations

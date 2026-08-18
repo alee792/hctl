@@ -17,7 +17,19 @@ smaller than the product horizon in [Working status](status.md).
 
 ## Ready
 
-No autonomous implementation task is currently unblocked after #101.
+The 2026-08 restructure ([charter](restructure.md), epic
+[#114](https://github.com/alee792/hctl/issues/114)) reset this queue. Take
+work in this order:
+
+1. [#115](https://github.com/alee792/hctl/issues/115) — Extract the channel
+   runtime from core (start with the seam audit phase).
+2. [#118](https://github.com/alee792/hctl/issues/118) — Rebalance tests: the
+   `internal/tool` coverage slice is unblocked immediately and does not wait
+   for #115.
+3. [#116](https://github.com/alee792/hctl/issues/116) — Core contract
+   follow-ups (after #115's scope is settled, to avoid churn in moving code).
+4. [#117](https://github.com/alee792/hctl/issues/117) — Rewrite human-facing
+   docs (after #115 stabilizes the core surface).
 
 ## Ready for human
 

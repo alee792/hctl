@@ -7,6 +7,13 @@ their model loops or interfaces. For headless use, add a session-aware turn
 dispatcher that connects external input and governs only what crosses its
 managed boundary.
 
+Authored tools are typed functions, not protocol servers. A TypeScript,
+Python, or Go source file under `tools/` declares one schema-validated
+function; hctl-owned language hosts load those files and expose them to the
+selected harness through one managed MCP server. Authors never write MCP
+protocol code, and the managed boundary validates, bounds, and audits every
+call that crosses it.
+
 An author can assemble an agent project from existing Agent Skills, Agent
 Plugins, and MCP servers without writing provider-specific protocol adapters.
 Acquired dependencies are explicit, pinned, and inspectable. Hctl validates

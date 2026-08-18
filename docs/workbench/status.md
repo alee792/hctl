@@ -1,6 +1,6 @@
 # Working status
 
-- Updated: 2026-08-09
+- Updated: 2026-08-18
 - Repository: GitHub-backed `hctl` experiment; publication remains pending and
   product naming remains deferred
 - Purpose: let a clean session resume without depending on chat history or the
@@ -8,7 +8,9 @@
 
 ## Resume order
 
-1. Read the [vision](../vision.md) for the product boundary.
+1. Read the [restructure plan](restructure.md) first: the 2026-08 refresh
+   decisions supersede this document's narrative where they disagree.
+2. Read the [vision](../vision.md) for the product boundary.
 2. Read the [product specification](../product-spec.md) for the accepted MVP.
 3. Use the [glossary](../glossary.md) for author-facing terminology.
 4. Use the [maintainer task list](tasks.md) for executable next work.
@@ -23,12 +25,9 @@ open follow-up questions.
 
 The repository contains a small Go CLI that:
 
-- includes the shared Plugin and Skill acquisition engine accepted by ADR
-  0035: exact local, resolved HTTPS Git, and digest-pinned HTTPS archive sources
-  materialize as complete bounded trees; deterministic provenance, offline
-  drift checks, operation locking, and journal recovery are integrated into
-  every project load and staged source snapshot; the public Plugin and Skill
-  add, status, update, and remove commands are implemented;
+- vendors Plugins and Skills only by manual directory copy: ADR 0036 removed
+  the ADR 0035 acquisition engine, the `hctl plugin` and `hctl skill`
+  commands, and `hctl-dependencies.json` during the 2026-08 restructure;
 - applies portable agent instructions, root and vendored Agent Plugins v1
   skills with bundled resources, native unmanaged plugin MCP declarations,
   immediate inherited subagents with an optional
@@ -206,25 +205,18 @@ a generated custom subagent, and session resume in a fresh external workspace.
   protocol ceilings; generated MCP configuration is bounded consistently with
   later verification. [ADR 0029](../adr/0029-bound-authored-projects-with-aggregate-budgets.md)
   records the decision.
-- Complete publisher-authored Agent Plugins v1 directories may be copied intact
-  beneath `plugins/` manually or through the public `hctl plugin` acquisition
-  commands. This local vendoring is hctl consumer behavior, not a distribution
-  rule from the specification.
+- Complete publisher-authored Agent Plugins v1 directories are copied intact
+  beneath `plugins/` manually. This local vendoring is hctl consumer behavior,
+  not a distribution rule from the specification.
   Hctl validates each local manifest without a schema fetch, imports its fixed
   Agent Skills component, and maps supported optional MCP declarations into
   native harness configuration. Root skills and earlier plugin/server sources
   win deterministic name collisions; invalid components warn without
   suppressing independent valid components. Plugin MCP remains native and
   unmanaged by hctl.
-- ADR 0035's shared Plugin and Skill acquisition foundation is implemented for
-  #99, with public Plugin and Skill command adapters from #100 and #101. The
-  shared engine vendors one reviewed local,
-  exact resolved HTTPS Git, or digest-pinned HTTPS archive component into
-  conventional source and records its immutable tree identity in the optional
-  committed `hctl-dependencies.json`. Apply and status never fetch or advance
-  it; tracked drift fails before workspace mutation. The lock is provenance,
-  not component registration, and hctl leaves the external `skills-lock.json`
-  opaque. Manual untracked components remain supported.
+- ADR 0035's acquisition foundation shipped in #99–#101 and was then removed
+  by ADR 0036 during the 2026-08 restructure: manual vendoring is the only
+  journey, and the external `skills-lock.json` remains opaque.
 - Intentionally nonportable native files use a literal
   `harnesses/claude/.claude/` or `harnesses/codex/.codex/` tree. Only the
   selected tree is copied, its files share the existing source-fingerprint and
@@ -320,10 +312,9 @@ package command and no portability claim for raw workspace caches.
 Product naming, the concrete secretless-broker backend, and proposal review UX
 are also intentionally unresolved.
 
-The generic standalone MCP contract in ADR 0034 is implemented by #97. Agent
-Plugin and Agent Skill source, pinning, provenance, trust, drift, update, and
-removal decisions are accepted in ADR 0035; #99's shared engine and #100/#101's
-Plugin and Skill commands are implemented. The
+The generic standalone MCP contract in ADR 0034 is implemented by #97. The
+ADR 0035 acquisition workflow shipped in #99–#101 and was removed by ADR 0036.
+The
 [remote components design notes](remote-components.md) retain the complete
 decision history for [GitHub epic #95](https://github.com/alee792/hctl/issues/95).
 

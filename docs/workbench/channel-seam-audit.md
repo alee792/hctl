@@ -694,15 +694,23 @@ no production caller) and the test-only request-input bridge in `internal/mcp`
 Carries D4's deferred "handler map replacing the managed-tool if-chain" if the
 if-chain is touched anyway. Smallest, highest-confidence step.
 
-**Step 2 — move interaction lifecycle types into `dispatchstate`.** Relocate
-`Lifecycle`, `Tombstone`, `DurableState`, `FinishRequest`, `Digest`, and the
-phase/delivery/resume enums from `internal/interaction/lifecycle.go` into
-`internal/dispatchstate`. On-disk JSON is unchanged (field tags move verbatim).
-After this, `internal/dispatchstate` no longer imports `internal/interaction`
-(`dispatchstate.go:13`), and `internal/interaction` is purely the semantic
-request/answer schema. Lands D4's deferred "request-input types in
-`internal/harness`" question by settling it: the types stay, the lifecycle
-leaves.
+**Step 2 — RETIRED as a standalone step (2026-08-19 execution finding); folded
+into step 7.** The original instruction — move `Lifecycle`, `Tombstone`,
+`DurableState`, `FinishRequest`, `Digest`, and the phase/delivery/resume enums
+into `internal/dispatchstate` — is not executable in isolation: `Lifecycle`
+embeds `interaction.Request`, `interaction.Resolution`, and
+`*interaction.Answer`, so the `dispatchstate → interaction` import cannot be
+removed by the move, and `coordinator.go` (package `interaction`) consumes the
+moved vocabulary throughout, which would create an
+`interaction ⇄ dispatchstate` cycle. The moved enums are also referenced from
+`channel/adapterhost`, `channel/controller`, and both harness continuation
+wrappers, so the change cannot be bounded to four packages. The move becomes
+free in step 7, when `coordinator.go` leaves package `interaction` for the
+channel module: at that point `dispatchstate → interaction(schema)` and
+`channel-coordinator → {dispatchstate, interaction}` form an acyclic DAG. The
+corrected end state: `internal/dispatchstate` keeps a one-way import of the
+leaf request/answer schema — the audit's earlier claim that this import
+disappears was wrong; what disappears is the cycle risk, not the edge.
 
 **Step 3 — group the writable-channel setup surface (Seam 2).** Introduce
 `setup.WritableChannel` and reduce five exported functions to one type. Pure
@@ -752,7 +760,7 @@ D4 deferred items and their landing steps:
 | D4 deferred item | Step |
 | --- | --- |
 | Split channel control sentinels out of `internal/channelconfig` | 4 |
-| Request-input types in `internal/harness` | 2 (settled: they stay in core) |
+| Request-input types in `internal/harness` | settled: they stay in core; the lifecycle-type move rides with step 7 |
 | `Submission`/`dispatchstate.Input`/`harness.Input` triple | 6 (repackaging survives; the mailbox rework removes one hop) |
 | Handler map for `internal/mcp` if-chain | 1 |
 | Bounded operator-facing diagnostic detail | 6 (`Manager.recordDiagnostic`, `manager.go:844`, moves with the rework) |
@@ -856,10 +864,10 @@ production callers, and the single-transaction interaction finish at
   The atomic parked-input/interaction commit is the deciding property; the
   ~90 lines of channel-shaped schema validation in core are recorded
   honestly, not hidden behind an extensions map.
-- **D-2 accepted** (separate operator-facing channel binary), with the
-  executable's name held for an explicit maintainer decision — the
-  restructure charter treats names as expensive to reverse, and this one
-  lands in release archives, staged launchers, and operator remedies. The
+- **D-2 accepted** (separate operator-facing channel binary). The
+  maintainer confirmed the executable name **`hctl-channel`** on 2026-08-19:
+  consistent with the `hctl-discord` pattern, and placeholder-consistent —
+  when hctl's product name lands, both binaries rename together. The
   stub-exec shim (option c) stays available later if operator feedback
   demands the old command names.
 - **D-3 accepted** (split, do not move), with one amendment: after step 2
@@ -887,5 +895,6 @@ production callers, and the single-transaction interaction finish at
 - **D-11 accepted.** `--input channels` becomes a hard error with a fixed
   remedy naming the channel binary; `--input jsonl` is unaffected.
 
-Open with the maintainer: the channel executable's name (D-2), and the
-go-ahead to begin executing steps 1-4.
+Maintainer decisions received 2026-08-19: the channel executable is named
+`hctl-channel`, and steps 1-4 are approved for execution. Steps 5-8 await a
+separate go-ahead.

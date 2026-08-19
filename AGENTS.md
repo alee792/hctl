@@ -3,8 +3,8 @@
 Treat the repository's existing product documents as authoritative rather than
 replacing them with guidance here:
 
-1. `docs/axioms.md` defines the decision tests that every other document and
-   every decision follows or explicitly reconciles against.
+1. `docs/north-star.md` is the steering kernel: the north star, tenets, and
+   fitness functions that every other document and decision reconciles to.
 2. `docs/vision.md` defines the product direction and boundary.
 3. `docs/product-spec.md` defines the current product contract.
 4. `docs/glossary.md` defines the project's vocabulary.

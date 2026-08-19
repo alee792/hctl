@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-18
-- Supersedes: [ADR 0035](0035-acquire-agent-plugin-and-skill-directories.md)
+- Supersedes: ADR 0035, Plugin and Skill directory acquisition (deleted; in git history)
 
 ## Context
 

@@ -1,12 +1,10 @@
 # ADR 0003: Use convention-based authoring
 
 - Status: accepted
-- Extended by: [ADR 0011](0011-start-github-connections-anonymously.md),
-  [ADR 0013](0013-run-schedules-as-fresh-dispatch-tasks.md),
+- Extended by: [ADR 0013](0013-run-schedules-as-fresh-dispatch-tasks.md),
   [ADR 0019](0019-import-vendored-agent-plugin-skills.md),
   [ADR 0028](0028-use-a-conversational-discord-gateway-channel.md),
-  [ADR 0031](0031-use-the-official-github-server-as-native-unmanaged-mcp.md),
-  and [ADR 0035](0035-acquire-agent-plugin-and-skill-directories.md)
+  and [ADR 0031](0031-use-the-official-github-server-as-native-unmanaged-mcp.md)
 
 ## Decision
 

@@ -2,8 +2,6 @@
 
 - Status: accepted
 - Extended by: [ADR 0020](0020-map-plugin-mcp-through-native-harness-configuration.md)
-- Acquisition extended by:
-  [ADR 0035](0035-acquire-agent-plugin-and-skill-directories.md)
 - Count ceilings superseded by: [ADR 0029](0029-bound-authored-projects-with-aggregate-budgets.md)
 
 ## Plain-English summary

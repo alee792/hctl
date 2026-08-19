@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-06
-- Supersedes: [ADR 0012](0012-use-signed-discord-http-interactions.md)
+- Supersedes: ADR 0012, signed Discord HTTP interactions (deleted; in git history)
 - Amends: [ADR 0009](0009-use-a-local-secretless-operation-broker.md)
 - Adapter ownership amended by: [ADR 0033](0033-package-discord-as-an-external-channel-adapter.md)
 - Extended by: [ADR 0014](0014-manage-channel-session-lifecycles.md),

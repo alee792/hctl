@@ -8,7 +8,14 @@ for the capable native harness you already trust, Claude Code or Codex,
 through thin vendor adapters and without replacing their model loops or
 interfaces.
 
-Natural-language authorship is trustworthy because the toolchain is strict:
+The author we serve understands files, directories, and common AI concepts —
+instructions, skills, tools — and should never need to learn manifests,
+registration, or harness configuration. Today that person's agent lives as
+vendor-specific configuration scattered through a workspace: hard to read,
+hard to review, and bound to one harness. hctl exists so the agent itself is
+the document — one legible folder that outlives any single vendor's format.
+
+Natural-language authorship is dependable because the toolchain is strict:
 as much plain language as possible, as little schema as necessary, and
 everything validated before it touches a workspace.
 
@@ -40,6 +47,20 @@ adapters kept thin. Acquired components are reviewed, explicit, and
 inspectable. Hctl is not a marketplace, an automatic updater, a model runtime,
 or another chat UI.
 
+Each harness already reads its own native formats, so this product must
+answer why a folder needs a compiler. The answer is the crossing: one
+portable source of truth applied to any supported harness, proven valid
+before it touches a workspace, and kept honest afterward by drift detection.
+A harness vendor optimizes its own format; nobody else owns the crossing
+between them. The bet fails — and we would rather learn it early — if
+authors accept a per-vendor source of truth, or if the open formats collapse
+back into vendor-owned ones.
+
+The measure of the vision is the first five minutes and the last mile: a new
+author goes from an empty directory to a working agent inside their harness
+in five minutes, and the same folder later runs headless, scheduled, or
+staged without edits.
+
 ## Boundary
 
 The selected native harness owns intelligence: model calls, context
@@ -51,10 +72,11 @@ its managed boundary.
 Interactive authors work directly in Claude Code or Codex after hctl prepares
 the generated harness integration. Headless operators may place the turn
 dispatcher between an input source and a local harness process. The turn
-dispatcher does not become another chat UI or model loop. A long-lived channel
-runtime may manage several independent conversation lifecycles over that
-dispatcher, but it remains deterministic runtime coordination rather than an
-agent orchestrator.
+dispatcher does not become another chat UI or model loop. The conversational
+channel runtime — long-lived surfaces such as Discord managing several
+independent conversation lifecycles over that dispatcher — is a coherent
+second product built on this core, not part of it; it remains deterministic
+runtime coordination rather than an agent orchestrator.
 
 Acquiring or configuring a third-party component does not make it managed.
 Harness-native tools and MCP servers remain valid but unmanaged unless they

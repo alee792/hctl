@@ -118,7 +118,7 @@ func TestFrictionToolRejectsInvalidInputWithoutCallingStore(t *testing.T) {
 	p := &project.Project{AgentID: "test@0123456789ab", Name: "test", SourceFingerprint: "source", Harness: "claude", FrictionNotes: true}
 	recorder := &stubFrictionRecorder{recorded: true}
 	params := json.RawMessage(`{"name":"record-friction","arguments":{"note":"   ","cause":"guess"}}`)
-	result, _, _, err := callManagedWithInputAndFriction(p, nil, nil, recorder, json.RawMessage(`1`), params, io.Discard)
+	result, _, _, err := callManagedWithFriction(p, nil, recorder, json.RawMessage(`1`), params, io.Discard)
 	if err == nil || result != nil || recorder.calls != 0 {
 		t.Fatalf("invalid friction call = result %#v, calls %d, error %v", result, recorder.calls, err)
 	}

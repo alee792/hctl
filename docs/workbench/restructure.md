@@ -109,10 +109,24 @@ Deferred as follow-up issues rather than blocking the restructure: a handler
 map replacing the managed-tool if-chain in `internal/mcp`; recovering
 diagnosability lost to fixed-sentence error opacity (attach bounded detail to
 operator-facing surfaces without leaking it to model-visible output);
-splitting `project.go` (2,200 lines) and `cli.go` (1,700 lines) by
+splitting `project.go` (2,200 lines) and `cli.go` (1,300+ lines) by
 responsibility.
 
 ### D5 — The channel runtime leaves core
+
+**Phase 1 (seam audit) is complete:**
+[channel-seam-audit.md](channel-seam-audit.md) is now the authoritative scope
+document and makes five corrections to the planned move list below — most notably: the
+request/answer schema half of `internal/interaction` stays in core (both
+drivers and the MCP server consume it), the request-input surface of
+`internal/harness` stays in core (it is emitted inside both drivers' ordinary
+turn loops; only the continuation wrappers move), and the
+`hook claude-deferred-input` entrypoint stays in the root binary. The audit
+also recommends one core-owned state file with an advisory lock, a separate
+operator-facing channel binary that depends on core as a library (with a
+non-`internal/` seam surface and an import guard), and landing the dispatch
+actor-mailbox rework *before* the module move. Where this section and the
+audit disagree, the audit wins.
 
 The conversational channel stack is a coherent second product and will be
 extracted following the `discordadapter` precedent (separate module, wire

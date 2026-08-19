@@ -270,6 +270,7 @@ default suite.
 ## Links
 
 - [Vision](docs/vision.md)
+- [Axioms](docs/axioms.md)
 - [Product specification](docs/product-spec.md)
 - [Glossary](docs/glossary.md)
 - [Architecture map](docs/architecture.md)

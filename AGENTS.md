@@ -3,11 +3,13 @@
 Treat the repository's existing product documents as authoritative rather than
 replacing them with guidance here:
 
-1. `docs/vision.md` defines the product direction and boundary.
-2. `docs/product-spec.md` defines the current product contract.
-3. `docs/glossary.md` defines the project's vocabulary.
-4. Relevant records under `docs/adr/` define accepted architecture decisions.
-5. `docs/workbench/status.md` records current implementation evidence and gaps.
+1. `docs/axioms.md` defines the decision tests that every other document and
+   every decision follows or explicitly reconciles against.
+2. `docs/vision.md` defines the product direction and boundary.
+3. `docs/product-spec.md` defines the current product contract.
+4. `docs/glossary.md` defines the project's vocabulary.
+5. Relevant records under `docs/adr/` define accepted architecture decisions.
+6. `docs/workbench/status.md` records current implementation evidence and gaps.
 
 `CONTEXT.md`, when present, supplements these sources with domain knowledge. It
 does not override them. If guidance conflicts, surface the conflict instead of

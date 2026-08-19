@@ -842,3 +842,50 @@ hard error with remedy, or keep the flag accepting only `jsonl`.
 `--input` so `--input jsonl` scripts are unaffected. Consistent with D4's
 acceptance of breaking changes and with `discordAdapterRemedy`'s existing style
 (`cli.go:835`).
+
+## Review dispositions (2026-08-18)
+
+Maintainer-side review of the decision list. The three decision-critical
+claims were independently re-verified against the code before adjudication:
+`newTaskRuntime` constructs its coordinator with `residentLimit ==
+activeLimit` (`task_runtime.go:57`), `text.go`'s exported functions have zero
+production callers, and the single-transaction interaction finish at
+`state_store.go:617-631` is as described.
+
+- **D-1 accepted.** One core-owned file with the generalized advisory lock.
+  The atomic parked-input/interaction commit is the deciding property; the
+  ~90 lines of channel-shaped schema validation in core are recorded
+  honestly, not hidden behind an extensions map.
+- **D-2 accepted** (separate operator-facing channel binary), with the
+  executable's name held for an explicit maintainer decision — the
+  restructure charter treats names as expensive to reverse, and this one
+  lands in release archives, staged launchers, and operator remedies. The
+  stub-exec shim (option c) stays available later if operator feedback
+  demands the old command names.
+- **D-3 accepted** (split, do not move), with one amendment: after step 2
+  the remaining core package is exactly the semantic request/answer schema,
+  and `internal/interaction` stays an honest name for that — no rename to
+  `interactionschema` is planned.
+- **D-4 accepted.** The request-input surface stays in core; record the
+  deviation from the original D5 scope in the step-7 ADR.
+- **D-5 accepted.** The deferred-input hook stays in the root binary.
+- **D-6 accepted** (option i). Three exported constants with a doc comment
+  is materially cheaper than a second apply record, and instruction-section
+  pluggability is forbidden. Core's generated instructions naming Discord
+  for Discord-authoring agents is an accepted cost.
+- **D-7 accepted.** Channel-adapter resolution stays in core; apply and
+  stage need it offline.
+- **D-8 accepted**, including the precondition: the behavior-preservation
+  test asserting task-runtime configuration cannot reach the eviction branch
+  lands with the split, not after it.
+- **D-9 accepted** (promote the named seams, add the import guard), with an
+  implementation note: name the promoted packages for the responsibility
+  they own, not with an `api` suffix, keeping the repository's
+  concrete-responsibility naming rule.
+- **D-10 accepted.** The mailbox rework lands before the module move
+  (step 6 before step 7).
+- **D-11 accepted.** `--input channels` becomes a hard error with a fixed
+  remedy naming the channel binary; `--input jsonl` is unaffected.
+
+Open with the maintainer: the channel executable's name (D-2), and the
+go-ahead to begin executing steps 1-4.

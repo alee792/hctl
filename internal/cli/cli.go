@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"hctl/internal/channel/adapterhost"
-	"hctl/internal/channelconfig"
 	"hctl/internal/channelselection"
 	"hctl/internal/dispatch"
 	"hctl/internal/harness"
@@ -811,11 +810,11 @@ func selectedAdapterProfile(agentID, explicit, configPath string) (string, error
 		}
 		return name, nil
 	}
-	path, err := channelconfig.SelectedPath(configPath)
+	path, err := channelselection.SelectedPath(configPath)
 	if err != nil {
 		return "", err
 	}
-	config, err := channelconfig.LoadProfileSelection(path, true)
+	config, err := channelselection.LoadProfileSelection(path, true)
 	if err != nil {
 		return "", err
 	}
@@ -1223,11 +1222,15 @@ func ensureAppliedForPolicyContext(ctx context.Context, p *project.Project, self
 	if err := setup.ValidateNativeMCP(p, nativeMCP); err != nil {
 		return err
 	}
-	verify := setup.Verify
-	if policy == harness.PolicyWorkspaceWrite {
-		verify = setup.VerifyWritableChannel
+	writable := policy == harness.PolicyWorkspaceWrite
+	channel := setup.WritableChannel{Project: p}
+	var verifyErr error
+	if writable {
+		verifyErr = channel.Verify()
+	} else {
+		verifyErr = setup.Verify(p)
 	}
-	if err := verify(p); err == nil && len(nativeMCP) == 0 {
+	if verifyErr == nil && len(nativeMCP) == 0 {
 		return nil
 	}
 	prepareContext, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -1240,8 +1243,8 @@ func ensureAppliedForPolicyContext(ctx context.Context, p *project.Project, self
 		return err
 	}
 	var result setup.Result
-	if policy == harness.PolicyWorkspaceWrite {
-		result, err = setup.ApplyWritableChannelWithNativeMCP(p, executable, nativeMCP)
+	if writable {
+		result, err = channel.Apply(executable, nativeMCP)
 	} else {
 		result, err = setup.ApplyWithNativeMCP(p, executable, nativeMCP)
 	}

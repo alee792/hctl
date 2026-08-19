@@ -520,7 +520,7 @@ func TestGuardedWritableChannelOpenPreservesWritableSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := setup.ApplyWritableChannelWithNativeMCP(p, self, servers); err != nil {
+	if _, err := (setup.WritableChannel{Project: p}).Apply(self, servers); err != nil {
 		t.Fatal(err)
 	}
 	underlying := &countingContinuationDriver{}
@@ -534,7 +534,7 @@ func TestGuardedWritableChannelOpenPreservesWritableSetup(t *testing.T) {
 		if err != nil || session == nil || underlying.opens != attempt {
 			t.Fatalf("writable guarded open %d = session %#v, opens %d, error %v", attempt, session, underlying.opens, err)
 		}
-		if err := setup.VerifyWritableChannel(p); err != nil {
+		if err := (setup.WritableChannel{Project: p}).Verify(); err != nil {
 			t.Fatalf("writable setup after guarded open %d: %v", attempt, err)
 		}
 	}
@@ -545,7 +545,7 @@ func TestGuardedWritableChannelOpenPreservesWritableSetup(t *testing.T) {
 	if result.Effect != interaction.EffectSucceeded || underlying.continuations != 1 {
 		t.Fatalf("writable guarded continuation = %+v, starts %d", result, underlying.continuations)
 	}
-	if err := setup.VerifyWritableChannel(p); err != nil {
+	if err := (setup.WritableChannel{Project: p}).Verify(); err != nil {
 		t.Fatalf("writable setup after guarded continuation: %v", err)
 	}
 	if instructions := readCLIFile(t, filepath.Join(root, "AGENTS.md")); !strings.Contains(instructions, "already has workspace-write access") || strings.Contains(instructions, "enforced read-only") {

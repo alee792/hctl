@@ -113,7 +113,7 @@ func (m *Manager) Inspect(ctx context.Context, conversation string, assignment A
 	if err != nil {
 		return Inspection{}, err
 	}
-	managedFiles, err := setup.WritableChannelFiles(p)
+	managedFiles, err := (setup.WritableChannel{Project: p}).OwnedFiles()
 	if err != nil {
 		return Inspection{}, errors.New("cannot verify managed setup before worktree reconciliation")
 	}
@@ -155,7 +155,7 @@ func (m *Manager) Retire(ctx context.Context, conversation string, assignment As
 			managedFiles := []string(nil)
 			p, projectErr := m.relocatedProject(assignment)
 			if projectErr == nil {
-				managedFiles, _ = setup.WritableChannelRetirementFiles(p)
+				managedFiles, _ = (setup.WritableChannel{Project: p}).RetirementFiles()
 			}
 			clean, statusErr := worktreeContainsOnlyManagedFiles(ctx, assignment.Root, managedFiles)
 			merged, mergeErr := gitSuccess(ctx, m.repo, "merge-base", "--is-ancestor", assignment.Branch, "HEAD")
@@ -167,7 +167,7 @@ func (m *Manager) Retire(ctx context.Context, conversation string, assignment As
 				if retainErr != nil {
 					return retainErr
 				}
-				if err := setup.RemoveWritableChannel(p, retained); err != nil {
+				if err := (setup.WritableChannel{Project: p}).Remove(retained); err != nil {
 					return errors.New("cannot resume managed setup cleanup; durable ownership was preserved")
 				}
 			}
@@ -179,7 +179,8 @@ func (m *Manager) Retire(ctx context.Context, conversation string, assignment As
 			if err != nil {
 				return err
 			}
-			managedFiles, err := setup.WritableChannelRetirementFiles(p)
+			channel := setup.WritableChannel{Project: p}
+			managedFiles, err := channel.RetirementFiles()
 			if err != nil {
 				return err
 			}
@@ -187,7 +188,7 @@ func (m *Manager) Retire(ctx context.Context, conversation string, assignment As
 			if err != nil {
 				return err
 			}
-			if err := setup.RemoveWritableChannel(p, retained); err != nil {
+			if err := channel.Remove(retained); err != nil {
 				return errors.New("cannot remove managed setup; durable ownership was preserved")
 			}
 		}
@@ -307,7 +308,8 @@ func (m *Manager) prepare(ctx context.Context, assignment Assignment) (*project.
 	if err := setup.ValidateNativeMCP(p, nativeMCP); err != nil {
 		return nil, err
 	}
-	if err := setup.VerifyWritableChannel(p); err == nil && len(nativeMCP) == 0 {
+	channel := setup.WritableChannel{Project: p}
+	if err := channel.Verify(); err == nil && len(nativeMCP) == 0 {
 		return p, nil
 	}
 	prepareCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -315,7 +317,7 @@ func (m *Manager) prepare(ctx context.Context, assignment Assignment) (*project.
 	if err := tool.Prepare(prepareCtx, p.SourceRoot, p.WorkspaceRoot, p.SourceFingerprint, p.Tools); err != nil {
 		return nil, err
 	}
-	if _, err := setup.ApplyWritableChannelWithNativeMCP(p, m.executable, nativeMCP); err != nil {
+	if _, err := channel.Apply(m.executable, nativeMCP); err != nil {
 		return nil, err
 	}
 	return p, nil

@@ -113,14 +113,68 @@ func ApplyAtWithNativeMCP(p *project.Project, executable, workspaceRoot string, 
 	return apply(p, executable, false, workspaceRoot, servers)
 }
 
-func ApplyWritableChannel(p *project.Project, executable string) (Result, error) {
-	return apply(p, executable, true, p.WorkspaceRoot, nil)
+// WritableChannel groups the writable-channel setup surface behind the
+// project it applies to: verifying, applying, enumerating owned files, and
+// removing a conversation worktree's generated harness configuration. It
+// replaces five standalone functions that all repeated the same project
+// parameter (see docs/workbench/channel-seam-audit.md, Seam 2).
+type WritableChannel struct {
+	Project *project.Project
 }
 
-// ApplyWritableChannelWithNativeMCP preserves exact native package selection
-// when channel work is relocated into a writable conversation worktree.
-func ApplyWritableChannelWithNativeMCP(p *project.Project, executable string, servers []integration.NativeMCPLaunchDescriptor) (Result, error) {
-	return apply(p, executable, true, p.WorkspaceRoot, servers)
+// Verify checks that a writable-channel apply record still matches generated
+// bytes, modes, and source identity.
+func (w WritableChannel) Verify() error {
+	return verifyAt(w.Project, true, w.Project.WorkspaceRoot)
+}
+
+// Apply preserves exact native package selection when channel work is
+// relocated into a writable conversation worktree.
+func (w WritableChannel) Apply(executable string, servers []integration.NativeMCPLaunchDescriptor) (Result, error) {
+	return apply(w.Project, executable, true, w.Project.WorkspaceRoot, servers)
+}
+
+// OwnedFiles returns the exact generated files whose current bytes and modes
+// are still proven by the writable-channel apply record.
+func (w WritableChannel) OwnedFiles() ([]string, error) {
+	if err := w.Verify(); err != nil {
+		return nil, err
+	}
+	meta, exists, err := readApplyRecord(w.Project.WorkspaceRoot, applyRecordPath(w.Project.Harness))
+	if err != nil || !exists {
+		return nil, errors.New("writable channel apply ownership is unavailable")
+	}
+	paths := make([]string, 0, len(meta.Files)+1)
+	for _, owned := range meta.Files {
+		paths = append(paths, owned.Path)
+	}
+	paths = append(paths, applyRecordPath(w.Project.Harness))
+	return paths, nil
+}
+
+// RetirementFiles returns the exact owned paths while allowing some of them
+// to be absent after an interrupted, durably marked cleanup. Every path still
+// present must retain its recorded bytes and mode.
+func (w WritableChannel) RetirementFiles() ([]string, error) {
+	return writableChannelRetirementFiles(w.Project)
+}
+
+// Remove removes only files whose ownership, bytes, and modes were
+// revalidated immediately before cleanup.
+func (w WritableChannel) Remove(retained map[string]bool) error {
+	paths, err := writableChannelRetirementFiles(w.Project)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if retained[path] {
+			continue
+		}
+		if err := rootfs.RemoveRegular(w.Project.WorkspaceRoot, path); err != nil {
+			return errors.New("cannot remove verified writable channel setup")
+		}
+	}
+	return nil
 }
 
 func apply(p *project.Project, executable string, channelWritable bool, workspaceRoot string, nativeMCP []integration.NativeMCPLaunchDescriptor) (Result, error) {
@@ -233,53 +287,6 @@ func marshalApplyRecord(meta applyRecord) ([]byte, error) {
 
 func Verify(p *project.Project) error {
 	return verifyAt(p, false, p.WorkspaceRoot)
-}
-
-func VerifyWritableChannel(p *project.Project) error {
-	return verifyAt(p, true, p.WorkspaceRoot)
-}
-
-// WritableChannelFiles returns the exact generated files whose current bytes
-// and modes are still proven by the writable-channel apply record.
-func WritableChannelFiles(p *project.Project) ([]string, error) {
-	if err := VerifyWritableChannel(p); err != nil {
-		return nil, err
-	}
-	meta, exists, err := readApplyRecord(p.WorkspaceRoot, applyRecordPath(p.Harness))
-	if err != nil || !exists {
-		return nil, errors.New("writable channel apply ownership is unavailable")
-	}
-	paths := make([]string, 0, len(meta.Files)+1)
-	for _, owned := range meta.Files {
-		paths = append(paths, owned.Path)
-	}
-	paths = append(paths, applyRecordPath(p.Harness))
-	return paths, nil
-}
-
-// WritableChannelRetirementFiles returns the exact owned paths while allowing
-// some of them to be absent after an interrupted, durably marked cleanup. Every
-// path still present must retain its recorded bytes and mode.
-func WritableChannelRetirementFiles(p *project.Project) ([]string, error) {
-	return writableChannelRetirementFiles(p)
-}
-
-// RemoveWritableChannel removes only files whose ownership, bytes, and modes
-// were revalidated immediately before cleanup.
-func RemoveWritableChannel(p *project.Project, retained map[string]bool) error {
-	paths, err := writableChannelRetirementFiles(p)
-	if err != nil {
-		return err
-	}
-	for _, path := range paths {
-		if retained[path] {
-			continue
-		}
-		if err := rootfs.RemoveRegular(p.WorkspaceRoot, path); err != nil {
-			return errors.New("cannot remove verified writable channel setup")
-		}
-	}
-	return nil
 }
 
 func writableChannelRetirementFiles(p *project.Project) ([]string, error) {

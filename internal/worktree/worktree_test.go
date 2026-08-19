@@ -36,7 +36,7 @@ func TestProvisionCreatesAndResolvesIsolatedBranchWorktree(t *testing.T) {
 	if filepath.Dir(assignment.Root) == repo || !strings.HasPrefix(assignment.Branch, "hctl/"+base.AgentID+"/") {
 		t.Fatalf("unsafe assignment = %#v", assignment)
 	}
-	if err := setup.VerifyWritableChannel(prepared); err != nil {
+	if err := (setup.WritableChannel{Project: prepared}).Verify(); err != nil {
 		t.Fatalf("generated setup was not prepared: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(repo, "CLAUDE.md")); !os.IsNotExist(err) {
@@ -92,7 +92,7 @@ func TestGitHubDiscordWritablePromotionKeepsCurrentNativeMCP(t *testing.T) {
 	if !strings.Contains(firstConfig, `[mcp_servers."github"]`) || !strings.Contains(firstConfig, `env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]`) || !strings.Contains(firstConfig, `required = false`) {
 		t.Fatalf("promoted native config = %s", firstConfig)
 	}
-	if err := setup.VerifyWritableChannel(prepared); err != nil {
+	if err := (setup.WritableChannel{Project: prepared}).Verify(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -427,7 +427,7 @@ func TestRetireResumesAfterManagedSetupRemovalWasInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setup.RemoveWritableChannel(prepared, nil); err != nil {
+	if err := (setup.WritableChannel{Project: prepared}).Remove(nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.Retire(context.Background(), "discord-conversation", assignment); err != nil {
@@ -448,7 +448,7 @@ func TestRetireResumesAfterPartialManagedFileRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths, err := setup.WritableChannelFiles(prepared)
+	paths, err := (setup.WritableChannel{Project: prepared}).OwnedFiles()
 	if err != nil || len(paths) < 2 {
 		t.Fatalf("managed setup paths = %v, %v", paths, err)
 	}

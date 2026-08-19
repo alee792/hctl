@@ -1,4 +1,4 @@
-package channelconfig
+package channelselection
 
 import (
 	"os"

@@ -6,11 +6,15 @@ description: Maintain hctl with its accepted product boundaries and quality gate
 
 This is a greenfield experiment for bootstrapping and extending native agent
 harnesses. `hctl` is a temporary internal name, not a product name. Read
-`README.md`, `docs/vision.md`, `docs/product-spec.md`, `docs/glossary.md`, and
-`docs/workbench/status.md` before changing product behavior.
+`docs/north-star.md`, `README.md`, `docs/vision.md`, `docs/product-spec.md`,
+`docs/glossary.md`, and `docs/workbench/status.md` before changing product
+behavior.
 
 Apply the simplicity-pass skill during planning, implementation, refactoring,
-and review. Keep the native harness responsible for its model loop, context,
+and review. Apply the north-star-review skill when accepting an ADR or when a
+change mints a new author-facing concept, adds a subsystem or dependency,
+moves a product boundary, or invests in an unvalidated future; other changes
+need no reconciliation commentary. Keep the native harness responsible for its model loop, context,
 native tools, approvals, and interactive interface. Hctl owns agent-project
 discovery and validation, generated harness files, dispatcher-managed sessions, and
 explicitly managed tools.

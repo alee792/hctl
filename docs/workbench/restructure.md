@@ -55,11 +55,31 @@ belongs to the author's version control. Roughly 4,000 lines of engine,
 hooks, CLI, and tests were deleted, and project loading no longer takes a
 per-root operation lock.
 
-### D3 — The vision names authored tools (done)
+### D3 — The vision is rewritten around plain-language authorship (done)
 
-`docs/vision.md` now states the authored-tool mechanism directly: typed
-functions, hctl-owned language hosts, one managed MCP server, no
-protocol code written by authors.
+`docs/vision.md` was rewritten after a positioning review. The settled
+positioning:
+
+- **Category:** the toolchain for open, file-based agent formats (Agent
+  Skills, Agent Plugins), with vendor adapters kept thin. Not agents-as-code:
+  the differentiator is that an agent is a legible plain-language document,
+  not another code artifact.
+- **One author, one capability ladder** — no author/developer persona split.
+  Composing skills and writing instructions is the first-class journey; typed
+  tools are an advanced rung the author may climb directly or by asking the
+  harness to draft the file. Validation proves the contract, not the
+  behavior; the trust boundary stays with the author, as with any code they
+  adopt.
+- **Operator is a distinct role, not a persona split.** Credentials,
+  integration packages, schedules, channels, and staging are operator
+  concerns with their own guardrails. The operator journey is where
+  portability is proven: the same folder runs interactively, headless, and
+  staged.
+- **Deferred deliberately:** social presence and standard stewardship come
+  after the five-minute author journey is good. But conventions minted now
+  (layout, frontmatter keys, the product name) are the future standard's
+  vocabulary — treat naming and format decisions as expensive to reverse,
+  and give the deferred product name a deadline.
 
 ### D4 — Core contracts are simplified with breaking changes
 
@@ -127,10 +147,14 @@ Extraction phases:
 Non-goal: deleting the channel runtime. Its acceptance evidence (live Discord
 pass, interactive-input records) stays valid; it simply stops taxing core.
 
-### D6 — Documentation is rewritten for humans
+### D6 — Documentation is rewritten for the author first
 
 - README: plain-language pitch plus a five-minute quickstart
-  (`apply` → `claude`/`codex`), moving contract detail into the spec.
+  (`apply` → `claude`/`codex`) written for the author persona; the tool,
+  connection, and operator journeys follow clearly second.
+- Author-grade diagnostics are a tracked workstream, not polish: validation
+  errors are read by plain-language authors and by harnesses self-correcting
+  AI-drafted files, so they must stay exact, bounded, and legible to both.
 - A one-page contributor architecture map (the package layering is clean but
   undocumented).
 - The product spec stays the precise contract, but shrinks with D5's split.

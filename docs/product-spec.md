@@ -32,12 +32,21 @@ workspace caches relocatable or introduce a general `hctl package` command.
 
 ## User and job
 
-The primary user is an agent author who understands basic files and directories
-and common AI concepts such as instructions, skills, and tools. They should not
-need to understand registration, manifests, or harness configuration. They
-define one filesystem-authored agent project, apply it to a chosen workspace,
-prove it interactively in Claude Code or Codex, and may operate the same setup
-headlessly through channels.
+The primary user is an agent author who understands basic files and
+directories and common AI concepts such as instructions, skills, and tools.
+They should not need to understand registration, manifests, or harness
+configuration. There is one author and one capability ladder, not an
+author/developer split: the author starts with instructions and composed
+skills, and may climb to typed tool functions — written directly or drafted by
+their harness. Validation proves a tool's contract, not its behavior; adopting
+one remains the author's deliberate, reviewable act, like any other code.
+
+Operating is a distinct role on the same artifact: credentials, integration
+packages, schedules, channels, and staged filesystems carry their own explicit
+guardrails. The author defines one filesystem-authored agent project, applies
+it to a chosen workspace, and proves it interactively in Claude Code or Codex;
+the operator runs the same setup headlessly through schedules and channels,
+which is where portability is proven.
 
 ## Product principles
 

@@ -133,7 +133,7 @@ These hold across the whole tree and are worth defending in review:
   writes to shared state.
 - Filesystem, process, protocol, and model-visible inputs are validated and
   bounded before they cause a mutation (see the aggregate ceilings in
-  [product-spec.md](product-spec.md#authored-project)).
+  [product-spec.md](product-spec.md#the-authored-project)).
 - No generic `core`, `services`, `adapters`, or `utils` package. A package
   name says what it concretely owns.
 - Generated harness files are disposable and visibly tool-owned; `apply`

@@ -1,7 +1,10 @@
 # Restructure plan (2026-08)
 
-- Status: active restructure charter
-- Updated: 2026-08-18
+- Status: partially superseded by the [rebuild charter](rebuild.md) — the
+  core is rebuilt in a new repository rather than refactored here, which
+  takes over D5's module split, D6, and D7. The audit findings, D1's core
+  definition, and the completed decisions remain the record.
+- Updated: 2026-08-19
 - Purpose: persist the refresh decisions and their execution plan so any
   session (human or agent) can resume without chat history. This document
   supersedes the pre-restructure narrative in [status.md](status.md) where the

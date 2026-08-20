@@ -7,12 +7,11 @@
 ## Resume order
 
 1. [North Star & Tenets](../north-star.md) — what the product holds constant.
-2. [Restructure plan](restructure.md) — the active charter; where an older
-   narrative disagrees with it, the charter wins. Its
-   [channel seam audit](channel-seam-audit.md) is the authoritative
-   extraction scope.
-3. [Vision](../vision.md) and [product specification](../product-spec.md) —
-   positioning and the precise contract.
+2. [Rebuild charter](rebuild.md) — the active direction: this repository is
+   the prototype; the core is rebuilt fresh against the distilled spec.
+3. [Vision](../vision.md), [product specification](../product-spec.md), and
+   [channel specification](../channel-spec.md) — positioning, the core
+   rebuild target, and the channel product's contract.
 4. GitHub Issues — the live work queue.
 
 ## Implemented
@@ -66,9 +65,10 @@ no live model calls) define completion. Live records:
 
 ## Gaps and blocked work
 
-- Channel extraction (restructure decision D5) is in progress: the seam
-  audit is complete and the module split is next. The channel runtime lives
-  in core until it lands.
+- The [rebuild charter](rebuild.md) gates on two human decisions: shape
+  review and the product name. The restructure's D5 module split, D6, and D7
+  are superseded by it; the channel runtime stays here as the working second
+  product.
 - Live Claude acceptance, the Claude harness image, and the live
   external-Discord pass remain blocked on explicit human authorization.
 - Deliberately unresolved: the product name; the secretless-broker backend

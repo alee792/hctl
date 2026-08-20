@@ -205,9 +205,9 @@ integration package once, enroll a bot, then run:
 
 Guild and DM conversations run read-only by default, with isolated Git
 worktrees promoted only when a request needs a workspace write. See the
-[product specification](docs/product-spec.md#authored-project) for the full
-capacity, credential, and worktree contract, and
-[examples/discord](examples/discord) for a complete source example.
+[channel specification](docs/channel-spec.md) for the full capacity,
+credential, and worktree contract, and [examples/discord](examples/discord)
+for a complete source example.
 
 **Staged filesystem.** `hctl stage` prepares one runnable filesystem tree at
 canonical paths for an existing OCI image builder, carrying only the
@@ -272,6 +272,7 @@ default suite.
 - [Vision](docs/vision.md)
 - [North Star & Tenets](docs/north-star.md)
 - [Product specification](docs/product-spec.md)
+- [Channel specification](docs/channel-spec.md)
 - [Glossary](docs/glossary.md)
 - [Architecture map](docs/architecture.md)
 - [Working status](docs/workbench/status.md)

@@ -252,6 +252,15 @@ is validated for form before anything runs, and its merit is judged outside
 hctl. The friction inbox remains a supplementary human-facing channel, not
 the loop's signal path.
 
+A pin is an axis of variation, not an editable surface: a loop may try a
+different model or harness version by changing a pin, while the components
+it can edit remain the authored files. Lineage and population management
+belong to version control: a candidate revision is a branch or commit, its
+manifest identifies it, and hctl neither records lineage nor selects among
+revisions. How variants are isolated — worktrees, containers, or sandboxes
+— is the operator's infrastructure choice; hctl requires only that each
+variant is a directory that applies deterministically.
+
 ## Managed tool boundary
 
 One stdio MCP server exposes the bounded built-in `echo` tool, the optional

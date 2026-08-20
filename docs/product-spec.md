@@ -5,7 +5,7 @@
   implementation; see the [rebuild charter](workbench/rebuild.md).
 - Scope: the core product. The conversational channel runtime is a second
   product specified in [channel-spec.md](channel-spec.md).
-- Working CLI name: `hctl`; product naming is deferred and gates the rebuild
+- Working name: `hctl`; product naming is deferred and gates the rebuild
   repository.
 - Initial harnesses: Claude Code and Codex CLI.
 
@@ -50,6 +50,23 @@ portability is proven.
 9. Conventional files register behavior without a second inventory.
 10. Author-facing language stays concrete; runtime terminology remains
     internal.
+
+## What this specification binds
+
+This specification binds authored formats and functional responsibilities,
+not interface shape. Authored project formats are exact — the folder is
+the portable convention, and its filenames and schemas are the contract.
+The tool's own surface is specified by responsibility: validate before
+mutation, compile to native integration, pin and verify the runtime
+closure, attribute every run to its exact configuration, dispatch turns,
+and stage filesystems. The command names, flags, file encodings, and
+output framing shown below are the reference rendering of those
+responsibilities: a conforming implementation may expose them as a CLI, a
+library, or a protocol server, provided every responsibility and
+acceptance item holds and every machine-facing output stays stable and
+parseable. The reference rendering is deliberately file-and-process
+shaped because files, processes, and exit codes are the one interface a
+person, a harness, and an improvement loop already share.
 
 ## The authored project
 
@@ -230,19 +247,23 @@ user's behalf.
 `hctl validate AGENT --harness <claude|codex>` runs the same validation as
 apply without writing anything: it loads and bounds the project, checks
 tool contracts and, when a manifest is present, the pinned closure, and
-exits nonzero on failure. Diagnostics are bounded prose by default;
-`--format json` emits one machine-readable diagnostic per line carrying a
-stable identifier, the authored path, and the exact rule violated, and
-apply's own failures carry the same identifiers. Prose stays primary for
-people; the stable identifiers exist because a drafting harness or an
-improvement loop correcting its own files cannot reliably parse prose.
+exits nonzero on failure. Diagnostics are bounded prose by default, with a
+machine-readable mode (one JSON diagnostic per line in the reference
+rendering) carrying a stable identifier, the authored path, and the exact
+rule violated; apply's own failures carry the same identifiers. Prose
+stays primary for people; the stable identifiers exist because a drafting
+harness or an improvement loop correcting its own files cannot reliably
+parse prose. The binding requirements are parity with apply, stability of
+the identifiers, and machine readability — not the flag or the framing.
 
 ## Agent manifest
 
-An optional bounded `manifest.json` at the agent root pins the runtime
-closure that the directory alone cannot express. It identifies and pins; it
-never lists: the directory remains the sole registry of the agent's
-components, and the manifest carries no component inventory.
+An optional bounded agent manifest at the agent root (`manifest.json` in
+the reference rendering) pins the runtime closure that the directory alone
+cannot express. Its responsibility, not its encoding, is the contract: it
+identifies and pins; it never lists. The directory remains the sole
+registry of the agent's components, and the manifest carries no component
+inventory.
 
 Its closed schema records a schema version, the agent name, the expected
 source fingerprint, the hctl version, and — per selected harness — the

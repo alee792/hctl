@@ -425,11 +425,16 @@ Recorded once here; none is scaffolded until its trigger arrives:
 - **Proposals** — inert, workspace-local, human-reviewed improvement
   records; a future capture tool must remain additive, never apply a diff,
   and never claim reliable secret detection. The prototype's ADR 0008
-  records the full convention.
+  records the full convention. Reviewed when an author or improvement loop
+  needs a mutation record richer than a branch; falsified — and deleted —
+  if version-control review proves sufficient.
 - **Secretless operation broker** — the boundary for the first secret-bearing
   managed operation ([ADR 0009](adr/0009-use-a-local-secretless-operation-broker.md)).
-- **Post-run summaries** — deferred until a harness exposes stable runtime
-  IDs; must reference native logs rather than duplicate transcripts.
+  Reviewed when that operation is selected; falsified if native harnesses
+  ship an equivalent credential boundary first.
+- **Post-run summaries** — must reference native logs rather than duplicate
+  transcripts. Reviewed when a harness exposes stable runtime IDs;
+  falsified if native logs remain sufficient on their own.
 
 ## Failure and safety behavior
 

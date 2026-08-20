@@ -8,9 +8,13 @@ dropping in a directory — validated, versioned, and applied to the capable
 native harness you already trust, Claude Code or Codex, through thin vendor
 adapters and without replacing their model loop or interface.
 
-The same folder serves a second author: an improvement loop revising an
-agent's files gets validation before anything runs, a pinned reproducible
-runtime, and attribution of every run to its exact configuration.
+The same folder has another author with equal standing: an improvement
+loop revising an agent's files gets validation before anything runs, a
+pinned reproducible runtime, and attribution of every run to its exact
+configuration. This README serves the five-minute human journey by
+deliberate choice; the loop's mechanics — the agent manifest and
+machine-readable validation — live in the
+[product specification](docs/product-spec.md).
 
 ## Five-minute quickstart
 

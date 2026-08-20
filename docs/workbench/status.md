@@ -69,6 +69,9 @@ no live model calls) define completion. Live records:
   review and the product name. The restructure's D5 module split, D6, and D7
   are superseded by it; the channel runtime stays here as the working second
   product.
+- The agent manifest and `hctl validate` with stable diagnostics are
+  specified for the rebuild target and are not implemented in this
+  prototype.
 - Live Claude acceptance, the Claude harness image, and the live
   external-Discord pass remain blocked on explicit human authorization.
 - Deliberately unresolved: the product name; the secretless-broker backend

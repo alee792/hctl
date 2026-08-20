@@ -16,8 +16,9 @@ hands.
 The north star permits amendment only against named evidence. Three
 things changed since the measure was written:
 
-1. The vision names the improvement loop as a second author of the same
-   artifact, and the product specification carries the agent manifest,
+1. The vision names the improvement loop as another author of the same
+   artifact, coequal with the person, and the product specification
+   carries the agent manifest,
    provenance join keys, and machine-consumable validation that serve it.
 2. Published research on harness engineering for self-improvement (Weng,
    Jul 2026) independently identifies the properties this contract

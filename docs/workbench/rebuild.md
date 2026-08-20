@@ -26,9 +26,11 @@ Founding documents, copied at creation and owned there afterward:
 - [Vision](../vision.md)
 - [Product specification](../product-spec.md) — the rebuild target; its
   acceptance section is the completion contract
-- The product-shape decision records: ADRs 0001, 0003, 0005–0007, 0010,
-  0013, 0019, 0020, 0026, 0027, 0029, 0031, 0034, 0036 (renumbered or
-  re-recorded as the new repository's initial accepted decisions)
+- The product-shape decision records: ADRs 0001, 0003, 0005–0007, 0009,
+  0010, 0013, 0019, 0020, 0026, 0027, 0029–0031, 0034, 0036 (renumbered or
+  re-recorded as the new repository's initial accepted decisions; 0009's
+  broker boundary and 0030's operator contract transfer, their unbuilt or
+  mechanical halves do not)
 - [Skill compatibility](skill-compatibility.md) — the dated vendor matrix
 - The maintainer agent definition, including the `north-star-review` and
   `direction-audit` skills

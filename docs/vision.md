@@ -68,10 +68,11 @@ authors accept a per-vendor source of truth, if the open formats collapse
 back into vendor-owned ones, or if self-improving systems settle on closed,
 lab-internal configuration instead of open files.
 
-The measure of the vision is the first five minutes and the last mile: a new
-author goes from an empty directory to a working agent inside their harness
-in five minutes, and the same folder later runs headless, scheduled, or
-staged without edits.
+The measure of the vision is the first five minutes, the last mile, and the
+next revision: a new author goes from an empty directory to a working agent
+inside their harness in five minutes; the same folder later runs headless,
+scheduled, or staged without edits; and a revision applies, runs, and
+attributes to its exact configuration without human hands.
 
 ## Boundary
 

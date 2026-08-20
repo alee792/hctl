@@ -22,8 +22,10 @@ If any of these stops being true, the product is no longer hctl:
    enforcement or safety it cannot deliver.
 
 **The measure.** Empty directory to a working agent inside the author's
-harness in five minutes, and the same folder later runs headless,
-scheduled, or staged without edits.
+harness in five minutes; the same folder later runs headless, scheduled,
+or staged without edits; and a revision applies, runs, and attributes to
+its exact configuration without human hands
+([ADR 0037](adr/0037-add-the-revision-leg-to-the-measure.md)).
 
 ## Tenets
 

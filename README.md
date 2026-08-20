@@ -8,6 +8,10 @@ dropping in a directory — validated, versioned, and applied to the capable
 native harness you already trust, Claude Code or Codex, through thin vendor
 adapters and without replacing their model loop or interface.
 
+The same folder serves a second author: an improvement loop revising an
+agent's files gets validation before anything runs, a pinned reproducible
+runtime, and attribution of every run to its exact configuration.
+
 ## Five-minute quickstart
 
 Build from source (`go install` is not a supported install path — see

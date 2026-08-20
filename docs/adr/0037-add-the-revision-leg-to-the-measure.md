@@ -36,6 +36,7 @@ Every slice can be asked which leg of the measure it improves, and a
 slice serving only the revision leg is as ordinary as one serving the
 first five minutes. The measure binds only outcomes hctl owns: apply,
 run, and attribute are hctl contracts, while the loop's evaluation and
-selection remain outside per the specification's non-goals. The two
-consumers of the artifact carry equal weight across the foundational
-documents; the direction audit checks that balance.
+selection remain outside per the specification's non-goals. Both consumers
+of the artifact receive balanced consideration across the foundational
+documents — a decision may favor one when the tradeoff is evaluated and
+recorded, never by default — and the direction audit checks that balance.

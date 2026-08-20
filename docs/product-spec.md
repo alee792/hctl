@@ -11,14 +11,21 @@
 
 ## User and job
 
-The primary user is an agent author who understands basic files and
-directories and common AI concepts such as instructions, skills, and tools.
-They should not need to understand registration, manifests, or harness
-configuration. There is one author and one capability ladder: the author
-starts with instructions and composed skills, and may climb to typed tool
-functions — written directly or drafted by their harness. Validation proves a
-tool's contract, not its behavior; adopting one remains the author's
-deliberate, reviewable act, like any other code.
+Two consumers author the same artifact, and both receive balanced
+consideration: a person, and an improvement loop revising an agent's
+files. A decision may favor one when the tradeoff is evaluated and
+recorded — never by default. The human author understands basic files and
+directories and common AI concepts such as instructions, skills, and
+tools, and should not need to understand registration, manifests, or
+harness configuration. The improvement loop needs validation before
+anything runs, a reproducible pinned closure, and attribution of every run
+to its exact configuration; the agent manifest and machine-consumable
+validation serve it directly. There is one capability ladder, not an
+author/developer split: the author starts with instructions and composed
+skills, and may climb to typed tool functions — written directly or
+drafted by their harness. Validation proves a tool's contract, not its
+behavior; adopting one remains the author's deliberate, reviewable act,
+like any other code.
 
 Operating is a distinct role on the same artifact: credentials, integration
 packages, schedules, and staged filesystems carry their own explicit

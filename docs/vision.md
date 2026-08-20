@@ -15,6 +15,17 @@ vendor-specific configuration scattered through a workspace: hard to read,
 hard to review, and bound to one harness. hctl exists so the agent itself is
 the document — one legible folder that outlives any single vendor's format.
 
+The author is not always a person, and neither consumer outranks the other.
+An improvement loop — an agent or an optimizer revising an agent's own
+files — needs exactly what the human author needs: a legible diff,
+validation before anything runs, and a reproducible runtime. An optional
+agent manifest pins what the folder alone cannot express — harness version,
+model, hctl version, installed-package identities — so observations made
+outside hctl can be joined back to the exact configuration that produced
+them. Hctl is that loop's substrate, never the loop: it proves a revision is
+well-formed, not that it is an improvement, and it collects no transcripts,
+evaluations, or scores.
+
 Natural-language authorship is dependable because the toolchain is strict:
 as much plain language as possible, as little schema as necessary, and
 everything validated before it touches a workspace.
@@ -39,17 +50,6 @@ where portability is proven — the same folder that runs interactively applies
 unchanged to a headless dispatcher, a schedule clock, or a pinned harness
 image, with existing OCI build systems owning image construction, publication,
 and deployment.
-
-The author is not always a person. An improvement loop — an agent or an
-optimizer revising an agent's own files — is a second consumer of the same
-artifact, and it needs exactly what the human author needs: a legible diff,
-validation before anything runs, and a reproducible runtime. An optional
-agent manifest pins what the folder alone cannot express — harness version,
-model, hctl version, installed-package identities — so observations made
-outside hctl can be joined back to the exact configuration that produced
-them. Hctl is that loop's substrate, never the loop: it proves a revision is
-well-formed, not that it is an improvement, and it collects no transcripts,
-evaluations, or scores.
 
 We bet that agent definitions converge on open, file-based formats such as
 Agent Skills and Agent Plugins, and hctl is the toolchain for that world:

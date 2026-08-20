@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-08
-- Supersedes: [ADR 0011](0011-start-github-connections-anonymously.md)
+- Supersedes: ADR 0011, anonymous GitHub connections (deleted; in git history)
 - Amends: [ADR 0015](0015-enforce-read-only-channel-sessions.md)
 - Specializes: [ADR 0030](0030-use-process-isolated-integration-packages.md)
 - Reuses: [ADR 0020](0020-map-plugin-mcp-through-native-harness-configuration.md)

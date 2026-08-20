@@ -5,6 +5,9 @@
 - Acceptance: credential-free stitched coverage passed; credentialed Claude was
   unavailable on 2026-08-07; see
   [interactive-input acceptance](../workbench/interactive-input-acceptance.md)
+- Upstream protocol: [Claude Code hooks — defer a tool call for
+  later](https://code.claude.com/docs/en/hooks#defer-a-tool-call-for-later),
+  verified 2026-08-06
 
 ## Decision
 

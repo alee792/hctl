@@ -40,6 +40,17 @@ unchanged to a headless dispatcher, a schedule clock, or a pinned harness
 image, with existing OCI build systems owning image construction, publication,
 and deployment.
 
+The author is not always a person. An improvement loop — an agent or an
+optimizer revising an agent's own files — is a second consumer of the same
+artifact, and it needs exactly what the human author needs: a legible diff,
+validation before anything runs, and a reproducible runtime. An optional
+agent manifest pins what the folder alone cannot express — harness version,
+model, hctl version, installed-package identities — so observations made
+outside hctl can be joined back to the exact configuration that produced
+them. Hctl is that loop's substrate, never the loop: it proves a revision is
+well-formed, not that it is an improvement, and it collects no transcripts,
+evaluations, or scores.
+
 We bet that agent definitions converge on open, file-based formats such as
 Agent Skills and Agent Plugins, and hctl is the toolchain for that world:
 discovery, validation, composition, apply-and-drift discipline, and vendor
@@ -53,8 +64,9 @@ portable source of truth applied to any supported harness, proven valid
 before it touches a workspace, and kept honest afterward by drift detection.
 A harness vendor optimizes its own format; nobody else owns the crossing
 between them. The bet fails — and we would rather learn it early — if
-authors accept a per-vendor source of truth, or if the open formats collapse
-back into vendor-owned ones.
+authors accept a per-vendor source of truth, if the open formats collapse
+back into vendor-owned ones, or if self-improving systems settle on closed,
+lab-internal configuration instead of open files.
 
 The measure of the vision is the first five minutes and the last mile: a new
 author goes from an empty directory to a working agent inside their harness

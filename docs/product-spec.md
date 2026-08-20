@@ -192,6 +192,7 @@ workspace mutation:
 | Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration at most 8 MiB |
 | Selected harness-specific files | 1,024 | 1 MiB each and 8 MiB aggregate |
 | Standalone MCP connections | 128 | 8 KiB per source; context at most 1,024 characters |
+| Agent manifest | One optional file | 32 KiB |
 
 Everywhere: authored entries are bounded regular files and real directories
 with valid UTF-8 relative paths; symlinks are never followed and are rejected
@@ -218,6 +219,38 @@ source fingerprint recorded with the apply, so stale or edited generated
 setup fails closed. Codex project trust remains the user's native decision;
 apply never edits global harness configuration or trusts a project on the
 user's behalf.
+
+## Agent manifest
+
+An optional bounded `manifest.json` at the agent root pins the runtime
+closure that the directory alone cannot express. It identifies and pins; it
+never lists: the directory remains the sole registry of the agent's
+components, and the manifest carries no component inventory.
+
+Its closed schema records a schema version, the agent name, the expected
+source fingerprint, the hctl version, and — per selected harness — the
+harness executable version, a model identifier, integration package
+identities (package id plus manifest SHA-256), and authored-tool runtime
+versions (Deno, uv, Go) where the project uses them.
+
+`hctl manifest write AGENT --harness ...` records the currently resolved
+closure; the file is then ordinary versioned source and may be edited
+directly. When the manifest is present, apply and every hctl-owned process
+open verify the resolved closure against it and fail closed naming the
+exact drifted pin; when absent, behavior is unchanged. The model pin is
+emitted through the selected harness's documented configuration and
+recorded in provenance; the harness owns model selection, and hctl does not
+claim to verify which model actually served a turn.
+
+Every apply record and dispatch lifecycle event carries the source
+fingerprint and, when present, the manifest identity, so observation made
+outside hctl — transcripts, evaluations, selection among revisions — can be
+joined to the exact configuration that produced it. Hctl retains none of
+that observation: no transcripts, no evaluations, no scores. An improvement
+loop revising the agent's files is an author like any other: its revision
+is validated for form before anything runs, and its merit is judged outside
+hctl. The friction inbox remains a supplementary human-facing channel, not
+the loop's signal path.
 
 ## Managed tool boundary
 
@@ -426,6 +459,11 @@ credential-free tests (fake harness processes; no live model calls) prove:
    preparation never mutates authored source, and publication is one rename
    only after the manifest is complete.
 10. Managed audit output remains content-free.
+11. A present agent manifest is verified before apply and before every
+    hctl-owned process open: a drifted harness version, package identity,
+    or source fingerprint fails closed naming the exact pin; writing the
+    manifest for an unchanged closure is byte-identical; and an absent
+    manifest changes nothing.
 
 ## Explicit non-goals
 
@@ -438,6 +476,8 @@ credential-free tests (fake harness processes; no live model calls) prove:
 - Building OCI manifests or layers, publishing or signing images, or hosted
   image operation
 - Governance claims over native harness tools
+- Evaluations, scoring, transcript retention, or selection among agent
+  revisions — hctl is an improvement loop's substrate, never the loop
 - Hosted secret managers and model-visible secret-bearing managed operations
 - GitHub OAuth or GitHub App enrollment, a managed MCP proxy, credential
   brokering, or per-call hctl authorization

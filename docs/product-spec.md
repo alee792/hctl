@@ -229,11 +229,19 @@ long-lived host per authored language serves calls; authors never write
 protocol code. The boundary is additive: it does not disable, authorize,
 observe, or retry harness-native tools.
 
+Codex treats the generated managed server as required and delegates its tool
+approval to hctl, so an authorized managed call does not draw a second
+harness prompt; every other generated MCP entry — plugin, connection, or
+installed — keeps native per-call prompt approval. This exemption applies
+only to the managed server and does not affect native or unrelated MCP
+tools.
+
 `record-friction` is advertised only when root instructions opt in with
 `friction-notes: true`. It accepts one bounded UTF-8 note and stores it in a
 private, owner-only, per-agent local inbox outside both agent source and
 workspace, write-only to models, never automatically read, transmitted, or
-applied. It is not telemetry, memory, or evidence.
+applied. It is not telemetry, memory, or evidence. At most 256 records are
+retained per agent, and the store never overwrites or silently evicts.
 
 Secret-bearing managed operations do not exist yet. Before one ships, the
 secretless operation broker boundary applies
@@ -262,11 +270,13 @@ workspaces; `inspect`, `verify`, `list`, `enable`, `disable`, `update`, and
 Portable agent source can never choose an install source, install or enable a
 package, grant trust, or carry a credential; apply gains no network path.
 
-Recognized capabilities are closed schemas: `native-mcp` v1 (a stable native
-server name, executable, bounded literal launch data, required ambient
-environment names without values, and supported harness targets — consumed by
-installed connections) and `channel-adapter` v1 (consumed by the channel
-product; see [channel-spec.md](channel-spec.md)). The native harness owns
+Recognized capabilities are closed schemas. The core implements `native-mcp`
+v1: a stable native server name, executable, bounded literal launch data,
+required ambient environment names without values, and supported harness
+targets — consumed by installed connections. `channel-adapter` v1 belongs to
+the channel product ([channel-spec.md](channel-spec.md)): a core rebuild does
+not implement its recognition and it is not acceptance-gating; it is
+reintroduced only if the channel product is later ported. The native harness owns
 process lifecycle, credentials, approvals, calls, and effects for everything
 a package launches. Required ambient names are diagnostic metadata, not a
 credential channel; resolved values never enter generated files, package
@@ -353,8 +363,10 @@ workspace-local caches.
 
 Recorded once here; none is scaffolded until its trigger arrives:
 
-- **Proposals** — inert, workspace-local, human-reviewed improvement records
-  ([ADR 0008](adr/0008-keep-agent-proposals-workspace-local-and-inert.md)).
+- **Proposals** — inert, workspace-local, human-reviewed improvement
+  records; a future capture tool must remain additive, never apply a diff,
+  and never claim reliable secret detection. The prototype's ADR 0008
+  records the full convention.
 - **Secretless operation broker** — the boundary for the first secret-bearing
   managed operation ([ADR 0009](adr/0009-use-a-local-secretless-operation-broker.md)).
 - **Post-run summaries** — deferred until a harness exposes stable runtime
@@ -378,8 +390,9 @@ Recorded once here; none is scaffolded until its trigger arrives:
 
 ## Acceptance
 
-The core is complete when credential-free tests (fake harness processes; no
-live model calls) prove:
+Every stated behavior in this specification binds; the list below is the
+proof skeleton, not the whole contract. The core is complete when
+credential-free tests (fake harness processes; no live model calls) prove:
 
 1. One authored project compiles deterministically for both harnesses, and
    apply produces native, discoverable files while refusing conflicts and
@@ -389,15 +402,19 @@ live model calls) prove:
    host process per language.
 3. Agent source applies outside its own directory: generated files and
    execution use the workspace while discovery stays rooted in source.
-4. Subagents generate natively with inheritance and exact effort mapping;
-   skills and their resources round-trip byte-for-byte with executable
-   intent, vendor metadata preserved and warned; harness-specific files
-   round-trip only to their selected harness with full ownership protection.
+4. Subagents generate natively with inheritance and exact effort mapping,
+   and child skills, tools, dependencies, and nested subagents are rejected
+   rather than ignored; skills and their resources round-trip byte-for-byte
+   with executable intent, vendor metadata preserved and warned;
+   harness-specific files round-trip only to their selected harness with
+   full ownership protection.
 5. Plugin skills and plugin MCP declarations import with deterministic
    collision handling and isolated component failure.
 6. Connections generate exact native configuration for installed and remote
-   targets without contacting anything, and a conspicuous fake ambient value
-   never appears in generated files, state, staging, or evidence.
+   targets without contacting anything; a name collision with `managed`,
+   another connection, or a plugin server fails before mutation; and a
+   conspicuous fake ambient value never appears in generated files, state,
+   staging, or evidence.
 7. Headless dispatch durably queues FIFO input, deduplicates input IDs,
    resumes sessions, and marks unproven restart work uncertain.
 8. Schedules validate and fingerprint identically for both harnesses;
@@ -405,7 +422,9 @@ live model calls) prove:
    turn deadlines with retained uncertainty, and the UTC clock admits only
    current non-overlapping occurrences and drains on shutdown.
 9. Staging produces a deterministic, credential-free, minimal runnable tree
-   whose entrypoint verifies identity and fingerprint before a turn.
+   whose entrypoint verifies identity and fingerprint before a turn;
+   preparation never mutates authored source, and publication is one rename
+   only after the manifest is complete.
 10. Managed audit output remains content-free.
 
 ## Explicit non-goals

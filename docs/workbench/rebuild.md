@@ -24,13 +24,17 @@ Founding documents, copied at creation and owned there afterward:
 
 - [North Star & Tenets](../north-star.md)
 - [Vision](../vision.md)
-- [Product specification](../product-spec.md) — the rebuild target; its
-  acceptance section is the completion contract
+- [Product specification](../product-spec.md) — the rebuild target. Every
+  stated behavior in it binds; its acceptance section is the proof skeleton
+  of the completion contract, not its entirety
+- [The native GitHub MCP journey](../github-native-mcp.md) — the operator
+  journey the spec's GitHub connection section depends on
 - The product-shape decision records: ADRs 0001, 0003, 0005–0007, 0009,
   0010, 0013, 0019, 0020, 0026, 0027, 0029–0031, 0034, 0036 (renumbered or
   re-recorded as the new repository's initial accepted decisions; 0009's
   broker boundary and 0030's operator contract transfer, their unbuilt or
-  mechanical halves do not)
+  mechanical halves do not). Bootstrap re-points the spec's ADR links to the
+  re-recorded numbers so the transferred documents are self-contained.
 - [Skill compatibility](skill-compatibility.md) — the dated vendor matrix
 - The maintainer agent definition, including the `north-star-review` and
   `direction-audit` skills
@@ -56,6 +60,9 @@ is prescribed:
 
 - One driver seam per harness (the only genuinely polymorphic boundary);
   harness-specific protocols stay inside their harness package.
+- The turn dispatcher's typed submission and event seam stays
+  channel-agnostic: the CLI is one consumer of it, not its owner, so a later
+  channel-product port does not require a second extraction.
 - One managed MCP boundary; native harness tools stay unmanaged.
 - Validation and bounding before any workspace mutation; generated files
   visibly owned; atomic owner-only durable state.

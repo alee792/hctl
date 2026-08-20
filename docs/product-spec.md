@@ -220,6 +220,16 @@ setup fails closed. Codex project trust remains the user's native decision;
 apply never edits global harness configuration or trusts a project on the
 user's behalf.
 
+`hctl validate AGENT --harness <claude|codex>` runs the same validation as
+apply without writing anything: it loads and bounds the project, checks
+tool contracts and, when a manifest is present, the pinned closure, and
+exits nonzero on failure. Diagnostics are bounded prose by default;
+`--format json` emits one machine-readable diagnostic per line carrying a
+stable identifier, the authored path, and the exact rule violated, and
+apply's own failures carry the same identifiers. Prose stays primary for
+people; the stable identifiers exist because a drafting harness or an
+improvement loop correcting its own files cannot reliably parse prose.
+
 ## Agent manifest
 
 An optional bounded `manifest.json` at the agent root pins the runtime
@@ -473,6 +483,9 @@ credential-free tests (fake harness processes; no live model calls) prove:
     or source fingerprint fails closed naming the exact pin; writing the
     manifest for an unchanged closure is byte-identical; and an absent
     manifest changes nothing.
+12. Validate reports the same failures as apply without mutating anything,
+    and its structured diagnostics carry stable identifiers and authored
+    paths that match apply's own failures.
 
 ## Explicit non-goals
 

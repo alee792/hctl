@@ -20,7 +20,11 @@ accumulated context from every future session.
 
 ## What transfers to the new repository
 
-Founding documents, copied at creation and owned there afterward:
+Founding documents, copied at creation and owned there afterward. The
+north star, vision, and product specification are already Tenon-named and
+copy verbatim; the remainder are adapted as they are re-recorded. The
+[bootstrap handoff](bootstrap-handoff.md) is the executable version of
+this list:
 
 - [North Star & Tenets](../north-star.md)
 - [Vision](../vision.md)

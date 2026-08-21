@@ -1,12 +1,10 @@
 # Product specification
 
-- Status: the core product's shape — the contract a clean-room implementation
-  is built to meet. The current repository is the prototype reference
-  implementation; see the [rebuild charter](workbench/rebuild.md).
+- Status: the product contract. The `hctl` prototype (alee792/hctl) is the
+  frozen, read-only reference implementation.
 - Scope: the core product. The conversational channel runtime is a second
-  product specified in [channel-spec.md](channel-spec.md).
-- Working name: `hctl` remains this prototype's binary. The chosen product
-  name is Tenon (binary `tenon`); the rebuild repository carries it.
+  product, specified in the prototype repository.
+- Product: Tenon; the binary is `tenon`.
 - Initial harnesses: Claude Code and Codex CLI.
 
 ## User and job
@@ -46,7 +44,7 @@ portability is proven.
 6. Policy applies only at managed-tool and durable-state boundaries.
 7. Interactive users remain in the native harness interface.
 8. Unsupported harness behavior is reported without rewriting valid authored
-   source or pretending that hctl enforces it.
+   source or pretending that tenon enforces it.
 9. Conventional files register behavior without a second inventory.
 10. Author-facing language stays concrete; runtime terminology remains
     internal.
@@ -84,7 +82,7 @@ my-agent/
   connections/             # one <name>.md per standalone MCP connection
   schedules/               # nested Markdown cron tasks
   harnesses/               # literal harness-specific native files
-  channels/                # channel product; see channel-spec.md
+  channels/                # second product; specified separately
 ```
 
 **Instructions.** An agent root is proven one of two ways: by a present
@@ -108,14 +106,14 @@ regular-file resources. Adding or removing a directory updates the compiled
 project without registration. Resources copy byte-for-byte with executable
 intent preserved. Portable fields validate to the standard's rules;
 recognized vendor fields are preserved unchanged with a warning when the
-selected harness does not document honoring them — hctl never translates,
+selected harness does not document honoring them — tenon never translates,
 strips, or enforces them. The dated per-field behavior matrix is
 [skill compatibility](workbench/skill-compatibility.md).
 
 **Plugins.** An [Agent Plugin v1](https://agent-plugins.org/specification) is
 one complete publisher-authored package. A consumer vendors the reviewed
 directory intact beneath `plugins/<storage-name>/`; review, pinning, and
-provenance belong to the author's version control. Hctl records no dependency
+provenance belong to the author's version control. Tenon records no dependency
 lock and performs no network acquisition. Each plugin requires a bounded
 `plugin.json` targeting the canonical v1.0.0 schema, validated locally
 without fetching. Skills import only from the plugin's fixed `skills/`
@@ -127,9 +125,9 @@ An accepted plugin may carry a bounded `mcp.json` (canonical v1.0.0 MCP
 schema; `stdio` and `streamable-http` supported, SSE warned and skipped).
 Accepted servers are emitted as native project MCP configuration — the
 harness owns startup, approval, transport, authentication, and runtime
-behavior; hctl does not proxy, supervise, or audit plugin MCP calls. `managed`
+behavior; tenon does not proxy, supervise, or audit plugin MCP calls. `managed`
 is reserved; exact name collisions are skipped with a warning. Plugin-relative
-commands stay inside the real plugin tree; hctl expands exactly
+commands stay inside the real plugin tree; tenon expands exactly
 `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` once and provides an owner-only
 persistent data directory per agent and plugin. Remote URLs are absolute
 HTTPS (loopback excepted), without user info or fragments; headers are
@@ -170,14 +168,14 @@ approval, authentication, discovery, calls, and effects. Name collisions with
 Authors need not hand-edit native configuration:
 
 ```text
-hctl connection add AGENT NAME --package PACKAGE --capability CAPABILITY [--context TEXT]
-hctl connection add AGENT NAME --url HTTPS_URL [--context TEXT]
-hctl connection status AGENT [NAME]
-hctl connection remove AGENT NAME
+tenon connection add AGENT NAME --package PACKAGE --capability CAPABILITY [--context TEXT]
+tenon connection add AGENT NAME --url HTTPS_URL [--context TEXT]
+tenon connection status AGENT [NAME]
+tenon connection remove AGENT NAME
 ```
 
 Commands take the exact positional agent root, never search ancestors or
-choose a harness, and finish by directing the author to run `hctl apply` for
+choose a harness, and finish by directing the author to run `tenon apply` for
 each intended workspace. There is no update command; the Markdown is ordinary
 versioned source.
 
@@ -186,10 +184,10 @@ The GitHub connection is the canonical installed target: the official
 emitted into native Claude and Codex configuration with server name `github`
 and rejection on collision. Authentication is deliberately unmanaged: the
 operator injects `GITHUB_PERSONAL_ACCESS_TOKEN` into the harness launch
-environment, the official server reads it directly, and hctl never writes it
+environment, the official server reads it directly, and tenon never writes it
 into source, generated files, state, staging, logs, or evidence. **The
 harness, model-accessible execution tools, and processes inheriting that
-environment may read or transmit the PAT; hctl does not claim otherwise, and
+environment may read or transmit the PAT; tenon does not claim otherwise, and
 a read-only workspace does not constrain GitHub effects.** Fine-grained
 scope, short expiration, native-harness trust, and operator judgment are the
 security boundary. The operator journey, lifecycle, and troubleshooting live
@@ -204,11 +202,11 @@ starts no clock. See headless operation below for execution.
 **Harness-specific files.** `harnesses/claude/.claude/` and
 `harnesses/codex/.codex/` carry intentionally nonportable native project
 files, copied byte-for-byte to only the selected harness at the same
-workspace-relative paths. Hctl does not parse, merge, or validate their
-semantics. Hctl-owned destinations remain reserved (Claude `.claude/skills/`
+workspace-relative paths. Tenon does not parse, merge, or validate their
+semantics. Tenon-owned destinations remain reserved (Claude `.claude/skills/`
 and `.claude/agents/`; Codex `.codex/config.toml` and `.codex/agents/`),
 including case-folded aliases. Authors must not place credentials in these
-files; hctl does not claim reliable secret detection.
+files; tenon does not claim reliable secret detection.
 
 **Bounds.** Authored source is bounded by implementation-owned safety
 ceilings rather than ordinary-use quotas; exceeding a ceiling fails before
@@ -235,7 +233,7 @@ the agent project.
 ## Apply and handoff
 
 ```sh
-hctl apply AGENT --workspace WORKSPACE --harness <claude|codex>
+tenon apply AGENT --workspace WORKSPACE --harness <claude|codex>
 ```
 
 Apply validates the authored project, the target harness, tool definitions,
@@ -246,14 +244,14 @@ Claude receives `CLAUDE.md`, `.mcp.json`, `.claude/skills/`, and
 `.claude/agents/`; Codex receives `AGENTS.md`, `.codex/config.toml`,
 `.agents/skills/`, and `.codex/agents/`. Generated files are visibly
 tool-owned and disposable. Apply refuses to overwrite hand-authored native
-files or any hctl-owned file modified since the previous apply, and
+files or any tenon-owned file modified since the previous apply, and
 reapplying identical source is deterministic. All authored inputs join one
 source fingerprint recorded with the apply, so stale or edited generated
 setup fails closed. Codex project trust remains the user's native decision;
 apply never edits global harness configuration or trusts a project on the
 user's behalf.
 
-`hctl validate AGENT --harness <claude|codex>` runs the same validation as
+`tenon validate AGENT --harness <claude|codex>` runs the same validation as
 apply without writing anything: it loads and bounds the project, checks
 tool contracts and, when a manifest is present, the pinned closure, and
 exits nonzero on failure. Diagnostics are bounded prose by default, with a
@@ -281,46 +279,46 @@ fingerprint matches the directory also proves the agent root, so a
 generated candidate need not carry instructions it does not want.
 
 Its closed schema records a schema version, the agent name, the expected
-source fingerprint, the hctl version, and — per selected harness — the
+source fingerprint, the tenon version, and — per selected harness — the
 harness executable version, a model identifier, integration package
 identities (package id plus manifest SHA-256), and authored-tool runtime
 versions (Deno, uv, Go) where the project uses them.
 
-`hctl manifest write AGENT --harness ...` records the currently resolved
+`tenon manifest write AGENT --harness ...` records the currently resolved
 closure to a caller-chosen path; the result is an ordinary versioned file
 and may be edited directly. When a manifest is supplied, validate, apply,
-and every hctl-owned process open verify the resolved closure against it
+and every tenon-owned process open verify the resolved closure against it
 and fail closed naming the exact drifted pin; when none is supplied,
 behavior is unchanged. The model pin is
 emitted through the selected harness's documented configuration and
-recorded in provenance; the harness owns model selection, and hctl does not
+recorded in provenance; the harness owns model selection, and tenon does not
 claim to verify which model actually served a turn.
 
 Every apply record and dispatch lifecycle event carries the source
 fingerprint and, when present, the manifest identity, so observation made
-outside hctl — transcripts, evaluations, selection among revisions — can be
-joined to the exact configuration that produced it. Hctl retains none of
+outside tenon — transcripts, evaluations, selection among revisions — can be
+joined to the exact configuration that produced it. Tenon retains none of
 that observation: no transcripts, no evaluations, no scores. An improvement
 loop revising the agent's files is an author like any other: its revision
 is validated for form before anything runs, and its merit is judged outside
-hctl. The friction inbox remains a supplementary human-facing channel, not
+tenon. The friction inbox remains a supplementary human-facing channel, not
 the loop's signal path.
 
-The applied agent is not told how it was set up. Hctl never renders the
+The applied agent is not told how it was set up. Tenon never renders the
 manifest, its pins, model identity, or provenance into generated
 instructions or any other model-facing content: setup metadata exists for
 the operator and the loop, not for the running agent. Whether a harness's
 native tools can read files an operator leaves on disk remains native
-behavior, and hctl does not claim to blind a harness to its environment.
+behavior, and tenon does not claim to blind a harness to its environment.
 
 A pin is an axis of variation, not an editable surface: a loop may try a
 different model or harness version by changing a pin, while the components
 it can edit remain the authored files. Lineage and population management
 belong to version control: a candidate is a source revision crossed with a
-supplied manifest, each versioned wherever its owner keeps it, and hctl
+supplied manifest, each versioned wherever its owner keeps it, and tenon
 neither records lineage nor selects among candidates. How variants are
 isolated — worktrees, containers, or sandboxes — is the operator's
-infrastructure choice; hctl requires only that each variant is a directory
+infrastructure choice; tenon requires only that each variant is a directory
 that applies deterministically.
 
 ## Managed tool boundary
@@ -334,7 +332,7 @@ protocol code. The boundary is additive: it does not disable, authorize,
 observe, or retry harness-native tools.
 
 Codex treats the generated managed server as required and delegates its tool
-approval to hctl, so an authorized managed call does not draw a second
+approval to tenon, so an authorized managed call does not draw a second
 harness prompt; every other generated MCP entry — plugin, connection, or
 installed — keeps native per-call prompt approval. This exemption applies
 only to the managed server and does not affect native or unrelated MCP
@@ -358,12 +356,12 @@ broker code is scaffolded until a concrete operation is selected.
 
 Machine-installed third-party integrations use a metadata-first package
 contract distinct from vendored `plugins/`. A bounded schema-version-1
-manifest carries identity, provenance, an hctl compatibility range, exact
+manifest carries identity, provenance, a tenon compatibility range, exact
 platform artifacts (size and SHA-256 pinned), the expected executable
-identity, and closed versioned capability declarations. Hctl validates
+identity, and closed versioned capability declarations. Tenon validates
 metadata without opening artifacts, fetching URLs, or executing package code.
 
-`hctl integration install SOURCE --trust operator` is the only trust and
+`tenon integration install SOURCE --trust operator` is the only trust and
 installation journey: a local directory or archive containing
 `integration.json`, or artifacts fetched only from exact pinned HTTPS URLs
 without redirects. There is no registry, package script, dependency
@@ -378,9 +376,9 @@ Recognized capabilities are closed schemas. The core implements `native-mcp`
 v1: a stable native server name, executable, bounded literal launch data,
 required ambient environment names without values, and supported harness
 targets — consumed by installed connections. `channel-adapter` v1 belongs to
-the channel product ([channel-spec.md](channel-spec.md)): a core rebuild does
+the channel product, specified in the prototype repository: the core does
 not implement its recognition and it is not acceptance-gating; it is
-reintroduced only if the channel product is later ported. The native harness owns
+reintroduced only if the channel product is ported onto this core. The native harness owns
 process lifecycle, credentials, approvals, calls, and effects for everything
 a package launches. Required ambient names are diagnostic metadata, not a
 credential channel; resolved values never enter generated files, package
@@ -390,7 +388,7 @@ state, staging, or evidence.
 
 ```sh
 printf '%s\n' '{"input_id":"x-1","text":"..."}' \
-  | hctl run AGENT --workspace WS --harness <claude|codex> --input jsonl
+  | tenon run AGENT --workspace WS --harness <claude|codex> --input jsonl
 ```
 
 The turn dispatcher accepts bounded JSONL input, each line carrying a
@@ -404,9 +402,9 @@ Dispatch state is one owner-only file per workspace.
 Schedules execute two ways, both requiring current generated setup:
 
 ```sh
-hctl schedule trigger AGENT NAME --workspace WS --harness codex \
+tenon schedule trigger AGENT NAME --workspace WS --harness codex \
   --input-id OCCURRENCE_ID --turn-timeout 90s --timeout 2m
-hctl schedule run AGENT --workspace WS --harness codex
+tenon schedule run AGENT --workspace WS --harness codex
 ```
 
 `trigger` dispatches one occurrence under a caller-owned stable ID: each
@@ -422,24 +420,24 @@ daemon, missed-run replay, or hosted delivery runtime.
 
 ## Staged agent filesystems
 
-`hctl stage AGENT --harness <claude|codex> --output DIR` prepares one
+`tenon stage AGENT --harness <claude|codex> --output DIR` prepares one
 complete runnable filesystem tree at canonical paths for an existing OCI
 builder:
 
 ```dockerfile
-FROM <hctl harness image> AS build
+FROM <tenon harness image> AS build
 COPY . /agent
-RUN hctl stage /agent --harness codex --output /out/agent
+RUN tenon stage /agent --harness codex --output /out/agent
 
 FROM DOCUMENTED_COMPATIBLE_BASE
 COPY --from=build /out/agent/opt/ /opt/
 COPY --from=build --chown=65532:65532 /out/agent/workspace/ /workspace/
-COPY --from=build --chown=65532:65532 /out/agent/home/hctl/ /home/hctl/
+COPY --from=build --chown=65532:65532 /out/agent/home/tenon/ /home/tenon/
 USER 65532:65532
-ENTRYPOINT ["/opt/hctl/bin/agent-entrypoint"]
+ENTRYPOINT ["/opt/tenon/bin/agent-entrypoint"]
 ```
 
-The staged tree carries hctl, the selected harness, immutable agent source,
+The staged tree carries tenon, the selected harness, immutable agent source,
 the generated integration and apply record, an entrypoint, an artifact
 manifest, and only the execution closure the agent's tools actually need —
 no build toolchains, caches, credentials, login state, trust decisions, or
@@ -447,18 +445,18 @@ conversation state. Staging is deterministic for identical pinned inputs,
 verifies that preparation did not mutate authored source, and publishes with
 one rename only after the manifest is complete. The entrypoint verifies
 runtime identity, generated integration, and source fingerprint before a
-turn. Hctl does not construct OCI layers, contact registries, publish, sign,
+turn. Tenon does not construct OCI layers, contact registries, publish, sign,
 deploy, or operate images, and publishing a harness image requires current
 permission to redistribute that harness.
 
 ## Installation and distribution
 
 The first supported platform is `darwin-arm64`. The exact `vX.Y.Z` tag names
-`hctl_X.Y.Z_darwin_arm64.tar.gz` (one executable at the archive root) and its
+`tenon_X.Y.Z_darwin_arm64.tar.gz` (one executable at the archive root) and its
 `SHA256SUMS` manifest; the user verifies, extracts to a stable `PATH`
-location, and runs `hctl apply`. Generated MCP configuration records the
+location, and runs `tenon apply`. Generated MCP configuration records the
 resolved absolute executable path, so moving the binary requires reapplying.
-`go install` is not a supported end-user journey, and there is no `hctl
+`go install` is not a supported end-user journey, and there is no `tenon
 package` command: agent source and lockfiles are inputs to `apply`, while
 generated hosts and dependency environments remain disposable
 workspace-local caches.
@@ -491,10 +489,10 @@ Recorded once here; none is scaffolded until its trigger arrives:
 - Process failure is distinct from a completed or failed model turn.
 - An uncertain external effect is never described as exactly-once or retried
   without a target idempotency contract.
-- Hctl-owned diagnostics never expose credentials, private prompts, or raw
+- Tenon-owned diagnostics never expose credentials, private prompts, or raw
   process output; native harness and external-server diagnostics remain
   outside that claim.
-- Hctl never claims to enforce instructions, inspect native effects, sandbox
+- Tenon never claims to enforce instructions, inspect native effects, sandbox
   authored code, or make model behavior safe from outside the harness.
 
 ## Acceptance
@@ -539,7 +537,7 @@ credential-free tests (fake harness processes; no live model calls) prove:
    only after the manifest is complete.
 10. Managed audit output remains content-free.
 11. A supplied agent manifest is verified before apply and before every
-    hctl-owned process open: a drifted harness version, package identity,
+    tenon-owned process open: a drifted harness version, package identity,
     or source fingerprint fails closed naming the exact pin; writing the
     manifest for an unchanged closure is byte-identical; an unsupplied
     manifest changes nothing; and no pin, fingerprint, or provenance value
@@ -560,8 +558,8 @@ credential-free tests (fake harness processes; no live model calls) prove:
   image operation
 - Governance claims over native harness tools
 - Evaluations, scoring, transcript retention, or selection among agent
-  revisions — hctl is an improvement loop's substrate, never the loop
+  revisions — tenon is an improvement loop's substrate, never the loop
 - Hosted secret managers and model-visible secret-bearing managed operations
 - GitHub OAuth or GitHub App enrollment, a managed MCP proxy, credential
-  brokering, or per-call hctl authorization
+  brokering, or per-call tenon authorization
 - Automatic or unreviewed promotion of agent-authored improvements

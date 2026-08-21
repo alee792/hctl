@@ -7,18 +7,18 @@ or deleted, and overruled by this file wherever they disagree.
 
 ## North star
 
-If any of these stops being true, the product is no longer hctl:
+If any of these stops being true, the product is no longer tenon:
 
 1. **An agent is a legible document.** A folder of plain-language files a
    person can read, review, and diff — never a second inventory or a
    surface the author must mentally model but cannot read.
-2. **The harness owns intelligence; hctl owns the crossing.** Hctl compiles
+2. **The harness owns intelligence; tenon owns the crossing.** Tenon compiles
    one portable source of truth into native integration, proves it valid
    before it touches a workspace, and detects drift afterward. It never
    absorbs model loops, context, approvals, interactive UX, or runtime
    supervision.
 3. **Nothing mutates a workspace unvalidated, and trust stays with the
-   author.** Hctl proves contracts, never behavior, and never claims
+   author.** Tenon proves contracts, never behavior, and never claims
    enforcement or safety it cannot deliver.
 
 **The measure.** Empty directory to a working agent inside the author's

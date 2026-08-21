@@ -1,6 +1,10 @@
 # hctl
 
-`hctl` is a temporary, functional working name — not a product name.
+The product is named **Tenon** (binary `tenon`) and is being rebuilt fresh
+against the [product specification](docs/product-spec.md); see the
+[rebuild charter](docs/workbench/rebuild.md). `hctl` remains this
+prototype's binary and working name, and this repository is the frozen
+reference implementation.
 
 hctl makes an agent something you can read: a folder of plain-language
 files — instructions you review like a document, skills you compose by

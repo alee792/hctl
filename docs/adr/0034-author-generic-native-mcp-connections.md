@@ -134,9 +134,12 @@ hctl connection remove AGENT NAME
 ```
 
 Every command requires the exact positional agent root. A caller already in
-that root uses `.` explicitly. The required `instructions.md` proves the
-selected directory is an agent project. Commands never search ancestors,
-infer a parent `agents/` directory, or select a workspace or harness.
+that root uses `.` explicitly. An `instructions.md`, or a supplied manifest
+whose expected fingerprint matches the directory, proves the selected
+directory is an agent project (amended by the instructions-optional
+decision; see the product specification's Instructions section). Commands
+never search ancestors, infer a parent `agents/` directory, or select a
+workspace or harness.
 
 `add` validates the root, name, selected union, optional context, directory,
 and collision before atomically creating `connections/NAME.md`. It never

@@ -25,8 +25,9 @@ Build from source (`go install` is not a supported install path — see
 go build -o hctl ./cmd/hctl
 ```
 
-An agent project is a directory marked by an `instructions.md` file (or,
-for generated agents, an agent manifest). Optional
+An agent project is a directory marked by an `instructions.md` file
+(generated agents may instead be proven by a supplied agent manifest).
+Optional
 skills, tools, and other components are discovered by convention. A minimal
 one looks like this:
 

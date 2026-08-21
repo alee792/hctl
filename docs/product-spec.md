@@ -76,7 +76,7 @@ lowercase hyphenated words. The full component set:
 
 ```text
 my-agent/
-  instructions.md          # root marker; optional when a manifest is present
+  instructions.md          # optional; see the root rule below
   skills/                  # Agent Skills directories
   plugins/                 # complete publisher-authored Agent Plugin packages
   tools/                   # one typed function per TS/Python file or Go dir
@@ -87,9 +87,10 @@ my-agent/
   channels/                # channel product; see channel-spec.md
 ```
 
-**Instructions.** An agent root is proven by the presence of
-`instructions.md`, an agent manifest, or both; a directory carrying
-neither is not an agent project. When present, `instructions.md` starts
+**Instructions.** An agent root is proven one of two ways: by a present
+`instructions.md`, or by a supplied agent manifest whose expected source
+fingerprint matches the directory. A directory with neither proof is not
+an agent project. When present, `instructions.md` starts
 with YAML frontmatter carrying one plain `description` (and an optional
 Boolean `friction-notes` opting into the friction inbox below), followed
 by a non-empty Markdown body; generated always-on instructions contain the
@@ -224,7 +225,7 @@ workspace mutation:
 | Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration at most 8 MiB |
 | Selected harness-specific files | 1,024 | 1 MiB each and 8 MiB aggregate |
 | Standalone MCP connections | 128 | 8 KiB per source; context at most 1,024 characters |
-| Agent manifest | One optional file | 32 KiB |
+| Agent manifest | One optional file, supplied at application | 32 KiB |
 
 Everywhere: authored entries are bounded regular files and real directories
 with valid UTF-8 relative paths; symlinks are never followed and are rejected
@@ -266,13 +267,18 @@ the identifiers, and machine readability — not the flag or the framing.
 
 ## Agent manifest
 
-An optional bounded agent manifest at the agent root (`manifest.json` in
-the reference rendering) pins the runtime closure that the directory alone
-cannot express. Its responsibility, not its encoding, is the contract: it
+An optional bounded agent manifest (`manifest.json` in the reference
+rendering) pins the runtime closure that the directory alone cannot
+express. It belongs to application, not to the definition: the same source
+directory applies under different manifests — one commit crossed with many
+pin sets — without the definition changing. The manifest is therefore
+supplied to validate, apply, and run rather than stored inside the agent
+source, and it lives wherever its operator or loop versions it. Its
+responsibility, not its encoding or location, is the contract: it
 identifies and pins; it never lists. The directory remains the sole
-registry of the agent's components, and the manifest carries no component
-inventory. A present manifest also marks the agent root, so a generated
-candidate need not carry instructions it does not want.
+registry of the agent's components, and a supplied manifest whose expected
+fingerprint matches the directory also proves the agent root, so a
+generated candidate need not carry instructions it does not want.
 
 Its closed schema records a schema version, the agent name, the expected
 source fingerprint, the hctl version, and — per selected harness — the
@@ -281,10 +287,11 @@ identities (package id plus manifest SHA-256), and authored-tool runtime
 versions (Deno, uv, Go) where the project uses them.
 
 `hctl manifest write AGENT --harness ...` records the currently resolved
-closure; the file is then ordinary versioned source and may be edited
-directly. When the manifest is present, apply and every hctl-owned process
-open verify the resolved closure against it and fail closed naming the
-exact drifted pin; when absent, behavior is unchanged. The model pin is
+closure to a caller-chosen path; the result is an ordinary versioned file
+and may be edited directly. When a manifest is supplied, validate, apply,
+and every hctl-owned process open verify the resolved closure against it
+and fail closed naming the exact drifted pin; when none is supplied,
+behavior is unchanged. The model pin is
 emitted through the selected harness's documented configuration and
 recorded in provenance; the harness owns model selection, and hctl does not
 claim to verify which model actually served a turn.
@@ -299,14 +306,22 @@ is validated for form before anything runs, and its merit is judged outside
 hctl. The friction inbox remains a supplementary human-facing channel, not
 the loop's signal path.
 
+The applied agent is not told how it was set up. Hctl never renders the
+manifest, its pins, model identity, or provenance into generated
+instructions or any other model-facing content: setup metadata exists for
+the operator and the loop, not for the running agent. Whether a harness's
+native tools can read files an operator leaves on disk remains native
+behavior, and hctl does not claim to blind a harness to its environment.
+
 A pin is an axis of variation, not an editable surface: a loop may try a
 different model or harness version by changing a pin, while the components
 it can edit remain the authored files. Lineage and population management
-belong to version control: a candidate revision is a branch or commit, its
-manifest identifies it, and hctl neither records lineage nor selects among
-revisions. How variants are isolated — worktrees, containers, or sandboxes
-— is the operator's infrastructure choice; hctl requires only that each
-variant is a directory that applies deterministically.
+belong to version control: a candidate is a source revision crossed with a
+supplied manifest, each versioned wherever its owner keeps it, and hctl
+neither records lineage nor selects among candidates. How variants are
+isolated — worktrees, containers, or sandboxes — is the operator's
+infrastructure choice; hctl requires only that each variant is a directory
+that applies deterministically.
 
 ## Managed tool boundary
 
@@ -490,9 +505,10 @@ credential-free tests (fake harness processes; no live model calls) prove:
 
 1. One authored project compiles deterministically for both harnesses, and
    apply produces native, discoverable files while refusing conflicts and
-   modified-file overwrites; a directory carrying neither instructions nor
-   a manifest is refused as not an agent project, and an instructions-free
-   project generates an empty always-on surface rather than failing.
+   modified-file overwrites; a directory proven by neither instructions
+   nor a supplied matching manifest is refused as not an agent project,
+   and an instructions-free project generates an empty always-on surface
+   rather than failing.
 2. Both generated integrations expose the same managed MCP tool surface, and
    a mixed TypeScript/Python/Go project is prepared once per apply with one
    host process per language.
@@ -522,11 +538,12 @@ credential-free tests (fake harness processes; no live model calls) prove:
    preparation never mutates authored source, and publication is one rename
    only after the manifest is complete.
 10. Managed audit output remains content-free.
-11. A present agent manifest is verified before apply and before every
+11. A supplied agent manifest is verified before apply and before every
     hctl-owned process open: a drifted harness version, package identity,
     or source fingerprint fails closed naming the exact pin; writing the
-    manifest for an unchanged closure is byte-identical; and an absent
-    manifest changes nothing.
+    manifest for an unchanged closure is byte-identical; an unsupplied
+    manifest changes nothing; and no pin, fingerprint, or provenance value
+    appears in model-facing generated content.
 12. Validate reports the same failures as apply without mutating anything,
     and its structured diagnostics carry stable identifiers and authored
     paths that match apply's own failures.

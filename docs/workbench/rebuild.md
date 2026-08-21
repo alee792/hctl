@@ -66,6 +66,9 @@ is prescribed:
 - One managed MCP boundary; native harness tools stay unmanaged.
 - Validation and bounding before any workspace mutation; generated files
   visibly owned; atomic owner-only durable state.
+- Diagnostics are a stable surface, not incidental prose: validation
+  failures carry stable identifiers and authored paths, legible to people
+  and parseable by drafting harnesses and improvement loops.
 - External integrations depend inward through wire contracts and run as
   separate processes; no vendor SDK in core.
 - Packages named by concrete responsibility; no core, common, util, or

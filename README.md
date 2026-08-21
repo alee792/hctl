@@ -8,6 +8,14 @@ dropping in a directory — validated, versioned, and applied to the capable
 native harness you already trust, Claude Code or Codex, through thin vendor
 adapters and without replacing their model loop or interface.
 
+The same folder has another author with equal standing: an improvement
+loop revising an agent's files gets validation before anything runs, a
+pinned reproducible runtime, and attribution of every run to its exact
+configuration. This README serves the five-minute human journey by
+deliberate choice; the loop's mechanics — the agent manifest and
+machine-readable validation — live in the
+[product specification](docs/product-spec.md).
+
 ## Five-minute quickstart
 
 Build from source (`go install` is not a supported install path — see
@@ -17,7 +25,9 @@ Build from source (`go install` is not a supported install path — see
 go build -o hctl ./cmd/hctl
 ```
 
-An agent project is a directory with an `instructions.md` file. Optional
+An agent project is a directory marked by an `instructions.md` file
+(generated agents may instead be proven by a supplied agent manifest).
+Optional
 skills, tools, and other components are discovered by convention. A minimal
 one looks like this:
 

@@ -22,8 +22,15 @@ If any of these stops being true, the product is no longer hctl:
    enforcement or safety it cannot deliver.
 
 **The measure.** Empty directory to a working agent inside the author's
-harness in five minutes, and the same folder later runs headless,
-scheduled, or staged without edits.
+harness in five minutes; the same folder later runs headless, scheduled,
+or staged without edits; and a revision applies, runs, and attributes to
+its exact configuration without human hands
+([ADR 0037](adr/0037-add-the-revision-leg-to-the-measure.md)).
+
+**The authors.** The artifact has two — a person, and an improvement loop
+revising an agent's files — and neither outranks the other: a decision
+favors one only as an evaluated, recorded tradeoff, never by default
+(ADR 0037).
 
 ## Tenets
 

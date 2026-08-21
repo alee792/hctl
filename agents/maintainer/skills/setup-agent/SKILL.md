@@ -11,8 +11,9 @@ user wants a standalone agent.
 Find `hctl` on `PATH`; in an hctl source checkout, an existing executable
 `./hctl` is also acceptable. Do not download software or build hctl from source
 unless the user asks. Verify the chosen harness executable is on `PATH`, the
-agent directory contains `instructions.md`, and the workspace exists or the
-user has authorized creating it.
+agent directory is a valid agent project — proven by `instructions.md`, a
+supplied manifest matching its fingerprint, or both — and the workspace
+exists or the user has authorized creating it.
 
 Before changing files, show the resolved source, workspace, harness, and exact
 command. If the user already requested setup with those choices, proceed

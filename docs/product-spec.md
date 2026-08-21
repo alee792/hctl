@@ -5,20 +5,27 @@
   implementation; see the [rebuild charter](workbench/rebuild.md).
 - Scope: the core product. The conversational channel runtime is a second
   product specified in [channel-spec.md](channel-spec.md).
-- Working CLI name: `hctl`; product naming is deferred and gates the rebuild
+- Working name: `hctl`; product naming is deferred and gates the rebuild
   repository.
 - Initial harnesses: Claude Code and Codex CLI.
 
 ## User and job
 
-The primary user is an agent author who understands basic files and
-directories and common AI concepts such as instructions, skills, and tools.
-They should not need to understand registration, manifests, or harness
-configuration. There is one author and one capability ladder: the author
-starts with instructions and composed skills, and may climb to typed tool
-functions — written directly or drafted by their harness. Validation proves a
-tool's contract, not its behavior; adopting one remains the author's
-deliberate, reviewable act, like any other code.
+Two consumers author the same artifact, and both receive balanced
+consideration: a person, and an improvement loop revising an agent's
+files. A decision may favor one when the tradeoff is evaluated and
+recorded — never by default. The human author understands basic files and
+directories and common AI concepts such as instructions, skills, and
+tools, and should not need to understand registration, manifests, or
+harness configuration. The improvement loop needs validation before
+anything runs, a reproducible pinned closure, and attribution of every run
+to its exact configuration; the agent manifest and machine-consumable
+validation serve it directly. There is one capability ladder, not an
+author/developer split: the author starts with instructions and composed
+skills, and may climb to typed tool functions — written directly or
+drafted by their harness. Validation proves a tool's contract, not its
+behavior; adopting one remains the author's deliberate, reviewable act,
+like any other code.
 
 Operating is a distinct role on the same artifact: credentials, integration
 packages, schedules, and staged filesystems carry their own explicit
@@ -44,6 +51,23 @@ portability is proven.
 10. Author-facing language stays concrete; runtime terminology remains
     internal.
 
+## What this specification binds
+
+This specification binds authored formats and functional responsibilities,
+not interface shape. Authored project formats are exact — the folder is
+the portable convention, and its filenames and schemas are the contract.
+The tool's own surface is specified by responsibility: validate before
+mutation, compile to native integration, pin and verify the runtime
+closure, attribute every run to its exact configuration, dispatch turns,
+and stage filesystems. The command names, flags, file encodings, and
+output framing shown below are the reference rendering of those
+responsibilities: a conforming implementation may expose them as a CLI, a
+library, or a protocol server, provided every responsibility and
+acceptance item holds and every machine-facing output stays stable and
+parseable. The reference rendering is deliberately file-and-process
+shaped because files, processes, and exit codes are the one interface a
+person, a harness, and an improvement loop already share.
+
 ## The authored project
 
 Authoring is filesystem-forward and convention-driven. A project is a
@@ -52,7 +76,7 @@ lowercase hyphenated words. The full component set:
 
 ```text
 my-agent/
-  instructions.md          # required
+  instructions.md          # optional; see the root rule below
   skills/                  # Agent Skills directories
   plugins/                 # complete publisher-authored Agent Plugin packages
   tools/                   # one typed function per TS/Python file or Go dir
@@ -63,10 +87,19 @@ my-agent/
   channels/                # channel product; see channel-spec.md
 ```
 
-**Instructions.** `instructions.md` starts with YAML frontmatter carrying one
-plain `description` (and an optional Boolean `friction-notes` opting into the
-friction inbox below), followed by a non-empty Markdown body. Generated
-always-on instructions contain the body, not the frontmatter.
+**Instructions.** An agent root is proven one of two ways: by a present
+`instructions.md`, or by a supplied agent manifest whose expected source
+fingerprint matches the directory. A directory with neither proof is not
+an agent project. When present, `instructions.md` starts
+with YAML frontmatter carrying one plain `description` (and an optional
+Boolean `friction-notes` opting into the friction inbox below), followed
+by a non-empty Markdown body; generated always-on instructions contain the
+body, not the frontmatter. When absent, the agent generates no always-on
+instructions — an empty system prompt is a legitimate candidate for an
+improvement loop to try — and the directory name still supplies the agent
+name. This is a recorded tradeoff under the balance rule: the file remains
+the human journey's front door, while its requiredness no longer
+forecloses part of the loop's search space.
 
 **Skills.** Each immediate directory under `skills/` is one skill following
 the open [Agent Skills specification](https://agentskills.io/specification):
@@ -183,7 +216,7 @@ workspace mutation:
 
 | Surface | Count ceiling | File and aggregate ceilings |
 | --- | ---: | --- |
-| Root instructions | One required file | 128 KiB |
+| Root instructions | One optional file (the root needs instructions or a manifest) | 128 KiB |
 | Root and imported skills | 256 aggregate | 1,024 files per skill; 8,192 files and 64 MiB across the set; `SKILL.md` 128 KiB; other resources 16 MiB each |
 | Authored tools | 128 | 1,024 source and dependency files; 1 MiB each and 64 MiB aggregate |
 | Immediate subagents | 128 | 128 KiB each and 16 MiB aggregate |
@@ -192,6 +225,7 @@ workspace mutation:
 | Accepted plugin MCP servers | 128 aggregate | Generated native MCP configuration at most 8 MiB |
 | Selected harness-specific files | 1,024 | 1 MiB each and 8 MiB aggregate |
 | Standalone MCP connections | 128 | 8 KiB per source; context at most 1,024 characters |
+| Agent manifest | One optional file, supplied at application | 32 KiB |
 
 Everywhere: authored entries are bounded regular files and real directories
 with valid UTF-8 relative paths; symlinks are never followed and are rejected
@@ -218,6 +252,76 @@ source fingerprint recorded with the apply, so stale or edited generated
 setup fails closed. Codex project trust remains the user's native decision;
 apply never edits global harness configuration or trusts a project on the
 user's behalf.
+
+`hctl validate AGENT --harness <claude|codex>` runs the same validation as
+apply without writing anything: it loads and bounds the project, checks
+tool contracts and, when a manifest is present, the pinned closure, and
+exits nonzero on failure. Diagnostics are bounded prose by default, with a
+machine-readable mode (one JSON diagnostic per line in the reference
+rendering) carrying a stable identifier, the authored path, and the exact
+rule violated; apply's own failures carry the same identifiers. Prose
+stays primary for people; the stable identifiers exist because a drafting
+harness or an improvement loop correcting its own files cannot reliably
+parse prose. The binding requirements are parity with apply, stability of
+the identifiers, and machine readability — not the flag or the framing.
+
+## Agent manifest
+
+An optional bounded agent manifest (`manifest.json` in the reference
+rendering) pins the runtime closure that the directory alone cannot
+express. It belongs to application, not to the definition: the same source
+directory applies under different manifests — one commit crossed with many
+pin sets — without the definition changing. The manifest is therefore
+supplied to validate, apply, and run rather than stored inside the agent
+source, and it lives wherever its operator or loop versions it. Its
+responsibility, not its encoding or location, is the contract: it
+identifies and pins; it never lists. The directory remains the sole
+registry of the agent's components, and a supplied manifest whose expected
+fingerprint matches the directory also proves the agent root, so a
+generated candidate need not carry instructions it does not want.
+
+Its closed schema records a schema version, the agent name, the expected
+source fingerprint, the hctl version, and — per selected harness — the
+harness executable version, a model identifier, integration package
+identities (package id plus manifest SHA-256), and authored-tool runtime
+versions (Deno, uv, Go) where the project uses them.
+
+`hctl manifest write AGENT --harness ...` records the currently resolved
+closure to a caller-chosen path; the result is an ordinary versioned file
+and may be edited directly. When a manifest is supplied, validate, apply,
+and every hctl-owned process open verify the resolved closure against it
+and fail closed naming the exact drifted pin; when none is supplied,
+behavior is unchanged. The model pin is
+emitted through the selected harness's documented configuration and
+recorded in provenance; the harness owns model selection, and hctl does not
+claim to verify which model actually served a turn.
+
+Every apply record and dispatch lifecycle event carries the source
+fingerprint and, when present, the manifest identity, so observation made
+outside hctl — transcripts, evaluations, selection among revisions — can be
+joined to the exact configuration that produced it. Hctl retains none of
+that observation: no transcripts, no evaluations, no scores. An improvement
+loop revising the agent's files is an author like any other: its revision
+is validated for form before anything runs, and its merit is judged outside
+hctl. The friction inbox remains a supplementary human-facing channel, not
+the loop's signal path.
+
+The applied agent is not told how it was set up. Hctl never renders the
+manifest, its pins, model identity, or provenance into generated
+instructions or any other model-facing content: setup metadata exists for
+the operator and the loop, not for the running agent. Whether a harness's
+native tools can read files an operator leaves on disk remains native
+behavior, and hctl does not claim to blind a harness to its environment.
+
+A pin is an axis of variation, not an editable surface: a loop may try a
+different model or harness version by changing a pin, while the components
+it can edit remain the authored files. Lineage and population management
+belong to version control: a candidate is a source revision crossed with a
+supplied manifest, each versioned wherever its owner keeps it, and hctl
+neither records lineage nor selects among candidates. How variants are
+isolated — worktrees, containers, or sandboxes — is the operator's
+infrastructure choice; hctl requires only that each variant is a directory
+that applies deterministically.
 
 ## Managed tool boundary
 
@@ -366,11 +470,16 @@ Recorded once here; none is scaffolded until its trigger arrives:
 - **Proposals** — inert, workspace-local, human-reviewed improvement
   records; a future capture tool must remain additive, never apply a diff,
   and never claim reliable secret detection. The prototype's ADR 0008
-  records the full convention.
+  records the full convention. Reviewed when an author or improvement loop
+  needs a mutation record richer than a branch; falsified — and deleted —
+  if version-control review proves sufficient.
 - **Secretless operation broker** — the boundary for the first secret-bearing
   managed operation ([ADR 0009](adr/0009-use-a-local-secretless-operation-broker.md)).
-- **Post-run summaries** — deferred until a harness exposes stable runtime
-  IDs; must reference native logs rather than duplicate transcripts.
+  Reviewed when that operation is selected; falsified if native harnesses
+  ship an equivalent credential boundary first.
+- **Post-run summaries** — must reference native logs rather than duplicate
+  transcripts. Reviewed when a harness exposes stable runtime IDs;
+  falsified if native logs remain sufficient on their own.
 
 ## Failure and safety behavior
 
@@ -396,7 +505,10 @@ credential-free tests (fake harness processes; no live model calls) prove:
 
 1. One authored project compiles deterministically for both harnesses, and
    apply produces native, discoverable files while refusing conflicts and
-   modified-file overwrites.
+   modified-file overwrites; a directory proven by neither instructions
+   nor a supplied matching manifest is refused as not an agent project,
+   and an instructions-free project generates an empty always-on surface
+   rather than failing.
 2. Both generated integrations expose the same managed MCP tool surface, and
    a mixed TypeScript/Python/Go project is prepared once per apply with one
    host process per language.
@@ -426,6 +538,15 @@ credential-free tests (fake harness processes; no live model calls) prove:
    preparation never mutates authored source, and publication is one rename
    only after the manifest is complete.
 10. Managed audit output remains content-free.
+11. A supplied agent manifest is verified before apply and before every
+    hctl-owned process open: a drifted harness version, package identity,
+    or source fingerprint fails closed naming the exact pin; writing the
+    manifest for an unchanged closure is byte-identical; an unsupplied
+    manifest changes nothing; and no pin, fingerprint, or provenance value
+    appears in model-facing generated content.
+12. Validate reports the same failures as apply without mutating anything,
+    and its structured diagnostics carry stable identifiers and authored
+    paths that match apply's own failures.
 
 ## Explicit non-goals
 
@@ -438,6 +559,8 @@ credential-free tests (fake harness processes; no live model calls) prove:
 - Building OCI manifests or layers, publishing or signing images, or hosted
   image operation
 - Governance claims over native harness tools
+- Evaluations, scoring, transcript retention, or selection among agent
+  revisions — hctl is an improvement loop's substrate, never the loop
 - Hosted secret managers and model-visible secret-bearing managed operations
 - GitHub OAuth or GitHub App enrollment, a managed MCP proxy, credential
   brokering, or per-call hctl authorization

@@ -5,8 +5,8 @@
   implementation; see the [rebuild charter](workbench/rebuild.md).
 - Scope: the core product. The conversational channel runtime is a second
   product specified in [channel-spec.md](channel-spec.md).
-- Working name: `hctl`; product naming is deferred and gates the rebuild
-  repository.
+- Working name: `hctl` remains this prototype's binary. The chosen product
+  name is Tenon (binary `tenon`); the rebuild repository carries it.
 - Initial harnesses: Claude Code and Codex CLI.
 
 ## User and job

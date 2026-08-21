@@ -78,9 +78,11 @@ is prescribed:
 
 1. **Shape review (human).** The distilled product spec and this charter are
    reviewed; corrections land here.
-2. **Name (human).** The rebuild repository carries the real product name.
-   This is the naming deadline the restructure asked for: no name, no
-   repository.
+2. **Name (human) — decided 2026-08-21: Tenon** (binary `tenon`). The
+   tenon is the joinery component that mates with a mortise to make two
+   different members one structure — the crossing, in wood, and a
+   component of a larger built thing, which is what this product is to a
+   harness. The rebuild repository carries the name.
 3. **Bootstrap.** New repository with the founding documents, check
    tooling, and the maintainer agent; no prototype code.
 4. **Build to acceptance.** The spec's acceptance list, in journey order:

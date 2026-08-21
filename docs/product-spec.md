@@ -76,7 +76,7 @@ lowercase hyphenated words. The full component set:
 
 ```text
 my-agent/
-  instructions.md          # required
+  instructions.md          # root marker; optional when a manifest is present
   skills/                  # Agent Skills directories
   plugins/                 # complete publisher-authored Agent Plugin packages
   tools/                   # one typed function per TS/Python file or Go dir
@@ -87,10 +87,18 @@ my-agent/
   channels/                # channel product; see channel-spec.md
 ```
 
-**Instructions.** `instructions.md` starts with YAML frontmatter carrying one
-plain `description` (and an optional Boolean `friction-notes` opting into the
-friction inbox below), followed by a non-empty Markdown body. Generated
-always-on instructions contain the body, not the frontmatter.
+**Instructions.** An agent root is proven by the presence of
+`instructions.md`, an agent manifest, or both; a directory carrying
+neither is not an agent project. When present, `instructions.md` starts
+with YAML frontmatter carrying one plain `description` (and an optional
+Boolean `friction-notes` opting into the friction inbox below), followed
+by a non-empty Markdown body; generated always-on instructions contain the
+body, not the frontmatter. When absent, the agent generates no always-on
+instructions — an empty system prompt is a legitimate candidate for an
+improvement loop to try — and the directory name still supplies the agent
+name. This is a recorded tradeoff under the balance rule: the file remains
+the human journey's front door, while its requiredness no longer
+forecloses part of the loop's search space.
 
 **Skills.** Each immediate directory under `skills/` is one skill following
 the open [Agent Skills specification](https://agentskills.io/specification):
@@ -207,7 +215,7 @@ workspace mutation:
 
 | Surface | Count ceiling | File and aggregate ceilings |
 | --- | ---: | --- |
-| Root instructions | One required file | 128 KiB |
+| Root instructions | One optional file (the root needs instructions or a manifest) | 128 KiB |
 | Root and imported skills | 256 aggregate | 1,024 files per skill; 8,192 files and 64 MiB across the set; `SKILL.md` 128 KiB; other resources 16 MiB each |
 | Authored tools | 128 | 1,024 source and dependency files; 1 MiB each and 64 MiB aggregate |
 | Immediate subagents | 128 | 128 KiB each and 16 MiB aggregate |
@@ -263,7 +271,8 @@ the reference rendering) pins the runtime closure that the directory alone
 cannot express. Its responsibility, not its encoding, is the contract: it
 identifies and pins; it never lists. The directory remains the sole
 registry of the agent's components, and the manifest carries no component
-inventory.
+inventory. A present manifest also marks the agent root, so a generated
+candidate need not carry instructions it does not want.
 
 Its closed schema records a schema version, the agent name, the expected
 source fingerprint, the hctl version, and — per selected harness — the
@@ -481,7 +490,9 @@ credential-free tests (fake harness processes; no live model calls) prove:
 
 1. One authored project compiles deterministically for both harnesses, and
    apply produces native, discoverable files while refusing conflicts and
-   modified-file overwrites.
+   modified-file overwrites; a directory carrying neither instructions nor
+   a manifest is refused as not an agent project, and an instructions-free
+   project generates an empty always-on surface rather than failing.
 2. Both generated integrations expose the same managed MCP tool surface, and
    a mixed TypeScript/Python/Go project is prepared once per apply with one
    host process per language.

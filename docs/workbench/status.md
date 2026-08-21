@@ -65,16 +65,17 @@ no live model calls) define completion. Live records:
 
 ## Gaps and blocked work
 
-- The [rebuild charter](rebuild.md) gates on two human decisions: shape
-  review and the product name. The restructure's D5 module split, D6, and D7
-  are superseded by it; the channel runtime stays here as the working second
-  product.
+- The [rebuild charter](rebuild.md)'s two human gates are satisfied: the
+  shape was reviewed and merged, and the product name is Tenon. Bootstrap
+  of the rebuild repository is the next step. The restructure's D5 module
+  split, D6, and D7 are superseded by the charter; the channel runtime
+  stays here as the working second product.
 - The agent manifest and `hctl validate` with stable diagnostics are
   specified for the rebuild target and are not implemented in this
   prototype.
 - Live Claude acceptance, the Claude harness image, and the live
   external-Discord pass remain blocked on explicit human authorization.
-- Deliberately unresolved: the product name; the secretless-broker backend
+- Deliberately unresolved: the secretless-broker backend
   ([ADR 0009](../adr/0009-use-a-local-secretless-operation-broker.md)
   selects the boundary, and no secret-bearing managed operation exists yet);
   and the authored-tool follow-ups in

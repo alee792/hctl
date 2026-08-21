@@ -20,7 +20,11 @@ accumulated context from every future session.
 
 ## What transfers to the new repository
 
-Founding documents, copied at creation and owned there afterward:
+Founding documents, copied at creation and owned there afterward. The
+north star, vision, and product specification are already Tenon-named and
+copy verbatim; the remainder are adapted as they are re-recorded. The
+[bootstrap handoff](bootstrap-handoff.md) is the executable version of
+this list:
 
 - [North Star & Tenets](../north-star.md)
 - [Vision](../vision.md)
@@ -78,9 +82,11 @@ is prescribed:
 
 1. **Shape review (human).** The distilled product spec and this charter are
    reviewed; corrections land here.
-2. **Name (human).** The rebuild repository carries the real product name.
-   This is the naming deadline the restructure asked for: no name, no
-   repository.
+2. **Name (human) — decided 2026-08-21: Tenon** (binary `tenon`). The
+   tenon is the joinery component that mates with a mortise to make two
+   different members one structure — the crossing, in wood, and a
+   component of a larger built thing, which is what this product is to a
+   harness. The rebuild repository carries the name.
 3. **Bootstrap.** New repository with the founding documents, check
    tooling, and the maintainer agent; no prototype code.
 4. **Build to acceptance.** The spec's acceptance list, in journey order:
